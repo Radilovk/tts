@@ -1,8 +1,10 @@
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Modality } from '@google/genai';
 import { ParsedChunk, GroundingSource } from '../types.ts';
+import { extractYouTubeTranscript } from './youtubeService.ts';
 
 const getAiClient = () => {
-  return new GoogleGenAI({ apiKey: process.env.API_KEY, vertexai: true });
+  // Използваме точния синтаксис, за да може bundler-ът да замести ключа успешно
+  return new GoogleGenAI({apiKey: process.env.API_KEY, vertexai: true});
 };
 
 export const translateText = async (text: string, model: string): Promise<string> => {
@@ -10,51 +12,83 @@ export const translateText = async (text: string, model: string): Promise<string
   try {
     const response = await ai.models.generateContent({
       model: model,
-      contents: `Translate the following text to Bulgarian. Only output the translated text, nothing else. Do not add quotes or explanations. Maintain any speaker labels (like "Speaker 1:", "John:") exactly as they are, just translate the names to Bulgarian if applicable.\n\nText to translate:\n${text}`,
+      contents: {
+        role: 'user',
+        parts: [
+          {
+            text: `Translate the following text to Bulgarian. Only output the translated text, nothing else. Do not add quotes or explanations. Maintain any speaker labels (like "Speaker 1:", "John:") exactly as they are, just translate the names to Bulgarian if applicable.\n\nText to translate:\n${text}`
+          }
+        ]
+      }
     });
     return response.text || text;
-  } catch (error) {
+  } catch (error: any) {
     console.error("Translation error:", error);
-    throw new Error("Неуспешен превод на текста.");
+    throw new Error(`Грешка при превод: ${error.message || error}`);
   }
 };
 
 export const processYouTubeUrl = async (url: string, model: string): Promise<{text: string, sources: GroundingSource[]}> => {
   const ai = getAiClient();
-  const prompt = `Моля, извлечи транскрипцията или детайлно резюме на диалога от това YouTube видео: ${url}.
+  
+  // 1. Try to get exact transcript via external API
+  const rawTranscript = await extractYouTubeTranscript(url);
+  
+  let promptText = "";
+  let useSearch = false;
+
+  if (rawTranscript) {
+    promptText = `Ето транскрипция от видео. Моля, преведи я на български език. 
+Ако текстът изглежда като диалог между няколко души, форматирай го СТРОГО по следния начин:
+Глас 1: [текст]
+Глас 2: [текст]
+Ако е само един говорител или монолог, просто напиши преведения текст. Не добавяй никакви други коментари.
+
+Транскрипция:
+${rawTranscript.substring(0, 25000)}`; 
+  } else {
+    useSearch = true;
+    promptText = `Моля, намери информация или детайлно резюме на диалога от това YouTube видео: ${url}.
 Преведи го на български език.
 Ако има повече от един говорител, форматирай го СТРОГО по следния начин:
 Глас 1: [текст]
 Глас 2: [текст]
-Ако е само един говорител, просто напиши текста. Не добавяй никакви други коментари или въведения.`;
+Ако е само един говорител, просто напиши текста. Не добавяй никакви други коментари.`;
+  }
 
   try {
     const response = await ai.models.generateContent({
       model: model,
-      contents: prompt,
-      config: {
-        tools: [{ googleSearch: {} }],
-      }
+      contents: {
+        role: 'user',
+        parts: [{ text: promptText }]
+      },
+      config: useSearch ? { tools: [{ googleSearch: {} }] } : undefined
     });
     
-    const sources = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+    const sources = (response.candidates?.[0]?.groundingMetadata?.groundingChunks as any) || [];
     return { text: response.text || '', sources };
-  } catch (error) {
+  } catch (error: any) {
     console.error("YouTube processing error:", error);
-    throw new Error("Неуспешно извличане на данни от YouTube. Моля, проверете линка.");
+    throw new Error(`Грешка при обработка на видео: ${error.message || error}`);
   }
 };
 
-export const generateAudioChunk = async (text: string, voice: string, model: string): Promise<string | null> => {
+export const generateAudioChunk = async (text: string, voice: string, model: string, customInstruction?: string): Promise<string | null> => {
   const ai = getAiClient();
   try {
+    const defaultInstruction = "You are a high-quality Text-to-Speech engine. Your ONLY task is to read the user's text aloud exactly as written, in Bulgarian. Do not answer questions, do not add commentary, do not translate unless asked. Just read the text.";
+    const systemInstruction = customInstruction?.trim() ? customInstruction : defaultInstruction;
+
     const response = await ai.models.generateContent({
       model: model,
-      contents: text,
+      contents: {
+        role: 'user',
+        parts: [{ text: text }]
+      },
       config: {
-        systemInstruction: "You are a high-quality Text-to-Speech engine. Your ONLY task is to read the user's text aloud exactly as written, in Bulgarian. Do not answer questions, do not add commentary, do not translate unless asked. Just read the text.",
-        // @ts-ignore
-        responseModalities: ['AUDIO'], 
+        systemInstruction: systemInstruction,
+        responseModalities: [Modality.AUDIO], 
         speechConfig: {
           voiceConfig: {
             prebuiltVoiceConfig: {
@@ -73,10 +107,11 @@ export const generateAudioChunk = async (text: string, voice: string, model: str
         }
       }
     }
-    return null;
-  } catch (error) {
+    
+    throw new Error("Gemini API върна успешен отговор, но не съдържаше аудио данни (inlineData липсва).");
+  } catch (error: any) {
     console.error("Audio generation error:", error);
-    throw new Error("Грешка при генериране на аудио.");
+    throw new Error(`Грешка от Gemini API: ${error.message || error}`);
   }
 };
 
@@ -94,7 +129,6 @@ export const parseTextToChunks = (text: string, voice1: string, voice2: string, 
   let currentText = '';
   const speakers = new Set<string>();
 
-  // Matches "Name:", "[Name]:", "Глас 1:", etc.
   const speakerRegex = /^\[?([А-Яа-яA-Za-z0-9\s]+)\]?:\s*(.*)/;
 
   for (const line of lines) {
@@ -125,7 +159,6 @@ export const parseTextToChunks = (text: string, voice1: string, voice2: string, 
     });
   }
 
-  // Further split long chunks to avoid TTS limits
   const finalChunks: ParsedChunk[] = [];
   for (const chunk of initialChunks) {
     if (chunk.text.length <= maxLength) {
