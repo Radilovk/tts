@@ -1,53 +1,84 @@
-# Vertex AI Studio Frontend App with Node.js Backend
+# 🔊 Gemini TTS — Четец на глас
 
-This repository contains a frontend and a Node.js backend, designed to run together.
-The backend acts as a proxy, handling Google Cloud API calls.
+Мобилно уеб приложение за синтез на реч (Text-to-Speech) чрез Google Gemini API.
 
-This project is intended for demonstration and prototyping purposes only.
-It is not intended for use in a production environment.
+**Работи изцяло в браузъра — без бекенд сървър.**
 
-## Prerequisites
+## ✅ Как работи без бекенд?
 
-To run this application locally, you need:
+Приложението използва `generativelanguage.googleapis.com` API, който поддържа CORS (Cross-Origin Resource Sharing) за директни заявки от браузъра. Всички API повиквания се правят директно от вашето устройство до Google. Не е необходим прокси сървър или бекенд.
 
-*   **[Google Cloud SDK / gcloud CLI](https://cloud.google.com/sdk/docs/install)**: Follow the instructions to install the SDK.
+## 🌟 Функции
 
-*   **gcloud Initialization**:
-    *   Initialize the gcloud CLI:
-        ```bash
-        gcloud init
-        ```
-    *   Authenticate for Application Default Credentials (needed to call Google Cloud APIs):
-        ```bash
-        gcloud auth application-default login
-        ```
+- **Синтез на реч** — Генериране на естествено звучаща реч от текст чрез Gemini TTS
+- **Избор на модел** — Gemini 2.5 Flash TTS (препоръчан), Pro TTS (по-качествен), Flash Lite TTS (най-бърз)
+- **9 гласа** — 4 женски (Zephyr, Kore, Aoede, Leda) + 5 мъжки (Puck, Charon, Fenrir, Orus, Perseus)
+- **Примерен глас** — Бутон за преслушване на избрания глас
+- **Контрол на скоростта** — от 0.5x до 2.0x скорост на възпроизвеждане
+- **Запис на аудио** — изтегляне на генерираното аудио като WAV файл
+- **Качване на файл** — поддръжка на .txt, .md, .html, .srt файлове
+- **Drag & Drop** — влачене на файлове директно в приложението
+- **Превод EN → BG** — автоматичен превод на английски текст към български
+- **Избор на език за четене** — Български, English или Автоматично
+- **Тъмна/Светла тема** — адаптивен интерфейс (следва системните настройки)
+- **PWA** — инсталируемо приложение с офлайн кеширане на статични файлове
+- **Service Worker** — кешира приложението за бързо зареждане
+- **История** — запазване на предишни генерации (аудио достъпно само в текущата сесия)
+- **Спиране на генерацията** — бутон за спиране по време на обработка
+- **Тест на API ключа** — вградена проверка дали ключът е валиден
+- **Онбординг** — приветстващ екран за нови потребители
+- **Офлайн детекция** — предупреждение при липса на интернет
+- **Клавишни комбинации** — Ctrl+Enter за бързо генериране, Escape за затваряне
+- **Разделяне на дълги текстове** — автоматично на части по изречения
 
-*   **Node.js and npm**: Ensure you have Node.js and its package manager, `npm`, installed on your machine.
+## 🚀 Използване
 
-## Project Structure
+1. Отворете `index.html` в браузър или го качете на уеб сървър
+2. Отворете настройките (⚙️) и въведете вашия Gemini API ключ
+3. Натиснете "Тествай ключа", за да проверите дали работи
+4. Въведете текст или качете файл
+5. Натиснете **"Генерирай реч"**
+6. Слушайте или изтеглете аудио файла
 
-The project is organized into two main directories:
+## 🔑 API Ключ
 
-*   `frontend/`: Contains the Frontend application code.
-*   `backend/`: Contains the Node.js/Express server code to proxy Google Cloud API calls.
+Нужен ви е API ключ от [Google AI Studio](https://aistudio.google.com/apikey).
 
-## Backend Environment Variables
+> ⚠️ API ключът се запазва **само локално** в браузъра (localStorage) и никога не се изпраща на трети страни. Заявките отиват директно до Google.
 
-The `backend/.env.local` file is automatically generated when you download this application.
-It contains essential Google Cloud environment variables pre-configured based on your project settings at the time of download.
+## 📁 Структура
 
-The variables set in `backend/.env.local` are:
-*   `API_BACKEND_PORT`: The port the backend API server listens on (e.g., `5000`).
-*   `API_PAYLOAD_MAX_SIZE`: The maximum size of the request payload accepted by the backend server (e.g., `5mb`).
-*   `GOOGLE_CLOUD_LOCATION`: The Google Cloud region associated with your project.
-*   `GOOGLE_CLOUD_PROJECT`: Your Google Cloud Project ID.
+```
+├── index.html          # Основна HTML страница
+├── css/
+│   └── style.css       # Стилове (mobile-first, тъмна/светла тема)
+├── js/
+│   └── app.js          # Логика на приложението
+├── sw.js               # Service Worker за PWA офлайн кеширане
+├── manifest.json       # PWA манифест
+├── icons/              # Икони за PWA
+└── README.md           # Документация
+```
 
-**Note:** These variables are automatically populated during the download process.
-You can modify the values in `backend/.env.local` if you need to change them.
+## 🛠️ Технологии
 
-## Installation and Running the App
+- HTML5 / CSS3 / Vanilla JavaScript (без зависимости!)
+- Google Gemini API (TTS + Translation)
+- PCM → WAV конверсия изцяло в браузъра
+- PWA с Service Worker
+- Responsive design (mobile-first)
 
-To install dependencies and run your Google Cloud Vertex AI Studio App locally, execute the following command:
+## 🌐 Деплой
 
-```bash
-npm install && npm run dev
+Приложението е статично и може да се хоства навсякъде:
+- **GitHub Pages** — Settings → Pages → Source → main branch
+- **Netlify** — Drag & drop на папката
+- **Vercel** — Import от GitHub
+- Всеки уеб сървър (Apache, Nginx, etc.)
+
+## ⚠️ Важни бележки
+
+- **Vertex AI** (`aiplatform.googleapis.com`) НЕ поддържа CORS от браузър — използвайте само Google AI (`generativelanguage.googleapis.com`)
+- Аудио файловете в историята се пазят **само в паметта** — при презареждане на страницата те се губят (текстът остава)
+- Максимален размер на файл за качване: 5MB
+- За дълги текстове, приложението автоматично ги разделя на части
