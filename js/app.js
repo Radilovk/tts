@@ -1,5 +1,7 @@
 /* ==============================
    Gemini TTS — Application Logic
+   Fully client-side, no backend required.
+   Uses Google AI (generativelanguage.googleapis.com) which supports CORS.
    ============================== */
 
 (function () {
@@ -8,7 +10,6 @@
     // ==================== Constants ====================
     const STORAGE_KEYS = {
         API_KEY: 'gemini_tts_api_key',
-        ENDPOINT: 'gemini_tts_endpoint',
         MODEL: 'gemini_tts_model',
         VOICE: 'gemini_tts_voice',
         SPEED: 'gemini_tts_speed',
@@ -17,23 +18,29 @@
         THEME: 'gemini_tts_theme',
         HISTORY: 'gemini_tts_history',
         TRANSLATION_MODEL: 'gemini_tts_translation_model',
+        TTS_LANGUAGE: 'gemini_tts_language',
     };
 
-    const API_ENDPOINTS = {
-        generativelanguage: 'https://generativelanguage.googleapis.com/v1beta/models',
-        aiplatform: 'https://aiplatform.googleapis.com/v1/publishers/google/models',
-    };
+    // Only generativelanguage.googleapis.com supports CORS from browser.
+    // Vertex AI (aiplatform.googleapis.com) requires a backend proxy.
+    const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
     const MAX_HISTORY_ITEMS = 50;
+    const API_TIMEOUT_MS = 120000; // 2 minutes per chunk
+
+    // Language instructions for TTS
+    const LANGUAGE_INSTRUCTIONS = {
+        bg: 'Прочети следния текст на български език с ясна дикция: ',
+        en: 'Read the following text in English with clear pronunciation: ',
+        auto: '', // No instruction, let the model auto-detect
+    };
 
     // ==================== DOM Elements ====================
     const $ = (sel) => document.querySelector(sel);
-    const $$ = (sel) => document.querySelectorAll(sel);
 
     const els = {
         // Settings
         apiKey: $('#apiKey'),
-        apiEndpoint: $('#apiEndpoint'),
         modelSelect: $('#modelSelect'),
         voiceSelect: $('#voiceSelect'),
         speedSlider: $('#speedSlider'),
@@ -41,7 +48,11 @@
         autoPlay: $('#autoPlay'),
         chunkSize: $('#chunkSize'),
         translationModel: $('#translationModel'),
+        ttsLanguage: $('#ttsLanguage'),
         btnToggleKey: $('#btnToggleKey'),
+        btnTestKey: $('#btnTestKey'),
+        keyStatus: $('#keyStatus'),
+        btnPreviewVoice: $('#btnPreviewVoice'),
         btnClearHistory: $('#btnClearHistory'),
         btnClearAll: $('#btnClearAll'),
 
@@ -58,6 +69,10 @@
         btnHistory: $('#btnHistory'),
         btnCloseHistory: $('#btnCloseHistory'),
         btnTheme: $('#btnTheme'),
+
+        // Welcome
+        welcomeBanner: $('#welcomeBanner'),
+        btnOpenSettingsWelcome: $('#btnOpenSettingsWelcome'),
 
         // Text
         textInput: $('#textInput'),
@@ -79,6 +94,7 @@
 
         // Controls
         btnGenerate: $('#btnGenerate'),
+        btnStop: $('#btnStop'),
         progressSection: $('#progressSection'),
         progressFill: $('#progressFill'),
         progressText: $('#progressText'),
@@ -86,15 +102,14 @@
         // Player
         playerSection: $('#playerSection'),
         playerTitle: $('#playerTitle'),
-        playerDuration: $('#playerDuration'),
+        playerMeta: $('#playerMeta'),
         audioPlayer: $('#audioPlayer'),
         btnDownload: $('#btnDownload'),
         btnRegenerate: $('#btnRegenerate'),
 
-        // Loading & Toast
-        loadingOverlay: $('#loadingOverlay'),
-        loadingText: $('#loadingText'),
+        // Other
         toastContainer: $('#toastContainer'),
+        offlineBanner: $('#offlineBanner'),
     };
 
     // ==================== State ====================
@@ -104,6 +119,7 @@
         currentAudioUrl: null,
         translatedContent: '',
         history: [],
+        abortController: null,
     };
 
     // ==================== Initialization ====================
@@ -112,6 +128,9 @@
         loadHistory();
         bindEvents();
         updateUI();
+        checkOnboarding();
+        setupOfflineDetection();
+        registerServiceWorker();
     }
 
     // ==================== Settings ====================
@@ -119,32 +138,73 @@
         const get = (key, fallback) => localStorage.getItem(key) || fallback;
 
         els.apiKey.value = get(STORAGE_KEYS.API_KEY, '');
-        els.apiEndpoint.value = get(STORAGE_KEYS.ENDPOINT, 'generativelanguage');
         els.modelSelect.value = get(STORAGE_KEYS.MODEL, 'gemini-2.5-flash-preview-tts');
         els.voiceSelect.value = get(STORAGE_KEYS.VOICE, 'Kore');
         els.speedSlider.value = get(STORAGE_KEYS.SPEED, '1.0');
         els.autoPlay.checked = get(STORAGE_KEYS.AUTO_PLAY, 'true') === 'true';
         els.chunkSize.value = get(STORAGE_KEYS.CHUNK_SIZE, '1000');
         els.translationModel.value = get(STORAGE_KEYS.TRANSLATION_MODEL, 'gemini-2.5-flash-lite');
+        els.ttsLanguage.value = get(STORAGE_KEYS.TTS_LANGUAGE, 'bg');
 
         // Theme
-        const theme = get(STORAGE_KEYS.THEME, 'light');
+        const theme = get(STORAGE_KEYS.THEME, getPreferredTheme());
         document.documentElement.setAttribute('data-theme', theme);
 
         updateSpeedLabel();
     }
 
+    function getPreferredTheme() {
+        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            return 'dark';
+        }
+        return 'light';
+    }
+
     function saveSettings() {
-        // API key is stored in localStorage by design — this is a client-side app
-        // and the key is entered and managed entirely by the user.
+        // API key is stored in localStorage by design — this is a client-side only app
+        // and the key is entered and managed entirely by the user on their own device.
         localStorage.setItem(STORAGE_KEYS.API_KEY, els.apiKey.value); // nosemgrep: clear-text-storage
-        localStorage.setItem(STORAGE_KEYS.ENDPOINT, els.apiEndpoint.value);
         localStorage.setItem(STORAGE_KEYS.MODEL, els.modelSelect.value);
         localStorage.setItem(STORAGE_KEYS.VOICE, els.voiceSelect.value);
         localStorage.setItem(STORAGE_KEYS.SPEED, els.speedSlider.value);
         localStorage.setItem(STORAGE_KEYS.AUTO_PLAY, els.autoPlay.checked);
         localStorage.setItem(STORAGE_KEYS.CHUNK_SIZE, els.chunkSize.value);
         localStorage.setItem(STORAGE_KEYS.TRANSLATION_MODEL, els.translationModel.value);
+        localStorage.setItem(STORAGE_KEYS.TTS_LANGUAGE, els.ttsLanguage.value);
+    }
+
+    // ==================== Onboarding ====================
+    function checkOnboarding() {
+        const hasKey = els.apiKey.value.trim().length > 0;
+        if (!hasKey) {
+            els.welcomeBanner.classList.remove('hidden');
+        } else {
+            els.welcomeBanner.classList.add('hidden');
+        }
+    }
+
+    // ==================== Offline Detection ====================
+    function setupOfflineDetection() {
+        function updateOnlineStatus() {
+            if (!navigator.onLine) {
+                els.offlineBanner.classList.remove('hidden');
+            } else {
+                els.offlineBanner.classList.add('hidden');
+            }
+        }
+
+        window.addEventListener('online', updateOnlineStatus);
+        window.addEventListener('offline', updateOnlineStatus);
+        updateOnlineStatus();
+    }
+
+    // ==================== Service Worker ====================
+    function registerServiceWorker() {
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('sw.js').catch(() => {
+                // Service worker registration failed — not critical
+            });
+        }
     }
 
     // ==================== Events ====================
@@ -165,17 +225,39 @@
         // API key visibility
         els.btnToggleKey.addEventListener('click', toggleKeyVisibility);
 
-        // Settings save on change
-        [els.apiKey, els.apiEndpoint, els.modelSelect, els.voiceSelect,
-            els.speedSlider, els.autoPlay, els.chunkSize, els.translationModel]
-            .forEach(el => {
-                el.addEventListener('change', saveSettings);
-                if (el.type === 'text' || el.type === 'password') {
-                    el.addEventListener('input', saveSettings);
-                }
-            });
+        // Test API key
+        els.btnTestKey.addEventListener('click', testApiKey);
 
-        // Speed slider
+        // Preview voice
+        els.btnPreviewVoice.addEventListener('click', previewVoice);
+
+        // Welcome banner
+        if (els.btnOpenSettingsWelcome) {
+            els.btnOpenSettingsWelcome.addEventListener('click', () => togglePanel('settings', true));
+        }
+
+        // Settings save on change
+        const settingsElements = [
+            els.apiKey, els.modelSelect, els.voiceSelect,
+            els.speedSlider, els.autoPlay, els.chunkSize,
+            els.translationModel, els.ttsLanguage,
+        ];
+        settingsElements.forEach(el => {
+            el.addEventListener('change', () => {
+                saveSettings();
+                updateGenerateButton();
+                checkOnboarding();
+            });
+            if (el.type === 'text' || el.type === 'password') {
+                el.addEventListener('input', () => {
+                    saveSettings();
+                    updateGenerateButton();
+                    checkOnboarding();
+                });
+            }
+        });
+
+        // Speed slider real-time update
         els.speedSlider.addEventListener('input', () => {
             updateSpeedLabel();
             if (els.audioPlayer.src) {
@@ -193,16 +275,21 @@
         els.fileInput.addEventListener('change', handleFileUpload);
 
         // Drag & drop
-        els.dropZone.addEventListener('dragover', (e) => {
+        const dropZone = els.dropZone;
+        dropZone.addEventListener('dragover', (e) => {
             e.preventDefault();
-            els.dropZone.classList.add('drag-over');
+            e.stopPropagation();
+            dropZone.classList.add('drag-over');
         });
-        els.dropZone.addEventListener('dragleave', () => {
-            els.dropZone.classList.remove('drag-over');
-        });
-        els.dropZone.addEventListener('drop', (e) => {
+        dropZone.addEventListener('dragleave', (e) => {
             e.preventDefault();
-            els.dropZone.classList.remove('drag-over');
+            e.stopPropagation();
+            dropZone.classList.remove('drag-over');
+        });
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.remove('drag-over');
             if (e.dataTransfer.files.length > 0) {
                 handleFile(e.dataTransfer.files[0]);
             }
@@ -233,9 +320,10 @@
             showToast('Преведеният текст е зареден', 'success');
         });
 
-        // Generate
+        // Generate / Stop
         els.btnGenerate.addEventListener('click', generateSpeech);
         els.btnRegenerate.addEventListener('click', generateSpeech);
+        els.btnStop.addEventListener('click', stopGeneration);
 
         // Download
         els.btnDownload.addEventListener('click', downloadAudio);
@@ -261,17 +349,26 @@
         els.audioPlayer.addEventListener('loadedmetadata', () => {
             const dur = els.audioPlayer.duration;
             if (isFinite(dur)) {
-                els.playerDuration.textContent = formatDuration(dur);
+                const size = state.currentAudioBlob
+                    ? formatFileSize(state.currentAudioBlob.size)
+                    : '';
+                els.playerMeta.textContent = `${formatDuration(dur)}${size ? ' · ' + size : ''}`;
             }
         });
 
-        // Keyboard shortcut
+        // Keyboard shortcuts
         document.addEventListener('keydown', (e) => {
+            // Ctrl+Enter = generate
             if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
                 e.preventDefault();
-                if (!els.btnGenerate.disabled) {
+                if (!els.btnGenerate.disabled && !state.isGenerating) {
                     generateSpeech();
                 }
+            }
+            // Escape closes panels
+            if (e.key === 'Escape') {
+                togglePanel('settings', false);
+                togglePanel('history', false);
             }
         });
     }
@@ -284,10 +381,17 @@
         if (show) {
             overlayEl.classList.remove('hidden');
             panelEl.classList.remove('hidden');
+            // Force reflow for transition
+            void panelEl.offsetHeight;
             requestAnimationFrame(() => {
                 overlayEl.classList.add('visible');
                 panelEl.classList.add('visible');
             });
+            // Trap focus inside panel
+            const firstFocusable = panelEl.querySelector('input, select, button, textarea');
+            if (firstFocusable) {
+                setTimeout(() => firstFocusable.focus(), 300);
+            }
         } else {
             overlayEl.classList.remove('visible');
             panelEl.classList.remove('visible');
@@ -311,6 +415,108 @@
         const isPassword = els.apiKey.type === 'password';
         els.apiKey.type = isPassword ? 'text' : 'password';
         els.btnToggleKey.classList.toggle('showing-key', isPassword);
+    }
+
+    // ==================== API Key Test ====================
+    async function testApiKey() {
+        const apiKey = els.apiKey.value.trim();
+        if (!apiKey) {
+            setKeyStatus('Въведете API ключ', 'error');
+            return;
+        }
+
+        if (!navigator.onLine) {
+            setKeyStatus('Няма интернет', 'error');
+            return;
+        }
+
+        setKeyStatus('Тестване...', 'loading');
+        els.btnTestKey.disabled = true;
+
+        try {
+            const response = await fetchWithTimeout(
+                `${API_BASE}/gemini-2.5-flash-lite:generateContent?key=${apiKey}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{ parts: [{ text: 'Hi' }] }],
+                        generationConfig: { maxOutputTokens: 5 },
+                    }),
+                },
+                15000
+            );
+
+            if (response.ok) {
+                setKeyStatus('✅ Ключът работи!', 'success');
+            } else {
+                const data = await response.json().catch(() => ({}));
+                const msg = data.error?.message || `Грешка ${response.status}`;
+                if (response.status === 400 && msg.includes('API key')) {
+                    setKeyStatus('❌ Невалиден ключ', 'error');
+                } else if (response.status === 403) {
+                    setKeyStatus('❌ Ключът няма достъп', 'error');
+                } else if (response.status === 429) {
+                    setKeyStatus('⚠️ Квотата е надвишена', 'error');
+                } else {
+                    setKeyStatus(`❌ ${msg.substring(0, 60)}`, 'error');
+                }
+            }
+        } catch (err) {
+            if (err.name === 'AbortError') {
+                setKeyStatus('⏱️ Таймаут — опитайте пак', 'error');
+            } else {
+                setKeyStatus('❌ Мрежова грешка', 'error');
+            }
+        } finally {
+            els.btnTestKey.disabled = false;
+        }
+    }
+
+    function setKeyStatus(text, type) {
+        els.keyStatus.textContent = text;
+        els.keyStatus.className = `key-status ${type}`;
+    }
+
+    // ==================== Voice Preview ====================
+    async function previewVoice() {
+        const apiKey = els.apiKey.value.trim();
+        if (!apiKey) {
+            showToast('Въведете API ключ, за да чуете примерен глас', 'error');
+            return;
+        }
+
+        const voice = els.voiceSelect.value;
+        const model = els.modelSelect.value;
+        els.btnPreviewVoice.disabled = true;
+        els.btnPreviewVoice.textContent = '⏳ Генериране...';
+
+        try {
+            const result = await generateAudioChunk(
+                'Здравейте! Аз съм гласов асистент. Как мога да ви помогна днес?',
+                apiKey,
+                model,
+                voice,
+                'bg'
+            );
+
+            const wavBlob = pcmToWav(result.audioData, result.sampleRate);
+            const url = URL.createObjectURL(wavBlob);
+
+            // Play directly
+            const tempAudio = new Audio(url);
+            tempAudio.playbackRate = parseFloat(els.speedSlider.value);
+            tempAudio.addEventListener('ended', () => URL.revokeObjectURL(url));
+            tempAudio.addEventListener('error', () => URL.revokeObjectURL(url));
+            await tempAudio.play();
+
+            showToast(`Глас: ${voice}`, 'success');
+        } catch (err) {
+            showToast(`Грешка: ${err.message}`, 'error');
+        } finally {
+            els.btnPreviewVoice.disabled = false;
+            els.btnPreviewVoice.textContent = '🔊 Чуй примерен глас';
+        }
     }
 
     // ==================== Speed Label ====================
@@ -339,21 +545,38 @@
         els.btnTranslate.disabled = !hasText || !hasKey || state.isGenerating;
     }
 
+    function setGeneratingState(active) {
+        state.isGenerating = active;
+        els.btnGenerate.classList.toggle('hidden', active);
+        els.btnStop.classList.toggle('hidden', !active);
+        updateGenerateButton();
+    }
+
     // ==================== Clipboard ====================
     async function pasteFromClipboard() {
         try {
             const text = await navigator.clipboard.readText();
-            els.textInput.value = text;
-            updateCharCount();
-            showToast('Текст поставен от клипборда', 'success');
+            if (text) {
+                els.textInput.value = text;
+                updateCharCount();
+                showToast('Текст поставен от клипборда', 'success');
+            } else {
+                showToast('Клипбордът е празен', 'info');
+            }
         } catch {
-            showToast('Неуспешно четене от клипборда', 'error');
+            // Fallback: focus textarea so user can Ctrl+V
+            els.textInput.focus();
+            showToast('Натиснете Ctrl+V, за да поставите текст', 'info');
         }
     }
 
     function clearText() {
+        if (els.textInput.value.trim() && !confirm('Изчистване на целия текст?')) {
+            return;
+        }
         els.textInput.value = '';
         updateCharCount();
+        showToast('Текстът е изчистен', 'info');
     }
 
     async function copyToClipboard(text) {
@@ -380,20 +603,28 @@
             return;
         }
 
+        const allowedExtensions = ['.txt', '.md', '.html', '.htm', '.srt'];
+        const ext = '.' + file.name.split('.').pop().toLowerCase();
+        if (!allowedExtensions.includes(ext)) {
+            showToast('Неподдържан формат. Използвайте: ' + allowedExtensions.join(', '), 'error');
+            return;
+        }
+
         const reader = new FileReader();
         reader.onload = (e) => {
             let text = e.target.result;
 
             // Strip HTML tags if HTML file
-            if (file.name.endsWith('.html') || file.name.endsWith('.htm')) {
+            if (ext === '.html' || ext === '.htm') {
                 const parser = new DOMParser();
                 const doc = parser.parseFromString(text, 'text/html');
-                text = doc.body.textContent || doc.body.innerText || '';
+                text = doc.body.textContent || '';
             }
 
             // Clean up SRT format
-            if (file.name.endsWith('.srt')) {
-                text = text.replace(/^\d+\s*$/gm, '')
+            if (ext === '.srt') {
+                text = text
+                    .replace(/^\d+\s*$/gm, '')
                     .replace(/\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}/g, '')
                     .replace(/\n{3,}/g, '\n\n')
                     .trim();
@@ -401,7 +632,8 @@
 
             els.textInput.value = text;
             updateCharCount();
-            showToast(`Файл "${file.name}" зареден`, 'success');
+            // Safe toast: use escapeHtml for filename
+            showToast(`Файл „${escapeHtml(file.name)}" зареден (${formatFileSize(file.size)})`, 'success');
         };
 
         reader.onerror = () => {
@@ -422,33 +654,45 @@
             return;
         }
 
+        if (!navigator.onLine) {
+            showToast('Няма интернет връзка', 'error');
+            return;
+        }
+
         state.isGenerating = true;
         updateGenerateButton();
         showProgress('Превеждане...', true);
 
+        const controller = new AbortController();
+        state.abortController = controller;
+
         try {
             const model = els.translationModel.value;
-            const endpoint = getEndpointUrl(model, false);
+            const sanitizedText = sanitizeForPrompt(text);
 
-            const response = await fetch(`${endpoint}?key=${apiKey}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    contents: [{
-                        parts: [{
-                            text: `Преведи следния текст от английски на български. Върни САМО превода, без обяснения или допълнителен текст.\n\n---BEGIN TEXT---\n${sanitizeForPrompt(text)}\n---END TEXT---`
-                        }]
-                    }],
-                    generationConfig: {
-                        temperature: 0.3,
-                        maxOutputTokens: 8192,
-                    }
-                })
-            });
+            const response = await fetchWithTimeout(
+                `${API_BASE}/${model}:generateContent?key=${apiKey}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{
+                            parts: [{
+                                text: `Преведи следния текст от английски на български. Върни САМО превода, без обяснения, без кавички и без допълнителен текст.\n\n---BEGIN TEXT---\n${sanitizedText}\n---END TEXT---`
+                            }]
+                        }],
+                        generationConfig: {
+                            temperature: 0.3,
+                            maxOutputTokens: 8192,
+                        }
+                    }),
+                    signal: controller.signal,
+                },
+                API_TIMEOUT_MS
+            );
 
             if (!response.ok) {
-                const errorData = await response.json().catch(() => ({}));
-                throw new Error(errorData.error?.message || `HTTP ${response.status}`);
+                throw await createApiError(response);
             }
 
             const data = await response.json();
@@ -465,9 +709,14 @@
             showToast('Текстът е преведен успешно', 'success');
         } catch (err) {
             hideProgress();
-            showToast(`Грешка при превод: ${err.message}`, 'error');
+            if (err.name === 'AbortError') {
+                showToast('Преводът е спрян', 'info');
+            } else {
+                showToast(`Грешка при превод: ${err.message}`, 'error');
+            }
         } finally {
             state.isGenerating = false;
+            state.abortController = null;
             updateGenerateButton();
         }
     }
@@ -500,26 +749,54 @@
             return;
         }
 
-        state.isGenerating = true;
-        updateGenerateButton();
-        showProgress('Генериране на реч...', true);
+        if (!navigator.onLine) {
+            showToast('Няма интернет връзка', 'error');
+            return;
+        }
+
+        const controller = new AbortController();
+        state.abortController = controller;
+        setGeneratingState(true);
+        showProgress('Подготовка...', true);
 
         try {
             const chunkSize = parseInt(els.chunkSize.value);
             const chunks = splitTextIntoChunks(text, chunkSize);
             const audioChunks = [];
             let sampleRate = 24000;
+            const model = els.modelSelect.value;
+            const voice = els.voiceSelect.value;
+            const lang = els.ttsLanguage.value;
 
             for (let i = 0; i < chunks.length; i++) {
-                showProgress(`Обработка на част ${i + 1} от ${chunks.length}...`, false, ((i) / chunks.length) * 100);
+                // Check if cancelled
+                if (controller.signal.aborted) {
+                    throw new DOMException('Cancelled', 'AbortError');
+                }
 
-                const result = await generateAudioChunk(chunks[i], apiKey);
+                showProgress(
+                    chunks.length > 1
+                        ? `Част ${i + 1} от ${chunks.length}...`
+                        : 'Генериране на реч...',
+                    false,
+                    ((i) / chunks.length) * 100
+                );
+
+                const result = await generateAudioChunk(
+                    chunks[i], apiKey, model, voice, lang, controller.signal
+                );
                 audioChunks.push(result.audioData);
                 if (result.sampleRate) {
                     sampleRate = result.sampleRate;
                 }
 
-                showProgress(`Обработка на част ${i + 1} от ${chunks.length}...`, false, ((i + 1) / chunks.length) * 100);
+                showProgress(
+                    chunks.length > 1
+                        ? `Част ${i + 1} от ${chunks.length} ✓`
+                        : 'Финализиране...',
+                    false,
+                    ((i + 1) / chunks.length) * 100
+                );
             }
 
             // Combine all audio chunks
@@ -539,29 +816,44 @@
             // Set up player
             els.audioPlayer.src = state.currentAudioUrl;
             els.audioPlayer.playbackRate = parseFloat(els.speedSlider.value);
-            els.playerTitle.textContent = text.substring(0, 50) + (text.length > 50 ? '...' : '');
+            els.playerTitle.textContent = text.substring(0, 60) + (text.length > 60 ? '...' : '');
             els.playerSection.classList.remove('hidden');
 
             // Add to history
-            addToHistory(text, wavBlob);
+            addToHistory(text, wavBlob, voice, model);
 
             hideProgress();
-            showToast('Речта е генерирана успешно!', 'success');
+            showToast('Речта е генерирана успешно! 🎉', 'success');
 
             // Auto-play
             if (els.autoPlay.checked) {
                 try {
                     await els.audioPlayer.play();
                 } catch {
-                    // Autoplay may be blocked by browser
+                    // Autoplay may be blocked by browser — user needs to tap play
+                    showToast('Натиснете ▶ за възпроизвеждане', 'info');
                 }
             }
+
+            // Scroll player into view
+            els.playerSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         } catch (err) {
             hideProgress();
-            showToast(`Грешка: ${err.message}`, 'error');
+            if (err.name === 'AbortError') {
+                showToast('Генерирането е спряно', 'info');
+            } else {
+                showToast(`Грешка: ${err.message}`, 'error');
+            }
         } finally {
-            state.isGenerating = false;
-            updateGenerateButton();
+            setGeneratingState(false);
+            state.abortController = null;
+        }
+    }
+
+    function stopGeneration() {
+        if (state.abortController) {
+            state.abortController.abort();
+            state.abortController = null;
         }
     }
 
@@ -576,27 +868,35 @@
         if (text.length <= maxSize) return [text];
 
         const chunks = [];
+        // Split by sentence-ending punctuation
         const sentences = text.split(/(?<=[.!?。！？\n])\s*/);
         let currentChunk = '';
 
         for (const sentence of sentences) {
+            if (!sentence.trim()) continue;
+
             if (sentence.length > maxSize) {
-                // Split long sentences by clauses or words
-                if (currentChunk) {
-                    chunks.push(currentChunk);
+                // Flush current chunk first
+                if (currentChunk.trim()) {
+                    chunks.push(currentChunk.trim());
                     currentChunk = '';
                 }
+                // Split long sentence by words
                 const words = sentence.split(/\s+/);
                 for (const word of words) {
                     if ((currentChunk + ' ' + word).length > maxSize) {
-                        if (currentChunk) chunks.push(currentChunk.trim());
+                        if (currentChunk.trim()) {
+                            chunks.push(currentChunk.trim());
+                        }
                         currentChunk = word;
                     } else {
                         currentChunk += (currentChunk ? ' ' : '') + word;
                     }
                 }
             } else if ((currentChunk + ' ' + sentence).length > maxSize) {
-                chunks.push(currentChunk.trim());
+                if (currentChunk.trim()) {
+                    chunks.push(currentChunk.trim());
+                }
                 currentChunk = sentence;
             } else {
                 currentChunk += (currentChunk ? ' ' : '') + sentence;
@@ -607,18 +907,18 @@
             chunks.push(currentChunk.trim());
         }
 
-        return chunks;
+        return chunks.length > 0 ? chunks : [text];
     }
 
-    async function generateAudioChunk(text, apiKey) {
-        const model = els.modelSelect.value;
-        const voice = els.voiceSelect.value;
-        const endpoint = getEndpointUrl(model, false);
+    async function generateAudioChunk(text, apiKey, model, voice, lang, signal) {
+        // Build the text with language instruction
+        const langInstruction = LANGUAGE_INSTRUCTIONS[lang] || '';
+        const promptText = langInstruction ? langInstruction + text : text;
 
         const requestBody = {
             contents: [{
                 parts: [{
-                    text: text
+                    text: promptText
                 }]
             }],
             generationConfig: {
@@ -633,21 +933,24 @@
             }
         };
 
-        const response = await fetch(`${endpoint}?key=${apiKey}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(requestBody)
-        });
+        const response = await fetchWithTimeout(
+            `${API_BASE}/${model}:generateContent?key=${apiKey}`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(requestBody),
+                signal: signal,
+            },
+            API_TIMEOUT_MS
+        );
 
         if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            const message = errorData.error?.message || `HTTP грешка ${response.status}`;
-            throw new Error(message);
+            throw await createApiError(response);
         }
 
         const data = await response.json();
 
-        // Handle streaming response (array of objects)
+        // Parse response — can be a single object or array (streaming format)
         const candidates = Array.isArray(data) ? data : [data];
         let audioBase64 = '';
         let mimeType = 'audio/L16;rate=24000';
@@ -669,6 +972,11 @@
         }
 
         if (!audioBase64) {
+            // Check if the model returned text instead of audio
+            const textResponse = extractTextFromResponse(data);
+            if (textResponse) {
+                throw new Error('Моделът върна текст вместо аудио. Проверете дали моделът поддържа TTS.');
+            }
             throw new Error('Не е получено аудио от API. Проверете дали избраният модел поддържа TTS.');
         }
 
@@ -701,7 +1009,11 @@
         return combined.buffer;
     }
 
-    function pcmToWav(pcmBuffer, sampleRate = 24000, numChannels = 1, bitsPerSample = 16) {
+    function pcmToWav(pcmBuffer, sampleRate, numChannels, bitsPerSample) {
+        sampleRate = sampleRate || 24000;
+        numChannels = numChannels || 1;
+        bitsPerSample = bitsPerSample || 16;
+
         const pcmData = new Uint8Array(pcmBuffer);
         const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
         const blockAlign = numChannels * (bitsPerSample / 8);
@@ -731,7 +1043,7 @@
         writeString(view, 36, 'data');
         view.setUint32(40, dataSize, true);
 
-        // PCM data
+        // Copy PCM data
         const wavData = new Uint8Array(buffer);
         wavData.set(pcmData, headerSize);
 
@@ -745,15 +1057,59 @@
     }
 
     // ==================== API Helpers ====================
-    function getEndpointUrl(model, streaming = false) {
-        const endpointType = els.apiEndpoint.value;
-        const base = API_ENDPOINTS[endpointType];
-        const method = streaming ? 'streamGenerateContent' : 'generateContent';
-        return `${base}/${model}:${method}`;
+    async function fetchWithTimeout(url, options, timeoutMs) {
+        const controller = options.signal
+            ? undefined
+            : new AbortController();
+
+        const timeout = setTimeout(() => {
+            if (controller) controller.abort();
+        }, timeoutMs);
+
+        try {
+            const response = await fetch(url, {
+                ...options,
+                signal: options.signal || (controller ? controller.signal : undefined),
+            });
+            return response;
+        } finally {
+            clearTimeout(timeout);
+        }
+    }
+
+    async function createApiError(response) {
+        let message;
+        try {
+            const data = await response.json();
+            message = data.error?.message || `HTTP грешка ${response.status}`;
+        } catch {
+            message = `HTTP грешка ${response.status}`;
+        }
+
+        // User-friendly error messages
+        if (response.status === 400) {
+            if (message.includes('API key')) {
+                return new Error('Невалиден API ключ. Проверете в настройките.');
+            }
+            return new Error(`Невалидна заявка: ${message.substring(0, 100)}`);
+        }
+        if (response.status === 403) {
+            return new Error('API ключът няма достъп до този модел. Проверете разрешенията.');
+        }
+        if (response.status === 429) {
+            return new Error('Квотата е надвишена. Изчакайте малко и опитайте пак.');
+        }
+        if (response.status === 500 || response.status === 503) {
+            return new Error('Сървърът на Google е претоварен. Опитайте пак след малко.');
+        }
+        return new Error(message);
     }
 
     // ==================== Progress ====================
-    function showProgress(text, indeterminate = false, percent = 0) {
+    function showProgress(text, indeterminate, percent) {
+        indeterminate = indeterminate || false;
+        percent = percent || 0;
+
         els.progressSection.classList.remove('hidden');
         els.progressText.textContent = text;
 
@@ -811,7 +1167,7 @@
     }
 
     function saveHistory() {
-        // Don't save audio blobs in localStorage (too large), only metadata
+        // Only save metadata — audio blobs are too large for localStorage
         const historyData = state.history.map(item => ({
             text: item.text,
             voice: item.voice,
@@ -821,7 +1177,7 @@
         try {
             localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(historyData));
         } catch {
-            // localStorage might be full
+            // localStorage might be full — trim history
             if (state.history.length > 10) {
                 state.history = state.history.slice(0, 10);
                 saveHistory();
@@ -829,13 +1185,13 @@
         }
     }
 
-    function addToHistory(text, audioBlob) {
+    function addToHistory(text, audioBlob, voice, model) {
         const item = {
-            text: text.substring(0, 200),
-            voice: els.voiceSelect.value,
-            model: els.modelSelect.value,
+            text: text.substring(0, 300),
+            voice: voice,
+            model: model,
             date: new Date().toISOString(),
-            audioBlob: audioBlob, // kept in memory only
+            audioBlob: audioBlob, // kept in memory only, lost on page reload
         };
 
         state.history.unshift(item);
@@ -849,33 +1205,39 @@
 
     function renderHistory() {
         if (state.history.length === 0) {
-            els.historyList.innerHTML = '<p class="empty-state">Все още няма генерирани аудио файлове.</p>';
+            els.historyList.innerHTML = '<p class="empty-state">Все още няма генерирани записи.</p>';
             return;
         }
 
-        els.historyList.innerHTML = state.history.map((item, index) => `
-            <div class="history-item" data-index="${index}">
-                <span class="history-item-text">${escapeHtml(item.text)}</span>
-                <div class="history-item-meta">
-                    <span>${item.voice} · ${item.model.split('-').slice(-2).join(' ')}</span>
-                    <span>${formatDate(item.date)}</span>
+        els.historyList.innerHTML = state.history.map((item, index) => {
+            const hasAudio = !!item.audioBlob;
+            const modelShort = item.model ? item.model.replace('gemini-2.5-', '').replace('-preview-tts', '') : '';
+            return `
+                <div class="history-item" data-index="${index}">
+                    <span class="history-item-text">${escapeHtml(item.text)}</span>
+                    <div class="history-item-meta">
+                        <span>${escapeHtml(item.voice || '')} · ${escapeHtml(modelShort)}</span>
+                        <span>${formatDate(item.date)}</span>
+                    </div>
+                    <div class="history-item-actions">
+                        <button class="btn btn-outline btn-sm history-load" data-index="${index}" type="button">📝 Зареди</button>
+                        ${hasAudio ? `<button class="btn btn-outline btn-sm history-play" data-index="${index}" type="button">▶️ Пусни</button>` : '<span style="font-size:0.7rem;color:var(--text-muted)">🔇 няма аудио</span>'}
+                    </div>
                 </div>
-                <div class="history-item-actions">
-                    <button class="btn btn-outline btn-sm history-load" data-index="${index}">📝 Зареди текст</button>
-                    ${item.audioBlob ? `<button class="btn btn-outline btn-sm history-play" data-index="${index}">▶️ Пусни</button>` : ''}
-                </div>
-            </div>
-        `).join('');
+            `;
+        }).join('');
 
         // Bind history events
         els.historyList.querySelectorAll('.history-load').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 const idx = parseInt(btn.dataset.index);
-                els.textInput.value = state.history[idx].text;
-                updateCharCount();
-                togglePanel('history', false);
-                showToast('Текстът е зареден от историята', 'info');
+                if (idx >= 0 && idx < state.history.length) {
+                    els.textInput.value = state.history[idx].text;
+                    updateCharCount();
+                    togglePanel('history', false);
+                    showToast('Текстът е зареден от историята', 'info');
+                }
             });
         });
 
@@ -883,38 +1245,45 @@
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 const idx = parseInt(btn.dataset.index);
-                const item = state.history[idx];
-                if (item.audioBlob) {
-                    if (state.currentAudioUrl) {
-                        URL.revokeObjectURL(state.currentAudioUrl);
+                if (idx >= 0 && idx < state.history.length) {
+                    const item = state.history[idx];
+                    if (item.audioBlob) {
+                        if (state.currentAudioUrl) {
+                            URL.revokeObjectURL(state.currentAudioUrl);
+                        }
+                        state.currentAudioBlob = item.audioBlob;
+                        state.currentAudioUrl = URL.createObjectURL(item.audioBlob);
+                        els.audioPlayer.src = state.currentAudioUrl;
+                        els.audioPlayer.playbackRate = parseFloat(els.speedSlider.value);
+                        els.playerTitle.textContent = item.text.substring(0, 60) + (item.text.length > 60 ? '...' : '');
+                        els.playerSection.classList.remove('hidden');
+                        els.audioPlayer.play().catch(() => {});
+                        togglePanel('history', false);
                     }
-                    state.currentAudioBlob = item.audioBlob;
-                    state.currentAudioUrl = URL.createObjectURL(item.audioBlob);
-                    els.audioPlayer.src = state.currentAudioUrl;
-                    els.audioPlayer.playbackRate = parseFloat(els.speedSlider.value);
-                    els.playerTitle.textContent = item.text.substring(0, 50) + '...';
-                    els.playerSection.classList.remove('hidden');
-                    els.audioPlayer.play();
-                    togglePanel('history', false);
                 }
             });
         });
     }
 
     // ==================== Toast ====================
-    function showToast(message, type = 'info', duration = 3000) {
+    function showToast(message, type, duration) {
+        type = type || 'info';
+        duration = duration || 3500;
+
         const toast = document.createElement('div');
         toast.className = `toast ${type}`;
         toast.textContent = message;
-        toast.style.animationDuration = `0.3s, 0.3s`;
-        toast.style.animationDelay = `0s, ${(duration - 300) / 1000}s`;
         els.toastContainer.appendChild(toast);
 
+        // Fade out then remove
         setTimeout(() => {
-            if (toast.parentNode) {
-                toast.remove();
-            }
-        }, duration);
+            toast.classList.add('fade-out');
+            setTimeout(() => {
+                if (toast.parentNode) {
+                    toast.remove();
+                }
+            }, 300);
+        }, duration - 300);
     }
 
     // ==================== Helpers ====================
@@ -925,11 +1294,10 @@
     }
 
     /**
-     * Sanitize user text before including it in a prompt to reduce prompt injection risk.
-     * Wraps the user text in delimiters so the LLM treats it as data, not instructions.
+     * Sanitize user text before including it in a prompt.
+     * Limits length and wraps in delimiters to reduce prompt injection risk.
      */
     function sanitizeForPrompt(text) {
-        // Limit length to prevent abuse
         const maxLen = 50000;
         if (text.length > maxLen) {
             text = text.substring(0, maxLen);
@@ -941,6 +1309,12 @@
         const mins = Math.floor(seconds / 60);
         const secs = Math.floor(seconds % 60);
         return `${mins}:${secs.toString().padStart(2, '0')}`;
+    }
+
+    function formatFileSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     }
 
     function formatDate(isoString) {
@@ -958,5 +1332,9 @@
     }
 
     // ==================== Start ====================
-    document.addEventListener('DOMContentLoaded', init);
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
 })();
