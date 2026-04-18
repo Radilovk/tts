@@ -1,4 +1,4 @@
-import lamejs from 'lamejs';
+declare const lamejs: any;
 
 export function encodeMP3(samples: Float32Array, sampleRate: number): Blob {
   const channels = 1; // Gemini returns mono audio
