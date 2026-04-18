@@ -39,8 +39,9 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
 
-    // Never cache API calls
-    if (url.hostname.includes('googleapis.com')) {
+    // Never cache API calls — check exact hostnames to avoid substring matching
+    if (url.hostname === 'generativelanguage.googleapis.com' ||
+        url.hostname === 'aiplatform.googleapis.com') {
         return;
     }
 
@@ -56,8 +57,9 @@ self.addEventListener('fetch', (event) => {
                 // Return cached, but also update cache in background
                 fetch(event.request).then((response) => {
                     if (response && response.status === 200) {
+                        const responseClone = response.clone();
                         caches.open(CACHE_NAME).then((cache) => {
-                            cache.put(event.request, response);
+                            cache.put(event.request, responseClone);
                         });
                     }
                 }).catch(() => {});

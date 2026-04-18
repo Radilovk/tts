@@ -1058,18 +1058,24 @@
 
     // ==================== API Helpers ====================
     async function fetchWithTimeout(url, options, timeoutMs) {
-        const controller = options.signal
-            ? undefined
-            : new AbortController();
+        // Create a timeout abort controller
+        const timeoutController = new AbortController();
+        const timeout = setTimeout(() => timeoutController.abort(), timeoutMs);
 
-        const timeout = setTimeout(() => {
-            if (controller) controller.abort();
-        }, timeoutMs);
+        // If caller provided a signal, listen for external abort too
+        const externalSignal = options.signal;
+        if (externalSignal) {
+            if (externalSignal.aborted) {
+                clearTimeout(timeout);
+                throw new DOMException('Aborted', 'AbortError');
+            }
+            externalSignal.addEventListener('abort', () => timeoutController.abort());
+        }
 
         try {
             const response = await fetch(url, {
                 ...options,
-                signal: options.signal || (controller ? controller.signal : undefined),
+                signal: timeoutController.signal,
             });
             return response;
         } finally {
@@ -1294,8 +1300,8 @@
     }
 
     /**
-     * Sanitize user text before including it in a prompt.
-     * Limits length and wraps in delimiters to reduce prompt injection risk.
+     * Limit user text length before including it in a prompt.
+     * The text is wrapped in delimiters at the call site to separate it from instructions.
      */
     function sanitizeForPrompt(text) {
         const maxLen = 50000;
