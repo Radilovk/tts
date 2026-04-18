@@ -29,7 +29,7 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ isActive }) =>
 
       if (!isActive) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = 'rgba(59, 130, 246, 0.15)'; 
+        ctx.fillStyle = 'rgba(59, 130, 246, 0.1)'; 
         ctx.fillRect(0, canvas.height / 2 - 1, canvas.width, 2);
         animationRef.current = requestAnimationFrame(draw);
         return;
@@ -45,19 +45,13 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ isActive }) =>
       let x = 0;
 
       for (let i = 0; i < bufferLength; i++) {
-        barHeight = dataArray[i] / 2;
+        barHeight = dataArray[i] / 2.5;
 
-        const gradient = ctx.createLinearGradient(0, canvas.height, 0, canvas.height - barHeight);
-        gradient.addColorStop(0, '#3b82f6'); // primary
-        gradient.addColorStop(0.5, '#8b5cf6'); // accent
-        gradient.addColorStop(1, '#ec4899'); // pink
-
-        ctx.fillStyle = gradient;
-        
+        ctx.fillStyle = '#3b82f6';
         const y = (canvas.height - barHeight) / 2;
         
         ctx.beginPath();
-        ctx.roundRect(x, y, barWidth - 1, barHeight || 2, 4);
+        ctx.roundRect(x, y, barWidth - 1, barHeight || 2, 2);
         ctx.fill();
 
         x += barWidth;
@@ -74,30 +68,17 @@ export const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ isActive }) =>
   }, [isActive]);
 
   return (
-    <div className="w-full flex flex-col gap-3">
-      <div className="w-full h-20 bg-dark-900/60 rounded-2xl overflow-hidden border border-white/10 relative shadow-inner">
-        <canvas 
-          ref={canvasRef} 
-          width={400} 
-          height={80} 
-          className="w-full h-full"
-        />
-        {!isActive && (
-          <div className="absolute inset-0 flex items-center justify-center text-xs text-gray-500 font-bold tracking-widest uppercase">
-            Аудио Визуализация
-          </div>
-        )}
+    <div className="w-full flex flex-col gap-2">
+      <div className="w-full h-12 bg-dark-900/50 rounded-lg overflow-hidden border border-white/5 relative">
+        <canvas ref={canvasRef} width={300} height={48} className="w-full h-full" />
       </div>
       
-      {/* Speaker Indicator */}
-      <div className={`flex items-center justify-center gap-2 transition-opacity duration-300 ${isActive && currentSpeaker ? 'opacity-100' : 'opacity-0 h-0 overflow-hidden'}`}>
-        <div className="bg-gradient-to-r from-primary-500/20 to-accent/20 border border-white/10 px-4 py-1.5 rounded-full flex items-center gap-2">
-          <Mic2 className="w-4 h-4 text-accent animate-pulse" />
-          <span className="text-sm font-bold text-transparent bg-clip-text bg-gradient-to-r from-white to-gray-300">
-            {currentSpeaker}
-          </span>
+      {isActive && currentSpeaker && (
+        <div className="flex items-center justify-center gap-1.5 text-xs text-primary-400 font-medium animate-in fade-in">
+          <Mic2 className="w-3.5 h-3.5 animate-pulse" />
+          {currentSpeaker}
         </div>
-      </div>
+      )}
     </div>
   );
 };
