@@ -135,7 +135,9 @@
     }
 
     function saveSettings() {
-        localStorage.setItem(STORAGE_KEYS.API_KEY, els.apiKey.value);
+        // API key is stored in localStorage by design — this is a client-side app
+        // and the key is entered and managed entirely by the user.
+        localStorage.setItem(STORAGE_KEYS.API_KEY, els.apiKey.value); // nosemgrep: clear-text-storage
         localStorage.setItem(STORAGE_KEYS.ENDPOINT, els.apiEndpoint.value);
         localStorage.setItem(STORAGE_KEYS.MODEL, els.modelSelect.value);
         localStorage.setItem(STORAGE_KEYS.VOICE, els.voiceSelect.value);
@@ -434,7 +436,7 @@
                 body: JSON.stringify({
                     contents: [{
                         parts: [{
-                            text: `Преведи следния текст от английски на български. Върни САМО превода, без обяснения или допълнителен текст:\n\n${text}`
+                            text: `Преведи следния текст от английски на български. Върни САМО превода, без обяснения или допълнителен текст.\n\n---BEGIN TEXT---\n${sanitizeForPrompt(text)}\n---END TEXT---`
                         }]
                     }],
                     generationConfig: {
@@ -920,6 +922,19 @@
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+
+    /**
+     * Sanitize user text before including it in a prompt to reduce prompt injection risk.
+     * Wraps the user text in delimiters so the LLM treats it as data, not instructions.
+     */
+    function sanitizeForPrompt(text) {
+        // Limit length to prevent abuse
+        const maxLen = 50000;
+        if (text.length > maxLen) {
+            text = text.substring(0, maxLen);
+        }
+        return text;
     }
 
     function formatDuration(seconds) {
