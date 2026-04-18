@@ -16,7 +16,7 @@ class AudioService {
   private currentChunkIndex: number = -1;
   private currentSpeaker: string | null = null;
 
-  private initContext() {
+  public initialize() {
     if (!this.audioContext) {
       this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       this.analyser = this.audioContext.createAnalyser();
@@ -36,6 +36,10 @@ class AudioService {
     return this.currentSpeaker;
   }
 
+  public getIsPlaying(): boolean {
+    return this.isPlaying;
+  }
+
   public setPlaybackRate(rate: number) {
     this.playbackRate = rate;
     if (this.currentSource) {
@@ -52,14 +56,18 @@ class AudioService {
   }
 
   public async decodeBase64Audio(base64: string, speaker?: string | null): Promise<AudioChunk | null> {
-    this.initContext();
+    this.initialize();
     if (!this.audioContext) return null;
 
     try {
       const binaryString = atob(base64);
       const len = binaryString.length;
-      const bytes = new Uint8Array(len);
-      for (let i = 0; i < len; i++) {
+      
+      // Ensure byte length is a multiple of 2 for Int16Array
+      const validLen = len % 2 === 0 ? len : len - 1;
+      const bytes = new Uint8Array(validLen);
+      
+      for (let i = 0; i < validLen; i++) {
         bytes[i] = binaryString.charCodeAt(i);
       }
 
@@ -100,7 +108,7 @@ class AudioService {
       return;
     }
 
-    this.initContext();
+    this.initialize();
     if (!this.audioContext || !this.analyser) return;
 
     this.isPlaying = true;
