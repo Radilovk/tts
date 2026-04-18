@@ -4,9 +4,10 @@ export interface AppSettings {
   speed: number;
   translateToBg: boolean;
   model: string;
+  systemInstruction: string;
 }
 
-export const VOICES = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'];
+export const VOICES = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr', 'Aoede', 'Algenib'];
 export const MODELS = ['gemini-2.5-flash'];
 
 export interface AudioChunk {
