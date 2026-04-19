@@ -283,16 +283,34 @@
                     <span class="player-title" id="playerTitle">Аудио</span>
                     <span class="player-meta" id="playerMeta"></span>
                 </div>
-                <audio id="audioPlayer" controls preload="auto"></audio>
-                <div class="player-actions">
-                    <button id="btnDownload" class="btn btn-outline btn-sm" type="button">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                        Изтегли WAV
+
+                <!-- Seek Slider (like YouTube/Storytel) -->
+                <div class="seek-bar" id="seekBar">
+                    <input type="range" id="seekSlider" min="0" max="100" step="0.1" value="0" class="seek-slider" aria-label="Позиция на четене">
+                    <div class="seek-labels">
+                        <span id="seekPosition">0:00</span>
+                        <span id="seekChunkInfo"></span>
+                        <span id="seekDuration">0:00</span>
+                    </div>
+                </div>
+
+                <audio id="audioPlayer" preload="auto"></audio>
+
+                <!-- Playback Speed Quick Toggle -->
+                <div class="player-controls-row">
+                    <button id="btnSpeedToggle" class="btn btn-outline btn-sm speed-toggle-btn" type="button" title="Скорост на четене">
+                        ⚡ <span id="speedToggleLabel">1.0x</span>
                     </button>
-                    <button id="btnRegenerate" class="btn btn-outline btn-sm" type="button">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-                        Повтори
-                    </button>
+                    <div class="player-actions">
+                        <button id="btnDownload" class="btn btn-outline btn-sm" type="button">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            Изтегли WAV
+                        </button>
+                        <button id="btnRegenerate" class="btn btn-outline btn-sm" type="button">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                            Повтори
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>

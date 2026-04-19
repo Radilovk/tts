@@ -19,6 +19,7 @@
         HISTORY: 'gemini_tts_history',
         TRANSLATION_MODEL: 'gemini_tts_translation_model',
         TTS_LANGUAGE: 'gemini_tts_language',
+        PLAYBACK_SPEED: 'gemini_tts_playback_speed',
     };
 
     // Only generativelanguage.googleapis.com supports CORS from browser.
@@ -27,6 +28,9 @@
 
     const MAX_HISTORY_ITEMS = 50;
     const API_TIMEOUT_MS = 120000; // 2 minutes per chunk
+    const MAX_BUFFER_AHEAD = 2; // Buffer at most 2 chunks ahead of playback
+    const SPEED_OPTIONS = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+    const CHUNK_WAIT_INTERVAL_MS = 200;
 
     // Language instructions for TTS
     const LANGUAGE_INSTRUCTIONS = {
@@ -106,6 +110,13 @@
         audioPlayer: $('#audioPlayer'),
         btnDownload: $('#btnDownload'),
         btnRegenerate: $('#btnRegenerate'),
+        seekBar: $('#seekBar'),
+        seekSlider: $('#seekSlider'),
+        seekPosition: $('#seekPosition'),
+        seekChunkInfo: $('#seekChunkInfo'),
+        seekDuration: $('#seekDuration'),
+        btnSpeedToggle: $('#btnSpeedToggle'),
+        speedToggleLabel: $('#speedToggleLabel'),
 
         // Other
         toastContainer: $('#toastContainer'),
@@ -128,17 +139,30 @@
         streamMode: false,
         streamFinished: false,
         streamCurrentUrl: null,
+        // Seek & buffering state
+        streamChunks: [],         // all text chunks
+        streamChunkWavs: [],      // WAV blobs per chunk (null if not yet generated)
+        streamChunkDurations: [], // duration in seconds per chunk
+        streamCurrentChunk: 0,    // currently playing chunk index
+        streamTotalDuration: 0,   // estimated total duration
+        streamPlayedTime: 0,      // cumulative played time before current chunk
+        streamGeneratingIndex: -1, // chunk index currently being generated
+        streamPlaybackSpeed: 1.0,  // current playback speed
+        // Media session / wake lock
+        wakeLock: null,
     };
 
     // ==================== Initialization ====================
     function init() {
         loadSettings();
         loadHistory();
+        loadPlaybackSpeed();
         bindEvents();
         updateUI();
         checkOnboarding();
         setupOfflineDetection();
         registerServiceWorker();
+        setupMediaSession();
     }
 
     // ==================== Settings ====================
@@ -215,6 +239,89 @@
         }
     }
 
+    // ==================== Playback Speed (cached) ====================
+    function loadPlaybackSpeed() {
+        const saved = localStorage.getItem(STORAGE_KEYS.PLAYBACK_SPEED);
+        if (saved) {
+            state.streamPlaybackSpeed = parseFloat(saved) || 1.0;
+        }
+        updateSpeedToggleLabel();
+    }
+
+    function savePlaybackSpeed() {
+        localStorage.setItem(STORAGE_KEYS.PLAYBACK_SPEED, String(state.streamPlaybackSpeed));
+    }
+
+    function cyclePlaybackSpeed() {
+        const current = state.streamPlaybackSpeed;
+        const idx = SPEED_OPTIONS.indexOf(current);
+        const nextIdx = (idx + 1) % SPEED_OPTIONS.length;
+        state.streamPlaybackSpeed = SPEED_OPTIONS[nextIdx];
+        savePlaybackSpeed();
+        updateSpeedToggleLabel();
+
+        // Apply to currently playing audio
+        if (els.audioPlayer.src) {
+            els.audioPlayer.playbackRate = state.streamPlaybackSpeed;
+        }
+        // Also sync the settings slider
+        els.speedSlider.value = state.streamPlaybackSpeed;
+        updateSpeedLabel();
+        saveSettings();
+    }
+
+    function updateSpeedToggleLabel() {
+        if (els.speedToggleLabel) {
+            els.speedToggleLabel.textContent = state.streamPlaybackSpeed.toFixed(1) + 'x';
+        }
+    }
+
+    // ==================== Media Session & Wake Lock ====================
+    function setupMediaSession() {
+        if ('mediaSession' in navigator) {
+            navigator.mediaSession.metadata = new MediaMetadata({
+                title: 'Gemini TTS',
+                artist: 'Четец на глас',
+                album: 'TTS',
+            });
+
+            navigator.mediaSession.setActionHandler('play', () => {
+                els.audioPlayer.play().catch(() => {});
+            });
+            navigator.mediaSession.setActionHandler('pause', () => {
+                els.audioPlayer.pause();
+            });
+            navigator.mediaSession.setActionHandler('previoustrack', () => {
+                seekToChunk(Math.max(0, state.streamCurrentChunk - 1));
+            });
+            navigator.mediaSession.setActionHandler('nexttrack', () => {
+                if (state.streamCurrentChunk < state.streamChunkWavs.length - 1) {
+                    seekToChunk(state.streamCurrentChunk + 1);
+                }
+            });
+        }
+    }
+
+    async function requestWakeLock() {
+        if ('wakeLock' in navigator) {
+            try {
+                state.wakeLock = await navigator.wakeLock.request('screen');
+                state.wakeLock.addEventListener('release', () => {
+                    state.wakeLock = null;
+                });
+            } catch {
+                // Wake Lock not available or denied — not critical
+            }
+        }
+    }
+
+    function releaseWakeLock() {
+        if (state.wakeLock) {
+            state.wakeLock.release().catch(() => {});
+            state.wakeLock = null;
+        }
+    }
+
     // ==================== Events ====================
     function bindEvents() {
         // Settings panel
@@ -268,8 +375,11 @@
         // Speed slider real-time update
         els.speedSlider.addEventListener('input', () => {
             updateSpeedLabel();
+            state.streamPlaybackSpeed = parseFloat(els.speedSlider.value);
+            savePlaybackSpeed();
+            updateSpeedToggleLabel();
             if (els.audioPlayer.src) {
-                els.audioPlayer.playbackRate = parseFloat(els.speedSlider.value);
+                els.audioPlayer.playbackRate = state.streamPlaybackSpeed;
             }
         });
 
@@ -364,10 +474,34 @@
             }
         });
 
+        // Track current time for seek slider
+        els.audioPlayer.addEventListener('timeupdate', () => {
+            if (state.streamMode) {
+                updateSeekSliderFromPlayback();
+            }
+        });
+
         // Streaming playback: when a chunk finishes, play next in queue
         els.audioPlayer.addEventListener('ended', () => {
             if (state.streamMode) {
                 playNextStreamChunk();
+            }
+        });
+
+        // Seek slider interaction
+        els.seekSlider.addEventListener('input', () => {
+            if (state.streamMode || state.streamChunkWavs.length > 0) {
+                handleSeekSliderInput();
+            }
+        });
+
+        // Speed toggle button
+        els.btnSpeedToggle.addEventListener('click', cyclePlaybackSpeed);
+
+        // Keep playing when visibility changes (background/screen off)
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible' && state.streamMode) {
+                requestWakeLock();
             }
         });
 
@@ -945,69 +1079,46 @@
         cleanupStreamState();
         state.streamMode = true;
 
+        // Request wake lock for background playback
+        requestWakeLock();
+
         try {
             const chunkSize = parseInt(els.chunkSize.value);
             const chunks = splitTextIntoChunks(text, chunkSize);
+            // Capture voice/model/lang at generation start for consistent timbre
             const model = els.modelSelect.value;
             const voice = els.voiceSelect.value;
             const lang = els.ttsLanguage.value;
-            let translatedChunks = [];
+            let translatedChunks = new Array(chunks.length).fill('');
+
+            // Initialize chunk tracking
+            state.streamChunks = chunks;
+            state.streamChunkWavs = new Array(chunks.length).fill(null);
+            state.streamChunkDurations = new Array(chunks.length).fill(0);
+            state.streamPcmChunks = new Array(chunks.length).fill(null);
+            state.streamCurrentChunk = 0;
+            state.streamTotalDuration = 0;
+            state.streamPlayedTime = 0;
 
             // Show player section immediately for streaming
             els.playerTitle.textContent = text.substring(0, 60) + (text.length > 60 ? '...' : '');
+            els.playerSection.classList.remove('hidden');
+            updateSeekChunkInfo();
 
-            for (let i = 0; i < chunks.length; i++) {
-                // Check if cancelled
-                if (controller.signal.aborted) {
-                    throw new DOMException('Cancelled', 'AbortError');
-                }
-
-                let ttsText = chunks[i];
-
-                // If translate mode, translate this chunk first
-                if (translateMode) {
-                    showProgress(
-                        chunks.length > 1
-                            ? `Превод: част ${i + 1} от ${chunks.length}...`
-                            : 'Превеждане...',
-                        false,
-                        (i / chunks.length) * 100
-                    );
-
-                    ttsText = await translateChunk(chunks[i], apiKey, controller.signal);
-                    translatedChunks.push(ttsText);
-                }
-
-                // Generate TTS for this chunk
-                showProgress(
-                    chunks.length > 1
-                        ? `Реч: част ${i + 1} от ${chunks.length}...`
-                        : 'Генериране на реч...',
-                    false,
-                    ((i + (translateMode ? 0.5 : 0)) / chunks.length) * 100
-                );
-
-                const result = await generateAudioChunk(
-                    ttsText, apiKey, model, voice, lang, controller.signal
-                );
-
-                state.streamPcmChunks.push(result.audioData);
-                if (result.sampleRate) {
-                    state.streamSampleRate = result.sampleRate;
-                }
-
-                // Convert chunk to WAV and enqueue for immediate playback
-                const chunkWav = pcmToWav(result.audioData, state.streamSampleRate);
-                enqueueStreamChunk(chunkWav);
-
-                showProgress(
-                    chunks.length > 1
-                        ? `Част ${i + 1} от ${chunks.length} ✓`
-                        : 'Финализиране...',
-                    false,
-                    ((i + 1) / chunks.length) * 100
-                );
+            // Update Media Session metadata
+            if ('mediaSession' in navigator) {
+                navigator.mediaSession.metadata = new MediaMetadata({
+                    title: text.substring(0, 60) + (text.length > 60 ? '...' : ''),
+                    artist: `Глас: ${voice}`,
+                    album: 'Gemini TTS',
+                });
             }
+
+            // Generate chunks with max 2 buffered ahead
+            await generateChunksWithBuffering(
+                chunks, apiKey, model, voice, lang, translateMode,
+                translatedChunks, controller
+            );
 
             // All chunks generated
             state.streamFinished = true;
@@ -1040,11 +1151,108 @@
             } else {
                 showToast(`Грешка: ${err.message}`, 'error');
             }
-            cleanupStreamState();
+            // Don't cleanup if we have some chunks already (allow replay)
+            if (state.streamChunkWavs.every(w => w === null)) {
+                cleanupStreamState();
+            } else {
+                state.streamFinished = true;
+                finalizeStreamAudio(text);
+            }
         } finally {
             setGeneratingState(false);
             state.abortController = null;
         }
+    }
+
+    async function generateChunksWithBuffering(
+        chunks, apiKey, model, voice, lang, translateMode,
+        translatedChunks, controller
+    ) {
+        for (let i = 0; i < chunks.length; i++) {
+            // Check if cancelled
+            if (controller.signal.aborted) {
+                throw new DOMException('Cancelled', 'AbortError');
+            }
+
+            // Wait if we're more than MAX_BUFFER_AHEAD chunks ahead of playback
+            while (i - state.streamCurrentChunk >= MAX_BUFFER_AHEAD
+                   && !controller.signal.aborted
+                   && state.streamMode) {
+                await new Promise(resolve => setTimeout(resolve, CHUNK_WAIT_INTERVAL_MS));
+            }
+
+            if (controller.signal.aborted) {
+                throw new DOMException('Cancelled', 'AbortError');
+            }
+
+            // Skip if this chunk was already generated (e.g. after a seek)
+            if (state.streamChunkWavs[i]) {
+                continue;
+            }
+
+            state.streamGeneratingIndex = i;
+
+            let ttsText = chunks[i];
+
+            // If translate mode, translate this chunk first
+            if (translateMode) {
+                showProgress(
+                    chunks.length > 1
+                        ? `Превод: част ${i + 1} от ${chunks.length}...`
+                        : 'Превеждане...',
+                    false,
+                    (i / chunks.length) * 100
+                );
+
+                ttsText = await translateChunk(chunks[i], apiKey, controller.signal);
+                translatedChunks[i] = ttsText;
+            }
+
+            // Generate TTS for this chunk — same model/voice/lang for consistency
+            showProgress(
+                chunks.length > 1
+                    ? `Реч: част ${i + 1} от ${chunks.length}...`
+                    : 'Генериране на реч...',
+                false,
+                ((i + (translateMode ? 0.5 : 0)) / chunks.length) * 100
+            );
+
+            const result = await generateAudioChunk(
+                ttsText, apiKey, model, voice, lang, controller.signal
+            );
+
+            state.streamPcmChunks[i] = result.audioData;
+            if (result.sampleRate) {
+                state.streamSampleRate = result.sampleRate;
+            }
+
+            // Convert chunk to WAV
+            const chunkWav = pcmToWav(result.audioData, state.streamSampleRate);
+            state.streamChunkWavs[i] = chunkWav;
+
+            // Calculate duration of this chunk
+            // 16-bit PCM = 2 bytes per sample
+            const chunkDuration = (result.audioData.byteLength / 2) / state.streamSampleRate;
+            state.streamChunkDurations[i] = chunkDuration;
+            state.streamTotalDuration = state.streamChunkDurations.reduce((a, b) => a + b, 0);
+
+            // Update seek slider total
+            updateSeekSliderTotal();
+
+            // If this is the chunk we need to play next, start playback
+            if (i === state.streamCurrentChunk && !state.isStreamPlaying && els.autoPlay.checked) {
+                playChunkByIndex(i);
+            }
+
+            showProgress(
+                chunks.length > 1
+                    ? `Част ${i + 1} от ${chunks.length} ✓`
+                    : 'Финализиране...',
+                false,
+                ((i + 1) / chunks.length) * 100
+            );
+        }
+        state.streamGeneratingIndex = -1;
     }
 
     function stopGeneration() {
@@ -1055,11 +1263,88 @@
         // Stop streaming playback
         if (state.streamMode) {
             els.audioPlayer.pause();
-            cleanupStreamState();
+            // Don't cleanup if we have generated chunks (allow seek)
+            if (state.streamChunkWavs.some(w => w !== null)) {
+                state.streamFinished = true;
+                state.isStreamPlaying = false;
+            } else {
+                cleanupStreamState();
+            }
         }
+        releaseWakeLock();
     }
 
     // ==================== Streaming Playback Queue ====================
+    function playChunkByIndex(index) {
+        if (index < 0 || index >= state.streamChunkWavs.length) return;
+        if (!state.streamChunkWavs[index]) return; // not generated yet
+
+        state.isStreamPlaying = true;
+        state.streamCurrentChunk = index;
+
+        // Calculate played time before this chunk
+        state.streamPlayedTime = 0;
+        for (let j = 0; j < index; j++) {
+            state.streamPlayedTime += state.streamChunkDurations[j] || 0;
+        }
+
+        // Revoke previous chunk URL
+        if (state.streamCurrentUrl) {
+            URL.revokeObjectURL(state.streamCurrentUrl);
+        }
+
+        const url = URL.createObjectURL(state.streamChunkWavs[index]);
+        state.streamCurrentUrl = url;
+
+        els.audioPlayer.src = url;
+        els.audioPlayer.playbackRate = state.streamPlaybackSpeed;
+        els.playerSection.classList.remove('hidden');
+
+        updateSeekChunkInfo();
+
+        els.audioPlayer.play().catch(() => {
+            showToast('Натиснете ▶ за възпроизвеждане', 'info');
+        });
+    }
+
+    function playNextStreamChunk() {
+        const nextIndex = state.streamCurrentChunk + 1;
+
+        if (nextIndex >= state.streamChunks.length) {
+            // All chunks played
+            state.isStreamPlaying = false;
+            if (state.streamCurrentUrl) {
+                URL.revokeObjectURL(state.streamCurrentUrl);
+                state.streamCurrentUrl = null;
+            }
+            if (state.streamFinished) {
+                onStreamPlaybackComplete();
+            }
+            releaseWakeLock();
+            return;
+        }
+
+        if (state.streamChunkWavs[nextIndex]) {
+            // Next chunk is ready, play it
+            playChunkByIndex(nextIndex);
+        } else {
+            // Next chunk not ready yet, wait for it
+            state.streamCurrentChunk = nextIndex;
+            state.isStreamPlaying = false;
+            updateSeekChunkInfo();
+
+            const waitForChunk = () => {
+                if (!state.streamMode) return;
+                if (state.streamChunkWavs[nextIndex]) {
+                    playChunkByIndex(nextIndex);
+                } else {
+                    setTimeout(waitForChunk, CHUNK_WAIT_INTERVAL_MS);
+                }
+            };
+            waitForChunk();
+        }
+    }
+
     function enqueueStreamChunk(wavBlob) {
         const url = URL.createObjectURL(wavBlob);
         state.audioQueue.push({ wavBlob, url });
@@ -1070,52 +1355,21 @@
         }
     }
 
-    function playNextStreamChunk() {
-        if (state.audioQueue.length === 0) {
-            state.isStreamPlaying = false;
-            // Revoke the last played chunk URL
-            if (state.streamCurrentUrl) {
-                URL.revokeObjectURL(state.streamCurrentUrl);
-                state.streamCurrentUrl = null;
-            }
-            // If all chunks are generated and done playing, set combined audio
-            if (state.streamFinished) {
-                onStreamPlaybackComplete();
-            }
-            return;
-        }
-
-        state.isStreamPlaying = true;
-        const entry = state.audioQueue.shift();
-
-        // Revoke the previous chunk URL
-        if (state.streamCurrentUrl) {
-            URL.revokeObjectURL(state.streamCurrentUrl);
-        }
-        state.streamCurrentUrl = entry.url;
-
-        els.audioPlayer.src = entry.url;
-        els.audioPlayer.playbackRate = parseFloat(els.speedSlider.value);
-        els.playerSection.classList.remove('hidden');
-
-        els.audioPlayer.play().catch(() => {
-            showToast('Натиснете ▶ за възпроизвеждане', 'info');
-        });
-    }
-
     function onStreamPlaybackComplete() {
         // All chunks generated and played — set combined audio for replay/download
         if (state.currentAudioUrl) {
             els.audioPlayer.src = state.currentAudioUrl;
-            els.audioPlayer.playbackRate = parseFloat(els.speedSlider.value);
+            els.audioPlayer.playbackRate = state.streamPlaybackSpeed;
         }
         state.streamMode = false;
+        releaseWakeLock();
     }
 
     function finalizeStreamAudio(displayText) {
-        if (state.streamPcmChunks.length === 0) return;
+        const generatedChunks = state.streamPcmChunks.filter(c => c);
+        if (generatedChunks.length === 0) return;
 
-        const combinedPcm = combineArrayBuffers(state.streamPcmChunks);
+        const combinedPcm = combineArrayBuffers(generatedChunks);
         const fullWav = pcmToWav(combinedPcm, state.streamSampleRate);
 
         if (state.currentAudioUrl) {
@@ -1129,9 +1383,9 @@
             displayText.substring(0, 60) + (displayText.length > 60 ? '...' : '');
 
         // If playback already finished (single chunk case), set combined audio now
-        if (!state.isStreamPlaying && state.audioQueue.length === 0) {
+        if (!state.isStreamPlaying && state.streamChunkWavs.every(w => w !== null)) {
             els.audioPlayer.src = state.currentAudioUrl;
-            els.audioPlayer.playbackRate = parseFloat(els.speedSlider.value);
+            els.audioPlayer.playbackRate = state.streamPlaybackSpeed;
             els.playerSection.classList.remove('hidden');
             state.streamMode = false;
         }
@@ -1152,6 +1406,113 @@
         state.streamSampleRate = 24000;
         state.streamMode = false;
         state.streamFinished = false;
+        state.streamChunks = [];
+        state.streamChunkWavs = [];
+        state.streamChunkDurations = [];
+        state.streamCurrentChunk = 0;
+        state.streamTotalDuration = 0;
+        state.streamPlayedTime = 0;
+        state.streamGeneratingIndex = -1;
+        releaseWakeLock();
+    }
+
+    // ==================== Seek Slider ====================
+    function updateSeekSliderFromPlayback() {
+        if (!state.streamMode || state.streamTotalDuration <= 0) return;
+
+        const currentTime = els.audioPlayer.currentTime || 0;
+        const absoluteTime = state.streamPlayedTime + currentTime;
+        const percent = (absoluteTime / state.streamTotalDuration) * 100;
+
+        els.seekSlider.value = Math.min(percent, 100);
+        els.seekPosition.textContent = formatDuration(absoluteTime);
+        els.seekDuration.textContent = formatDuration(state.streamTotalDuration);
+    }
+
+    function updateSeekSliderTotal() {
+        if (state.streamTotalDuration > 0) {
+            els.seekDuration.textContent = formatDuration(state.streamTotalDuration);
+        }
+    }
+
+    function updateSeekChunkInfo() {
+        const total = state.streamChunks.length;
+        if (total > 1) {
+            els.seekChunkInfo.textContent = `Част ${state.streamCurrentChunk + 1}/${total}`;
+        } else {
+            els.seekChunkInfo.textContent = '';
+        }
+    }
+
+    function handleSeekSliderInput() {
+        const percent = parseFloat(els.seekSlider.value);
+        const targetTime = (percent / 100) * state.streamTotalDuration;
+
+        // Find the chunk that corresponds to this time
+        let cumulative = 0;
+        let targetChunk = 0;
+        let offsetInChunk = 0;
+
+        for (let i = 0; i < state.streamChunkDurations.length; i++) {
+            const chunkDur = state.streamChunkDurations[i];
+            if (cumulative + chunkDur > targetTime) {
+                targetChunk = i;
+                offsetInChunk = targetTime - cumulative;
+                break;
+            }
+            cumulative += chunkDur;
+            if (i < state.streamChunkDurations.length - 1) {
+                targetChunk = i + 1;
+            }
+        }
+
+        els.seekPosition.textContent = formatDuration(targetTime);
+
+        // Seek to the target chunk
+        seekToChunk(targetChunk, offsetInChunk);
+    }
+
+    function seekToChunk(chunkIndex, offsetInChunk = 0) {
+        if (chunkIndex < 0 || chunkIndex >= state.streamChunks.length) return;
+
+        if (!state.streamChunkWavs[chunkIndex]) {
+            showToast('Тази част все още не е генерирана', 'info');
+            return;
+        }
+
+        state.streamCurrentChunk = chunkIndex;
+        state.streamPlayedTime = 0;
+        for (let j = 0; j < chunkIndex; j++) {
+            state.streamPlayedTime += state.streamChunkDurations[j] || 0;
+        }
+
+        // Revoke previous URL
+        if (state.streamCurrentUrl) {
+            URL.revokeObjectURL(state.streamCurrentUrl);
+        }
+
+        const url = URL.createObjectURL(state.streamChunkWavs[chunkIndex]);
+        state.streamCurrentUrl = url;
+
+        els.audioPlayer.src = url;
+        els.audioPlayer.playbackRate = state.streamPlaybackSpeed;
+
+        // If an offset within the chunk was requested, seek to it once loaded
+        if (offsetInChunk && offsetInChunk > 0) {
+            const onCanPlay = () => {
+                els.audioPlayer.currentTime = offsetInChunk;
+                els.audioPlayer.removeEventListener('canplay', onCanPlay);
+            };
+            els.audioPlayer.addEventListener('canplay', onCanPlay);
+        }
+
+        state.isStreamPlaying = true;
+        state.streamMode = true;
+        updateSeekChunkInfo();
+
+        els.audioPlayer.play().catch(() => {
+            showToast('Натиснете ▶ за възпроизвеждане', 'info');
+        });
     }
 
     function getTextForSpeech() {
