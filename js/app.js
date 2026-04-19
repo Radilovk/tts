@@ -127,6 +127,7 @@
         streamSampleRate: 24000,
         streamMode: false,
         streamFinished: false,
+        streamCurrentUrl: null,
     };
 
     // ==================== Initialization ====================
@@ -705,7 +706,14 @@
         for (let i = 1; i <= pdf.numPages; i++) {
             const page = await pdf.getPage(i);
             const content = await page.getTextContent();
-            const pageText = content.items.map(item => item.str).join(' ');
+            let pageText = '';
+            for (const item of content.items) {
+                pageText += item.str;
+                // Preserve line breaks indicated by hasEOL
+                if (item.hasEOL) {
+                    pageText += '\n';
+                }
+            }
             if (pageText.trim()) {
                 fullText += pageText.trim() + '\n\n';
             }
@@ -943,7 +951,7 @@
             const model = els.modelSelect.value;
             const voice = els.voiceSelect.value;
             const lang = els.ttsLanguage.value;
-            let translatedFullText = '';
+            let translatedChunks = [];
 
             // Show player section immediately for streaming
             els.playerTitle.textContent = text.substring(0, 60) + (text.length > 60 ? '...' : '');
@@ -967,7 +975,7 @@
                     );
 
                     ttsText = await translateChunk(chunks[i], apiKey, controller.signal);
-                    translatedFullText += (translatedFullText ? '\n' : '') + ttsText;
+                    translatedChunks.push(ttsText);
                 }
 
                 // Generate TTS for this chunk
@@ -1003,6 +1011,7 @@
 
             // All chunks generated
             state.streamFinished = true;
+            const translatedFullText = translatedChunks.join('\n');
 
             // If translate mode, update the translation preview
             if (translateMode && translatedFullText) {
@@ -1064,6 +1073,11 @@
     function playNextStreamChunk() {
         if (state.audioQueue.length === 0) {
             state.isStreamPlaying = false;
+            // Revoke the last played chunk URL
+            if (state.streamCurrentUrl) {
+                URL.revokeObjectURL(state.streamCurrentUrl);
+                state.streamCurrentUrl = null;
+            }
             // If all chunks are generated and done playing, set combined audio
             if (state.streamFinished) {
                 onStreamPlaybackComplete();
@@ -1073,6 +1087,12 @@
 
         state.isStreamPlaying = true;
         const entry = state.audioQueue.shift();
+
+        // Revoke the previous chunk URL
+        if (state.streamCurrentUrl) {
+            URL.revokeObjectURL(state.streamCurrentUrl);
+        }
+        state.streamCurrentUrl = entry.url;
 
         els.audioPlayer.src = entry.url;
         els.audioPlayer.playbackRate = parseFloat(els.speedSlider.value);
@@ -1118,6 +1138,11 @@
     }
 
     function cleanupStreamState() {
+        // Revoke currently playing chunk URL
+        if (state.streamCurrentUrl) {
+            URL.revokeObjectURL(state.streamCurrentUrl);
+            state.streamCurrentUrl = null;
+        }
         for (const entry of state.audioQueue) {
             URL.revokeObjectURL(entry.url);
         }
