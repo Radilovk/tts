@@ -221,16 +221,16 @@
                     </button>
                 </div>
             </div>
-            <textarea id="textInput" aria-label="Текст за четене на глас" placeholder="Въведете текст за четене на глас...&#10;&#10;Поддържа български и английски текст.&#10;Включете превод EN → BG за автоматичен превод." rows="6" spellcheck="true"></textarea>
+            <textarea id="textInput" aria-label="Текст за четене на глас" placeholder="Въведете текст за четене на глас...&#10;&#10;Поддържа български и английски текст.&#10;Включете превод EN → BG за автоматичен превод.&#10;Качете файл: txt, pdf, epub, html, srt" rows="6" spellcheck="true"></textarea>
 
             <!-- File Upload -->
             <div class="file-upload-area" id="dropZone">
-                <input type="file" id="fileInput" accept=".txt,.md,.html,.htm,.srt" hidden>
+                <input type="file" id="fileInput" accept=".txt,.md,.html,.htm,.srt,.pdf,.epub" hidden>
                 <button id="btnUpload" class="btn btn-outline" type="button">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
                     Качи файл с текст
                 </button>
-                <small>Поддържа: .txt, .md, .html, .srt</small>
+                <small>Поддържа: .txt, .md, .html, .srt, .pdf, .epub</small>
             </div>
         </div>
 

@@ -120,6 +120,14 @@
         translatedContent: '',
         history: [],
         abortController: null,
+        // Streaming playback pipeline
+        audioQueue: [],
+        isStreamPlaying: false,
+        streamPcmChunks: [],
+        streamSampleRate: 24000,
+        streamMode: false,
+        streamFinished: false,
+        streamCurrentUrl: null,
     };
 
     // ==================== Initialization ====================
@@ -353,6 +361,13 @@
                     ? formatFileSize(state.currentAudioBlob.size)
                     : '';
                 els.playerMeta.textContent = `${formatDuration(dur)}${size ? ' · ' + size : ''}`;
+            }
+        });
+
+        // Streaming playback: when a chunk finishes, play next in queue
+        els.audioPlayer.addEventListener('ended', () => {
+            if (state.streamMode) {
+                playNextStreamChunk();
             }
         });
 
@@ -596,51 +611,176 @@
         }
     }
 
-    function handleFile(file) {
-        const maxSize = 5 * 1024 * 1024; // 5MB
+    async function handleFile(file) {
+        const maxSize = 10 * 1024 * 1024; // 10MB
         if (file.size > maxSize) {
-            showToast('Файлът е твърде голям (макс. 5MB)', 'error');
+            showToast('Файлът е твърде голям (макс. 10MB)', 'error');
             return;
         }
 
-        const allowedExtensions = ['.txt', '.md', '.html', '.htm', '.srt'];
+        const allowedExtensions = ['.txt', '.md', '.html', '.htm', '.srt', '.pdf', '.epub'];
         const ext = '.' + file.name.split('.').pop().toLowerCase();
         if (!allowedExtensions.includes(ext)) {
             showToast('Неподдържан формат. Използвайте: ' + allowedExtensions.join(', '), 'error');
             return;
         }
 
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            let text = e.target.result;
+        try {
+            let text = '';
 
-            // Strip HTML tags if HTML file
-            if (ext === '.html' || ext === '.htm') {
-                const parser = new DOMParser();
-                const doc = parser.parseFromString(text, 'text/html');
-                text = doc.body.textContent || '';
-            }
+            if (ext === '.pdf') {
+                showToast('Зареждане на PDF файл...', 'info');
+                text = await extractTextFromPdf(file);
+            } else if (ext === '.epub') {
+                showToast('Зареждане на EPUB файл...', 'info');
+                text = await extractTextFromEpub(file);
+            } else {
+                text = await readFileAsText(file);
 
-            // Clean up SRT format
-            if (ext === '.srt') {
-                text = text
-                    .replace(/^\d+\s*$/gm, '')
-                    .replace(/\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}/g, '')
-                    .replace(/\n{3,}/g, '\n\n')
-                    .trim();
+                // Strip HTML tags if HTML file
+                if (ext === '.html' || ext === '.htm') {
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(text, 'text/html');
+                    text = doc.body.textContent || '';
+                }
+
+                // Clean up SRT format
+                if (ext === '.srt') {
+                    text = text
+                        .replace(/^\d+\s*$/gm, '')
+                        .replace(/\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}/g, '')
+                        .replace(/\n{3,}/g, '\n\n')
+                        .trim();
+                }
             }
 
             els.textInput.value = text;
             updateCharCount();
-            // Safe toast: use escapeHtml for filename
             showToast(`Файл „${escapeHtml(file.name)}" зареден (${formatFileSize(file.size)})`, 'success');
-        };
+        } catch (err) {
+            showToast(`Грешка при четене: ${err.message}`, 'error');
+        }
+    }
 
-        reader.onerror = () => {
-            showToast('Грешка при четене на файла', 'error');
-        };
+    function readFileAsText(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = (e) => resolve(e.target.result);
+            reader.onerror = () => reject(new Error('Грешка при четене на файла'));
+            reader.readAsText(file, 'UTF-8');
+        });
+    }
 
-        reader.readAsText(file, 'UTF-8');
+    // ==================== PDF / EPUB Support ====================
+    async function loadPdfJs() {
+        if (window.pdfjsLib) return window.pdfjsLib;
+
+        const pdfjs = await import(
+            /* webpackIgnore: true */
+            'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.2.67/build/pdf.min.mjs'
+        );
+        pdfjs.GlobalWorkerOptions.workerSrc =
+            'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.2.67/build/pdf.worker.min.mjs';
+        window.pdfjsLib = pdfjs;
+        return pdfjs;
+    }
+
+    function loadJSZip() {
+        if (window.JSZip) return Promise.resolve(window.JSZip);
+
+        return new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js';
+            script.onload = () => resolve(window.JSZip);
+            script.onerror = () => reject(new Error('Неуспешно зареждане на JSZip'));
+            document.head.appendChild(script);
+        });
+    }
+
+    async function extractTextFromPdf(file) {
+        const pdfjs = await loadPdfJs();
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+        let fullText = '';
+
+        for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const content = await page.getTextContent();
+            let pageText = '';
+            for (const item of content.items) {
+                pageText += item.str;
+                // Preserve line breaks indicated by hasEOL
+                if (item.hasEOL) {
+                    pageText += '\n';
+                }
+            }
+            if (pageText.trim()) {
+                fullText += pageText.trim() + '\n\n';
+            }
+        }
+
+        return fullText.trim();
+    }
+
+    async function extractTextFromEpub(file) {
+        const JSZip = await loadJSZip();
+        const arrayBuffer = await file.arrayBuffer();
+        const zip = await JSZip.loadAsync(arrayBuffer);
+
+        // Read container.xml to find the rootfile
+        const containerFile = zip.file('META-INF/container.xml');
+        if (!containerFile) {
+            throw new Error('Невалиден EPUB файл (липсва container.xml)');
+        }
+        const containerXml = await containerFile.async('string');
+        const parser = new DOMParser();
+        const containerDoc = parser.parseFromString(containerXml, 'text/xml');
+        const rootfileEl = containerDoc.querySelector('rootfile');
+        if (!rootfileEl) {
+            throw new Error('Невалиден EPUB файл (липсва rootfile)');
+        }
+        const rootfilePath = rootfileEl.getAttribute('full-path');
+
+        // Read content.opf
+        const opfFile = zip.file(rootfilePath);
+        if (!opfFile) {
+            throw new Error('Невалиден EPUB файл (липсва OPF)');
+        }
+        const opfContent = await opfFile.async('string');
+        const opfDoc = parser.parseFromString(opfContent, 'text/xml');
+
+        // Build manifest map (id -> href)
+        const manifestMap = {};
+        opfDoc.querySelectorAll('manifest item').forEach(item => {
+            manifestMap[item.getAttribute('id')] = item.getAttribute('href');
+        });
+
+        // Get spine (reading order)
+        const spineItems = opfDoc.querySelectorAll('spine itemref');
+        const opfDir = rootfilePath.includes('/')
+            ? rootfilePath.substring(0, rootfilePath.lastIndexOf('/') + 1)
+            : '';
+
+        // Extract text from each chapter in order
+        let fullText = '';
+        for (const itemRef of spineItems) {
+            const idref = itemRef.getAttribute('idref');
+            const href = manifestMap[idref];
+            if (!href) continue;
+
+            const filePath = opfDir + href;
+            const fileObj = zip.file(filePath);
+            if (!fileObj) continue;
+
+            const html = await fileObj.async('string');
+            const doc = parser.parseFromString(html, 'text/html');
+            const text = doc.body ? doc.body.textContent : '';
+            if (text.trim()) {
+                fullText += text.trim() + '\n\n';
+            }
+        }
+
+        return fullText.trim();
     }
 
     // ==================== Translation ====================
@@ -734,9 +874,51 @@
         return null;
     }
 
+    // Translate a single chunk of text (used in streaming pipeline)
+    async function translateChunk(text, apiKey, signal) {
+        const model = els.translationModel.value;
+        const sanitizedText = sanitizeForPrompt(text);
+
+        const response = await fetchWithTimeout(
+            `${API_BASE}/${model}:generateContent?key=${apiKey}`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{
+                        parts: [{
+                            text: `Преведи следния текст от английски на български. Върни САМО превода, без обяснения, без кавички и без допълнителен текст.\n\n---BEGIN TEXT---\n${sanitizedText}\n---END TEXT---`
+                        }]
+                    }],
+                    generationConfig: {
+                        temperature: 0.3,
+                        maxOutputTokens: 8192,
+                    }
+                }),
+                signal: signal,
+            },
+            API_TIMEOUT_MS
+        );
+
+        if (!response.ok) {
+            throw await createApiError(response);
+        }
+
+        const data = await response.json();
+        const translated = extractTextFromResponse(data);
+
+        if (!translated) {
+            throw new Error('Не е получен превод от API');
+        }
+
+        return translated;
+    }
+
     // ==================== TTS Generation ====================
     async function generateSpeech() {
-        const text = getTextForSpeech();
+        const translateMode = els.translateToggle.checked;
+        // In translate mode, always use original text (we translate per-segment)
+        const text = translateMode ? els.textInput.value.trim() : getTextForSpeech();
         if (!text) {
             showToast('Моля, въведете текст', 'error');
             return;
@@ -759,14 +941,20 @@
         setGeneratingState(true);
         showProgress('Подготовка...', true);
 
+        // Initialize streaming state
+        cleanupStreamState();
+        state.streamMode = true;
+
         try {
             const chunkSize = parseInt(els.chunkSize.value);
             const chunks = splitTextIntoChunks(text, chunkSize);
-            const audioChunks = [];
-            let sampleRate = 24000;
             const model = els.modelSelect.value;
             const voice = els.voiceSelect.value;
             const lang = els.ttsLanguage.value;
+            let translatedChunks = [];
+
+            // Show player section immediately for streaming
+            els.playerTitle.textContent = text.substring(0, 60) + (text.length > 60 ? '...' : '');
 
             for (let i = 0; i < chunks.length; i++) {
                 // Check if cancelled
@@ -774,21 +962,43 @@
                     throw new DOMException('Cancelled', 'AbortError');
                 }
 
+                let ttsText = chunks[i];
+
+                // If translate mode, translate this chunk first
+                if (translateMode) {
+                    showProgress(
+                        chunks.length > 1
+                            ? `Превод: част ${i + 1} от ${chunks.length}...`
+                            : 'Превеждане...',
+                        false,
+                        (i / chunks.length) * 100
+                    );
+
+                    ttsText = await translateChunk(chunks[i], apiKey, controller.signal);
+                    translatedChunks.push(ttsText);
+                }
+
+                // Generate TTS for this chunk
                 showProgress(
                     chunks.length > 1
-                        ? `Част ${i + 1} от ${chunks.length}...`
+                        ? `Реч: част ${i + 1} от ${chunks.length}...`
                         : 'Генериране на реч...',
                     false,
-                    ((i) / chunks.length) * 100
+                    ((i + (translateMode ? 0.5 : 0)) / chunks.length) * 100
                 );
 
                 const result = await generateAudioChunk(
-                    chunks[i], apiKey, model, voice, lang, controller.signal
+                    ttsText, apiKey, model, voice, lang, controller.signal
                 );
-                audioChunks.push(result.audioData);
+
+                state.streamPcmChunks.push(result.audioData);
                 if (result.sampleRate) {
-                    sampleRate = result.sampleRate;
+                    state.streamSampleRate = result.sampleRate;
                 }
+
+                // Convert chunk to WAV and enqueue for immediate playback
+                const chunkWav = pcmToWav(result.audioData, state.streamSampleRate);
+                enqueueStreamChunk(chunkWav);
 
                 showProgress(
                     chunks.length > 1
@@ -799,44 +1009,30 @@
                 );
             }
 
-            // Combine all audio chunks
-            const combinedPcm = combineArrayBuffers(audioChunks);
+            // All chunks generated
+            state.streamFinished = true;
+            const translatedFullText = translatedChunks.join('\n');
 
-            // Convert PCM to WAV
-            const wavBlob = pcmToWav(combinedPcm, sampleRate);
-
-            // Clean up previous audio
-            if (state.currentAudioUrl) {
-                URL.revokeObjectURL(state.currentAudioUrl);
+            // If translate mode, update the translation preview
+            if (translateMode && translatedFullText) {
+                state.translatedContent = translatedFullText;
+                els.translatedText.textContent = translatedFullText;
+                els.translationPreview.classList.remove('hidden');
             }
 
-            state.currentAudioBlob = wavBlob;
-            state.currentAudioUrl = URL.createObjectURL(wavBlob);
-
-            // Set up player
-            els.audioPlayer.src = state.currentAudioUrl;
-            els.audioPlayer.playbackRate = parseFloat(els.speedSlider.value);
-            els.playerTitle.textContent = text.substring(0, 60) + (text.length > 60 ? '...' : '');
-            els.playerSection.classList.remove('hidden');
-
-            // Add to history
-            addToHistory(text, wavBlob, voice, model);
+            // Create combined WAV for download/replay
+            finalizeStreamAudio(translateMode ? translatedFullText : text);
 
             hideProgress();
             showToast('Речта е генерирана успешно! 🎉', 'success');
 
-            // Auto-play
-            if (els.autoPlay.checked) {
-                try {
-                    await els.audioPlayer.play();
-                } catch {
-                    // Autoplay may be blocked by browser — user needs to tap play
-                    showToast('Натиснете ▶ за възпроизвеждане', 'info');
-                }
-            }
-
-            // Scroll player into view
-            els.playerSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            // Add to history
+            addToHistory(
+                translateMode ? translatedFullText : text,
+                state.currentAudioBlob,
+                voice,
+                model
+            );
         } catch (err) {
             hideProgress();
             if (err.name === 'AbortError') {
@@ -844,6 +1040,7 @@
             } else {
                 showToast(`Грешка: ${err.message}`, 'error');
             }
+            cleanupStreamState();
         } finally {
             setGeneratingState(false);
             state.abortController = null;
@@ -855,6 +1052,106 @@
             state.abortController.abort();
             state.abortController = null;
         }
+        // Stop streaming playback
+        if (state.streamMode) {
+            els.audioPlayer.pause();
+            cleanupStreamState();
+        }
+    }
+
+    // ==================== Streaming Playback Queue ====================
+    function enqueueStreamChunk(wavBlob) {
+        const url = URL.createObjectURL(wavBlob);
+        state.audioQueue.push({ wavBlob, url });
+
+        // If nothing is playing yet, start playback
+        if (!state.isStreamPlaying && els.autoPlay.checked) {
+            playNextStreamChunk();
+        }
+    }
+
+    function playNextStreamChunk() {
+        if (state.audioQueue.length === 0) {
+            state.isStreamPlaying = false;
+            // Revoke the last played chunk URL
+            if (state.streamCurrentUrl) {
+                URL.revokeObjectURL(state.streamCurrentUrl);
+                state.streamCurrentUrl = null;
+            }
+            // If all chunks are generated and done playing, set combined audio
+            if (state.streamFinished) {
+                onStreamPlaybackComplete();
+            }
+            return;
+        }
+
+        state.isStreamPlaying = true;
+        const entry = state.audioQueue.shift();
+
+        // Revoke the previous chunk URL
+        if (state.streamCurrentUrl) {
+            URL.revokeObjectURL(state.streamCurrentUrl);
+        }
+        state.streamCurrentUrl = entry.url;
+
+        els.audioPlayer.src = entry.url;
+        els.audioPlayer.playbackRate = parseFloat(els.speedSlider.value);
+        els.playerSection.classList.remove('hidden');
+
+        els.audioPlayer.play().catch(() => {
+            showToast('Натиснете ▶ за възпроизвеждане', 'info');
+        });
+    }
+
+    function onStreamPlaybackComplete() {
+        // All chunks generated and played — set combined audio for replay/download
+        if (state.currentAudioUrl) {
+            els.audioPlayer.src = state.currentAudioUrl;
+            els.audioPlayer.playbackRate = parseFloat(els.speedSlider.value);
+        }
+        state.streamMode = false;
+    }
+
+    function finalizeStreamAudio(displayText) {
+        if (state.streamPcmChunks.length === 0) return;
+
+        const combinedPcm = combineArrayBuffers(state.streamPcmChunks);
+        const fullWav = pcmToWav(combinedPcm, state.streamSampleRate);
+
+        if (state.currentAudioUrl) {
+            URL.revokeObjectURL(state.currentAudioUrl);
+        }
+
+        state.currentAudioBlob = fullWav;
+        state.currentAudioUrl = URL.createObjectURL(fullWav);
+
+        els.playerTitle.textContent =
+            displayText.substring(0, 60) + (displayText.length > 60 ? '...' : '');
+
+        // If playback already finished (single chunk case), set combined audio now
+        if (!state.isStreamPlaying && state.audioQueue.length === 0) {
+            els.audioPlayer.src = state.currentAudioUrl;
+            els.audioPlayer.playbackRate = parseFloat(els.speedSlider.value);
+            els.playerSection.classList.remove('hidden');
+            state.streamMode = false;
+        }
+    }
+
+    function cleanupStreamState() {
+        // Revoke currently playing chunk URL
+        if (state.streamCurrentUrl) {
+            URL.revokeObjectURL(state.streamCurrentUrl);
+            state.streamCurrentUrl = null;
+        }
+        for (const entry of state.audioQueue) {
+            URL.revokeObjectURL(entry.url);
+        }
+        state.audioQueue = [];
+        state.isStreamPlaying = false;
+        state.streamPcmChunks = [];
+        state.streamSampleRate = 24000;
+        state.streamMode = false;
+        state.streamFinished = false;
     }
 
     function getTextForSpeech() {
