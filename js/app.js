@@ -171,6 +171,7 @@
         loadHistory();
         loadLibrary();
         loadPlaybackSpeed();
+        loadSavedPosition();
         bindEvents();
         updateUI();
         checkOnboarding();
@@ -1404,8 +1405,9 @@
             state.abortController.abort();
             state.abortController = null;
         }
-        // Stop streaming playback
+        // Stop streaming playback and save position
         if (state.streamMode) {
+            savePlaybackPosition();
             els.audioPlayer.pause();
             // Don't cleanup if we have generated chunks (allow seek)
             if (state.streamChunkWavs.some(w => w !== null)) {
@@ -1415,6 +1417,7 @@
                 cleanupStreamState();
             }
         }
+        updatePlayPauseIcon();
         releaseWakeLock();
     }
 
