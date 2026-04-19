@@ -1741,11 +1741,12 @@
         let unknownChars = 0;
 
         for (let i = 0; i < state.streamChunks.length; i++) {
+            const chunkText = state.streamChunks[i] || '';
             if (state.streamChunkDurations[i] > 0) {
                 knownDuration += state.streamChunkDurations[i];
-                knownChars += state.streamChunks[i].length;
+                knownChars += chunkText.length;
             } else {
-                unknownChars += (state.streamChunks[i] || '').length;
+                unknownChars += chunkText.length;
             }
         }
 
@@ -2324,7 +2325,7 @@
                         state.savedPosition = savedPos;
                     }
 
-                    showToast(`Книга „${escapeHtml(book.name)}" — продължаване от ${formatDuration(savedPos?.absoluteTime || 0)}`, 'success');
+                    showToast(`Книга „${escapeHtml(book.name)}" — продължаване от ${formatDuration(savedPos ? savedPos.absoluteTime : 0)}`, 'success');
 
                     // Auto-start generation if we have an API key
                     if (els.apiKey.value.trim()) {
