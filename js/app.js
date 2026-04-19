@@ -1139,9 +1139,7 @@
                 break;
             }
             cumulative += chunkDur;
-            if (i < state.streamChunkDurations.length - 1) {
-                targetChunk = i + 1;
-            }
+            targetChunk = Math.min(i + 1, state.streamChunkDurations.length - 1);
         }
 
         // If same chunk, just seek within it
@@ -1608,9 +1606,7 @@
                 break;
             }
             cumulative += chunkDur;
-            if (i < state.streamChunkDurations.length - 1) {
-                targetChunk = i + 1;
-            }
+            targetChunk = Math.min(i + 1, state.streamChunkDurations.length - 1);
         }
 
         els.seekPosition.textContent = formatDuration(targetTime);
@@ -1984,7 +1980,8 @@
         }
 
         const allowedExtensions = ['.txt', '.md', '.html', '.htm', '.srt', '.pdf', '.epub'];
-        const ext = '.' + file.name.split('.').pop().toLowerCase();
+        const dotIndex = file.name.lastIndexOf('.');
+        const ext = dotIndex >= 0 ? file.name.substring(dotIndex).toLowerCase() : '';
         if (!allowedExtensions.includes(ext)) {
             showToast('Неподдържан формат. Използвайте: ' + allowedExtensions.join(', '), 'error');
             return;
@@ -2016,7 +2013,7 @@
             }
 
             const book = {
-                id: Date.now().toString(),
+                id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString() + Math.random().toString(36).slice(2),
                 name: file.name,
                 text: text,
                 addedDate: new Date().toISOString(),
@@ -2040,7 +2037,7 @@
 
         els.libraryList.innerHTML = state.library.map((book, index) => {
             const charCount = book.text ? book.text.length : 0;
-            const wordCount = book.text ? book.text.trim().split(/\s+/).length : 0;
+            const wordCount = book.text && book.text.trim().length > 0 ? book.text.trim().split(/\s+/).length : 0;
             return `
                 <div class="library-item" data-index="${index}">
                     <span class="library-item-title">📖 ${escapeHtml(book.name)}</span>
