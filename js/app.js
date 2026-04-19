@@ -68,6 +68,7 @@
         historyList: $('#historyList'),
 
         // Header buttons
+        btnInstall: $('#btnInstall'),
         btnSettings: $('#btnSettings'),
         btnCloseSettings: $('#btnCloseSettings'),
         btnHistory: $('#btnHistory'),
@@ -162,6 +163,7 @@
         checkOnboarding();
         setupOfflineDetection();
         registerServiceWorker();
+        setupPwaInstall();
         setupMediaSession();
     }
 
@@ -237,6 +239,22 @@
                 // Service worker registration failed — not critical
             });
         }
+    }
+
+    // ==================== PWA Install ====================
+    let deferredInstallPrompt = null;
+
+    function setupPwaInstall() {
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredInstallPrompt = e;
+            els.btnInstall.classList.remove('hidden');
+        });
+
+        window.addEventListener('appinstalled', () => {
+            deferredInstallPrompt = null;
+            els.btnInstall.classList.add('hidden');
+        });
     }
 
     // ==================== Playback Speed (cached) ====================
@@ -336,6 +354,21 @@
 
         // Theme toggle
         els.btnTheme.addEventListener('click', toggleTheme);
+
+        // PWA install
+        els.btnInstall.addEventListener('click', async () => {
+            if (!deferredInstallPrompt) return;
+            try {
+                deferredInstallPrompt.prompt();
+                const { outcome } = await deferredInstallPrompt.userChoice;
+                if (outcome === 'accepted') {
+                    deferredInstallPrompt = null;
+                    els.btnInstall.classList.add('hidden');
+                }
+            } catch {
+                // Install prompt failed — not critical
+            }
+        });
 
         // API key visibility
         els.btnToggleKey.addEventListener('click', toggleKeyVisibility);
