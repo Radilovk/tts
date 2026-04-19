@@ -7,7 +7,6 @@
 import 'dotenv/config';
 import express from 'express';
 import { GoogleAuth } from 'google-auth-library';
-import fetch from 'node-fetch';
 import rateLimit from 'express-rate-limit';
 import { WebSocketServer, WebSocket } from 'ws';
 
