@@ -57,8 +57,13 @@
 ├── sw.js               # Service Worker за PWA офлайн кеширане
 ├── manifest.json       # PWA манифест
 ├── icons/              # Икони за PWA
+├── .github/
+│   └── workflows/
+│       └── pages.yml   # Автоматичен деплой на GitHub Pages
 └── README.md           # Документация
 ```
+
+> Без `node_modules`, без build стъпка, без backend сървър.
 
 ## 🛠️ Технологии
 
@@ -70,11 +75,22 @@
 
 ## 🌐 Деплой
 
-Приложението е статично и може да се хоства навсякъде:
-- **GitHub Pages** — Settings → Pages → Source → main branch
+Приложението е чисто статично — без build стъпка, без npm install.
+
+### GitHub Pages (препоръчан)
+
+Репото съдържа `.github/workflows/pages.yml`, който автоматично деплойва приложението при всеки push към `main`.
+
+**Настройки при първо използване:**
+1. Settings → Pages → Source → **GitHub Actions**
+2. Push към `main` — workflows стартира автоматично
+3. Приложението е достъпно на `https://<потребител>.github.io/<репо>/`
+
+### Ръчен деплой
+
 - **Netlify** — Drag & drop на папката
 - **Vercel** — Import от GitHub
-- Всеки уеб сървър (Apache, Nginx, etc.)
+- Всеки уеб сървър (Apache, Nginx и др.) — просто копирайте файловете
 
 ## ⚠️ Важни бележки
 

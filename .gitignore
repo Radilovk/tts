@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+dist/
+
+# Environment files
+.env
+.env.*
+**/.env
+**/.env.*
+*.local
+
+# Google Cloud service account credentials — never commit these
+gen-lang-client-*.json
+*.json.key
