@@ -171,6 +171,16 @@
                 <small class="hint">Указва на модела на какъв език да произнесе текста</small>
             </div>
 
+            <!-- PWA Install -->
+            <div class="setting-group" id="pwaInstallGroup" style="display:none">
+                <label>📲 Инсталиране</label>
+                <button id="btnInstallPwa" class="btn btn-primary btn-sm pwa-install-btn" type="button">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    Инсталирай на телефона
+                </button>
+                <small class="hint">Инсталирайте приложението за бърз достъп от началния екран</small>
+            </div>
+
             <!-- Clear data -->
             <div class="setting-group setting-group-buttons">
                 <button id="btnClearHistory" class="btn btn-outline btn-danger" type="button">🗑️ Изчисти историята</button>
@@ -320,6 +330,7 @@
                 </div>
 
                 <audio id="audioPlayer" preload="auto"></audio>
+                <audio id="audioPlayerNext" preload="auto" style="display:none"></audio>
 
                 <!-- Player Controls: skip back, play/pause, skip forward, speed -->
                 <div class="player-controls-row">
