@@ -30,6 +30,7 @@
     const API_TIMEOUT_MS = 120000; // 2 minutes per chunk
     const MAX_BUFFER_AHEAD = 2; // Buffer at most 2 chunks ahead of playback
     const SPEED_OPTIONS = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+    const CHUNK_WAIT_INTERVAL_MS = 200;
 
     // Language instructions for TTS
     const LANGUAGE_INSTRUCTIONS = {
@@ -1088,12 +1089,13 @@
             const model = els.modelSelect.value;
             const voice = els.voiceSelect.value;
             const lang = els.ttsLanguage.value;
-            let translatedChunks = [];
+            let translatedChunks = new Array(chunks.length).fill('');
 
             // Initialize chunk tracking
             state.streamChunks = chunks;
             state.streamChunkWavs = new Array(chunks.length).fill(null);
             state.streamChunkDurations = new Array(chunks.length).fill(0);
+            state.streamPcmChunks = new Array(chunks.length).fill(null);
             state.streamCurrentChunk = 0;
             state.streamTotalDuration = 0;
             state.streamPlayedTime = 0;
@@ -1176,7 +1178,7 @@
             while (i - state.streamCurrentChunk >= MAX_BUFFER_AHEAD
                    && !controller.signal.aborted
                    && state.streamMode) {
-                await new Promise(resolve => setTimeout(resolve, 200));
+                await new Promise(resolve => setTimeout(resolve, CHUNK_WAIT_INTERVAL_MS));
             }
 
             if (controller.signal.aborted) {
@@ -1229,6 +1231,7 @@
             state.streamChunkWavs[i] = chunkWav;
 
             // Calculate duration of this chunk
+            // 16-bit PCM = 2 bytes per sample
             const chunkDuration = (result.audioData.byteLength / 2) / state.streamSampleRate;
             state.streamChunkDurations[i] = chunkDuration;
             state.streamTotalDuration = state.streamChunkDurations.reduce((a, b) => a + b, 0);
@@ -1335,7 +1338,7 @@
                 if (state.streamChunkWavs[nextIndex]) {
                     playChunkByIndex(nextIndex);
                 } else {
-                    setTimeout(waitForChunk, 200);
+                    setTimeout(waitForChunk, CHUNK_WAIT_INTERVAL_MS);
                 }
             };
             waitForChunk();
@@ -1458,7 +1461,9 @@
                 break;
             }
             cumulative += chunkDur;
-            targetChunk = i;
+            if (i < state.streamChunkDurations.length - 1) {
+                targetChunk = i + 1;
+            }
         }
 
         els.seekPosition.textContent = formatDuration(targetTime);
@@ -1467,7 +1472,7 @@
         seekToChunk(targetChunk, offsetInChunk);
     }
 
-    function seekToChunk(chunkIndex, offsetInChunk) {
+    function seekToChunk(chunkIndex, offsetInChunk = 0) {
         if (chunkIndex < 0 || chunkIndex >= state.streamChunks.length) return;
 
         if (!state.streamChunkWavs[chunkIndex]) {
