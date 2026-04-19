@@ -20,6 +20,9 @@
         TRANSLATION_MODEL: 'gemini_tts_translation_model',
         TTS_LANGUAGE: 'gemini_tts_language',
         PLAYBACK_SPEED: 'gemini_tts_playback_speed',
+        VOICE_PROMPT: 'gemini_tts_voice_prompt',
+        LIBRARY: 'gemini_tts_library',
+        PLAYBACK_POSITION: 'gemini_tts_playback_position',
     };
 
     // Only generativelanguage.googleapis.com supports CORS from browser.
@@ -53,6 +56,7 @@
         chunkSize: $('#chunkSize'),
         translationModel: $('#translationModel'),
         ttsLanguage: $('#ttsLanguage'),
+        voicePrompt: $('#voicePrompt'),
         btnToggleKey: $('#btnToggleKey'),
         btnTestKey: $('#btnTestKey'),
         keyStatus: $('#keyStatus'),
@@ -66,12 +70,19 @@
         historyPanel: $('#historyPanel'),
         historyOverlay: $('#historyOverlay'),
         historyList: $('#historyList'),
+        libraryPanel: $('#libraryPanel'),
+        libraryOverlay: $('#libraryOverlay'),
+        libraryList: $('#libraryList'),
 
         // Header buttons
         btnSettings: $('#btnSettings'),
         btnCloseSettings: $('#btnCloseSettings'),
         btnHistory: $('#btnHistory'),
         btnCloseHistory: $('#btnCloseHistory'),
+        btnLibrary: $('#btnLibrary'),
+        btnCloseLibrary: $('#btnCloseLibrary'),
+        btnAddBook: $('#btnAddBook'),
+        libraryFileInput: $('#libraryFileInput'),
         btnTheme: $('#btnTheme'),
 
         // Welcome
@@ -89,10 +100,8 @@
 
         // Translation
         translateToggle: $('#translateToggle'),
-        translationStatus: $('#translationStatus'),
         translationPreview: $('#translationPreview'),
         translatedText: $('#translatedText'),
-        btnTranslate: $('#btnTranslate'),
         btnCopyTranslation: $('#btnCopyTranslation'),
         btnUseTranslation: $('#btnUseTranslation'),
 
@@ -108,8 +117,9 @@
         playerTitle: $('#playerTitle'),
         playerMeta: $('#playerMeta'),
         audioPlayer: $('#audioPlayer'),
-        btnDownload: $('#btnDownload'),
-        btnRegenerate: $('#btnRegenerate'),
+        btnPlayPause: $('#btnPlayPause'),
+        btnSkipBack: $('#btnSkipBack'),
+        btnSkipForward: $('#btnSkipForward'),
         seekBar: $('#seekBar'),
         seekSlider: $('#seekSlider'),
         seekPosition: $('#seekPosition'),
@@ -130,6 +140,7 @@
         currentAudioUrl: null,
         translatedContent: '',
         history: [],
+        library: [],
         abortController: null,
         // Streaming playback pipeline
         audioQueue: [],
@@ -148,6 +159,8 @@
         streamPlayedTime: 0,      // cumulative played time before current chunk
         streamGeneratingIndex: -1, // chunk index currently being generated
         streamPlaybackSpeed: 1.0,  // current playback speed
+        // Pause/resume position
+        savedPosition: null,      // { chunkIndex, offsetInChunk, absoluteTime }
         // Media session / wake lock
         wakeLock: null,
     };
@@ -156,7 +169,9 @@
     function init() {
         loadSettings();
         loadHistory();
+        loadLibrary();
         loadPlaybackSpeed();
+        loadSavedPosition();
         bindEvents();
         updateUI();
         checkOnboarding();
@@ -177,6 +192,7 @@
         els.chunkSize.value = get(STORAGE_KEYS.CHUNK_SIZE, '1000');
         els.translationModel.value = get(STORAGE_KEYS.TRANSLATION_MODEL, 'gemini-2.5-flash-lite');
         els.ttsLanguage.value = get(STORAGE_KEYS.TTS_LANGUAGE, 'bg');
+        els.voicePrompt.value = get(STORAGE_KEYS.VOICE_PROMPT, '');
 
         // Theme
         const theme = get(STORAGE_KEYS.THEME, getPreferredTheme());
@@ -203,6 +219,7 @@
         localStorage.setItem(STORAGE_KEYS.CHUNK_SIZE, els.chunkSize.value);
         localStorage.setItem(STORAGE_KEYS.TRANSLATION_MODEL, els.translationModel.value);
         localStorage.setItem(STORAGE_KEYS.TTS_LANGUAGE, els.ttsLanguage.value);
+        localStorage.setItem(STORAGE_KEYS.VOICE_PROMPT, els.voicePrompt.value);
     }
 
     // ==================== Onboarding ====================
@@ -287,17 +304,24 @@
 
             navigator.mediaSession.setActionHandler('play', () => {
                 els.audioPlayer.play().catch(() => {});
+                updatePlayPauseIcon();
             });
             navigator.mediaSession.setActionHandler('pause', () => {
                 els.audioPlayer.pause();
+                savePlaybackPosition();
+                updatePlayPauseIcon();
+            });
+            navigator.mediaSession.setActionHandler('seekbackward', () => {
+                skipTime(-10);
+            });
+            navigator.mediaSession.setActionHandler('seekforward', () => {
+                skipTime(10);
             });
             navigator.mediaSession.setActionHandler('previoustrack', () => {
-                seekToChunk(Math.max(0, state.streamCurrentChunk - 1));
+                skipTime(-10);
             });
             navigator.mediaSession.setActionHandler('nexttrack', () => {
-                if (state.streamCurrentChunk < state.streamChunkWavs.length - 1) {
-                    seekToChunk(state.streamCurrentChunk + 1);
-                }
+                skipTime(10);
             });
         }
     }
@@ -334,6 +358,13 @@
         els.btnCloseHistory.addEventListener('click', () => togglePanel('history', false));
         els.historyOverlay.addEventListener('click', () => togglePanel('history', false));
 
+        // Library panel
+        els.btnLibrary.addEventListener('click', () => togglePanel('library', true));
+        els.btnCloseLibrary.addEventListener('click', () => togglePanel('library', false));
+        els.libraryOverlay.addEventListener('click', () => togglePanel('library', false));
+        els.btnAddBook.addEventListener('click', () => els.libraryFileInput.click());
+        els.libraryFileInput.addEventListener('change', handleLibraryFileUpload);
+
         // Theme toggle
         els.btnTheme.addEventListener('click', toggleTheme);
 
@@ -355,7 +386,7 @@
         const settingsElements = [
             els.apiKey, els.modelSelect, els.voiceSelect,
             els.speedSlider, els.autoPlay, els.chunkSize,
-            els.translationModel, els.ttsLanguage,
+            els.translationModel, els.ttsLanguage, els.voicePrompt,
         ];
         settingsElements.forEach(el => {
             el.addEventListener('change', () => {
@@ -363,13 +394,35 @@
                 updateGenerateButton();
                 checkOnboarding();
             });
-            if (el.type === 'text' || el.type === 'password') {
+            if (el.type === 'text' || el.type === 'password' || el.tagName === 'TEXTAREA') {
                 el.addEventListener('input', () => {
                     saveSettings();
                     updateGenerateButton();
                     checkOnboarding();
                 });
             }
+        });
+
+        // Translation toggle in settings
+        els.translateToggle.addEventListener('change', () => {
+            const on = els.translateToggle.checked;
+            if (!on) {
+                els.translationPreview.classList.add('hidden');
+                state.translatedContent = '';
+            }
+            updateGenerateButton();
+        });
+
+        // Translation copy/use
+        els.btnCopyTranslation.addEventListener('click', () => {
+            copyToClipboard(state.translatedContent);
+        });
+        els.btnUseTranslation.addEventListener('click', () => {
+            els.textInput.value = state.translatedContent;
+            els.translateToggle.checked = false;
+            els.translateToggle.dispatchEvent(new Event('change'));
+            updateCharCount();
+            showToast('Преведеният текст е зареден', 'success');
         });
 
         // Speed slider real-time update
@@ -413,38 +466,9 @@
             }
         });
 
-        // Translation toggle
-        els.translateToggle.addEventListener('change', () => {
-            const on = els.translateToggle.checked;
-            els.btnTranslate.classList.toggle('hidden', !on);
-            els.translationStatus.classList.toggle('hidden', !on);
-            if (!on) {
-                els.translationPreview.classList.add('hidden');
-                state.translatedContent = '';
-            }
-            updateGenerateButton();
-        });
-
-        // Translation
-        els.btnTranslate.addEventListener('click', translateText);
-        els.btnCopyTranslation.addEventListener('click', () => {
-            copyToClipboard(state.translatedContent);
-        });
-        els.btnUseTranslation.addEventListener('click', () => {
-            els.textInput.value = state.translatedContent;
-            els.translateToggle.checked = false;
-            els.translateToggle.dispatchEvent(new Event('change'));
-            updateCharCount();
-            showToast('Преведеният текст е зареден', 'success');
-        });
-
         // Generate / Stop
         els.btnGenerate.addEventListener('click', generateSpeech);
-        els.btnRegenerate.addEventListener('click', generateSpeech);
         els.btnStop.addEventListener('click', stopGeneration);
-
-        // Download
-        els.btnDownload.addEventListener('click', downloadAudio);
 
         // Clear data
         els.btnClearHistory.addEventListener('click', () => {
@@ -481,11 +505,19 @@
             }
         });
 
+        // Update play/pause icon on play/pause events
+        els.audioPlayer.addEventListener('play', updatePlayPauseIcon);
+        els.audioPlayer.addEventListener('pause', () => {
+            savePlaybackPosition();
+            updatePlayPauseIcon();
+        });
+
         // Streaming playback: when a chunk finishes, play next in queue
         els.audioPlayer.addEventListener('ended', () => {
             if (state.streamMode) {
                 playNextStreamChunk();
             }
+            updatePlayPauseIcon();
         });
 
         // Seek slider interaction
@@ -494,6 +526,13 @@
                 handleSeekSliderInput();
             }
         });
+
+        // Play/Pause button
+        els.btnPlayPause.addEventListener('click', togglePlayPause);
+
+        // Skip buttons
+        els.btnSkipBack.addEventListener('click', () => skipTime(-10));
+        els.btnSkipForward.addEventListener('click', () => skipTime(10));
 
         // Speed toggle button
         els.btnSpeedToggle.addEventListener('click', cyclePlaybackSpeed);
@@ -518,14 +557,22 @@
             if (e.key === 'Escape') {
                 togglePanel('settings', false);
                 togglePanel('history', false);
+                togglePanel('library', false);
             }
         });
     }
 
     // ==================== Panel Management ====================
     function togglePanel(panel, show) {
-        const panelEl = panel === 'settings' ? els.settingsPanel : els.historyPanel;
-        const overlayEl = panel === 'settings' ? els.settingsOverlay : els.historyOverlay;
+        const panelMap = {
+            settings: { panel: els.settingsPanel, overlay: els.settingsOverlay },
+            history: { panel: els.historyPanel, overlay: els.historyOverlay },
+            library: { panel: els.libraryPanel, overlay: els.libraryOverlay },
+        };
+        const entry = panelMap[panel];
+        if (!entry) return;
+        const panelEl = entry.panel;
+        const overlayEl = entry.overlay;
 
         if (show) {
             overlayEl.classList.remove('hidden');
@@ -691,7 +738,6 @@
         const hasText = els.textInput.value.trim().length > 0;
         const hasKey = els.apiKey.value.trim().length > 0;
         els.btnGenerate.disabled = !hasText || !hasKey || state.isGenerating;
-        els.btnTranslate.disabled = !hasText || !hasKey || state.isGenerating;
     }
 
     function setGeneratingState(active) {
@@ -1048,6 +1094,103 @@
         return translated;
     }
 
+    // ==================== Play/Pause & Skip ====================
+    function togglePlayPause() {
+        if (els.audioPlayer.paused) {
+            els.audioPlayer.play().catch(() => {
+                showToast('Натиснете ▶ за възпроизвеждане', 'info');
+            });
+        } else {
+            els.audioPlayer.pause();
+            savePlaybackPosition();
+        }
+        updatePlayPauseIcon();
+    }
+
+    function updatePlayPauseIcon() {
+        const playIcon = els.btnPlayPause.querySelector('.icon-play');
+        const pauseIcon = els.btnPlayPause.querySelector('.icon-pause');
+        if (els.audioPlayer.paused) {
+            playIcon.style.display = '';
+            pauseIcon.style.display = 'none';
+        } else {
+            playIcon.style.display = 'none';
+            pauseIcon.style.display = '';
+        }
+    }
+
+    function skipTime(seconds) {
+        if (!state.streamMode && !state.streamChunkWavs.length) return;
+
+        const currentTime = els.audioPlayer.currentTime || 0;
+        const absoluteTime = state.streamPlayedTime + currentTime;
+        const targetTime = Math.max(0, Math.min(absoluteTime + seconds, state.streamTotalDuration));
+
+        // Find the chunk that corresponds to this time
+        let cumulative = 0;
+        let targetChunk = 0;
+        let offsetInChunk = 0;
+
+        for (let i = 0; i < state.streamChunkDurations.length; i++) {
+            const chunkDur = state.streamChunkDurations[i];
+            if (cumulative + chunkDur > targetTime) {
+                targetChunk = i;
+                offsetInChunk = targetTime - cumulative;
+                break;
+            }
+            cumulative += chunkDur;
+            targetChunk = Math.min(i + 1, state.streamChunkDurations.length - 1);
+        }
+
+        // If same chunk, just seek within it
+        if (targetChunk === state.streamCurrentChunk && state.streamChunkWavs[targetChunk]) {
+            els.audioPlayer.currentTime = offsetInChunk;
+        } else {
+            seekToChunk(targetChunk, offsetInChunk);
+        }
+
+        // Update seek slider
+        const percent = (targetTime / state.streamTotalDuration) * 100;
+        els.seekSlider.value = Math.min(percent, 100);
+        els.seekPosition.textContent = formatDuration(targetTime);
+    }
+
+    function savePlaybackPosition() {
+        if (!state.streamMode && !state.streamChunkWavs.length) return;
+
+        const currentTime = els.audioPlayer.currentTime || 0;
+        const absoluteTime = state.streamPlayedTime + currentTime;
+
+        state.savedPosition = {
+            chunkIndex: state.streamCurrentChunk,
+            offsetInChunk: currentTime,
+            absoluteTime: absoluteTime,
+        };
+
+        // Persist to localStorage for cross-session resume
+        try {
+            localStorage.setItem(STORAGE_KEYS.PLAYBACK_POSITION, JSON.stringify(state.savedPosition));
+        } catch {
+            // localStorage might be full — not critical
+        }
+    }
+
+    function loadSavedPosition() {
+        try {
+            const saved = localStorage.getItem(STORAGE_KEYS.PLAYBACK_POSITION);
+            if (saved) {
+                state.savedPosition = JSON.parse(saved);
+            }
+        } catch {
+            state.savedPosition = null;
+        }
+    }
+
+    function clearSavedPosition() {
+        state.savedPosition = null;
+        localStorage.removeItem(STORAGE_KEYS.PLAYBACK_POSITION);
+    }
+
     // ==================== TTS Generation ====================
     async function generateSpeech() {
         const translateMode = els.translateToggle.checked;
@@ -1260,8 +1403,9 @@
             state.abortController.abort();
             state.abortController = null;
         }
-        // Stop streaming playback
+        // Stop streaming playback and save position
         if (state.streamMode) {
+            savePlaybackPosition();
             els.audioPlayer.pause();
             // Don't cleanup if we have generated chunks (allow seek)
             if (state.streamChunkWavs.some(w => w !== null)) {
@@ -1271,6 +1415,7 @@
                 cleanupStreamState();
             }
         }
+        updatePlayPauseIcon();
         releaseWakeLock();
     }
 
@@ -1461,9 +1606,7 @@
                 break;
             }
             cumulative += chunkDur;
-            if (i < state.streamChunkDurations.length - 1) {
-                targetChunk = i + 1;
-            }
+            targetChunk = Math.min(i + 1, state.streamChunkDurations.length - 1);
         }
 
         els.seekPosition.textContent = formatDuration(targetTime);
@@ -1569,9 +1712,17 @@
     }
 
     async function generateAudioChunk(text, apiKey, model, voice, lang, signal) {
-        // Build the text with language instruction
+        // Build the text with language instruction and optional voice prompt
         const langInstruction = LANGUAGE_INSTRUCTIONS[lang] || '';
-        const promptText = langInstruction ? langInstruction + text : text;
+        const voicePromptText = els.voicePrompt.value.trim();
+        let promptText = '';
+        if (voicePromptText) {
+            promptText += voicePromptText + '\n\n';
+        }
+        if (langInstruction) {
+            promptText += langInstruction;
+        }
+        promptText += text;
 
         const requestBody = {
             contents: [{
@@ -1790,6 +1941,147 @@
         els.progressSection.classList.add('hidden');
         els.progressFill.classList.remove('indeterminate');
         els.progressFill.style.width = '0%';
+    }
+
+    // ==================== Library ====================
+    function loadLibrary() {
+        try {
+            const saved = localStorage.getItem(STORAGE_KEYS.LIBRARY);
+            state.library = saved ? JSON.parse(saved) : [];
+        } catch {
+            state.library = [];
+        }
+        renderLibrary();
+    }
+
+    function saveLibrary() {
+        try {
+            localStorage.setItem(STORAGE_KEYS.LIBRARY, JSON.stringify(state.library));
+        } catch {
+            // localStorage might be full — trim library text
+            if (state.library.length > 0) {
+                showToast('Паметта е пълна. Опитайте да изтриете стари книги.', 'error');
+            }
+        }
+    }
+
+    function handleLibraryFileUpload(e) {
+        if (e.target.files.length > 0) {
+            addBookToLibrary(e.target.files[0]);
+            e.target.value = '';
+        }
+    }
+
+    async function addBookToLibrary(file) {
+        const maxSize = 10 * 1024 * 1024;
+        if (file.size > maxSize) {
+            showToast('Файлът е твърде голям (макс. 10MB)', 'error');
+            return;
+        }
+
+        const allowedExtensions = ['.txt', '.md', '.html', '.htm', '.srt', '.pdf', '.epub'];
+        const dotIndex = file.name.lastIndexOf('.');
+        const ext = dotIndex >= 0 ? file.name.substring(dotIndex).toLowerCase() : '';
+        if (!allowedExtensions.includes(ext)) {
+            showToast('Неподдържан формат. Използвайте: ' + allowedExtensions.join(', '), 'error');
+            return;
+        }
+
+        try {
+            let text = '';
+
+            if (ext === '.pdf') {
+                showToast('Зареждане на PDF файл...', 'info');
+                text = await extractTextFromPdf(file);
+            } else if (ext === '.epub') {
+                showToast('Зареждане на EPUB файл...', 'info');
+                text = await extractTextFromEpub(file);
+            } else {
+                text = await readFileAsText(file);
+                if (ext === '.html' || ext === '.htm') {
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(text, 'text/html');
+                    text = doc.body.textContent || '';
+                }
+                if (ext === '.srt') {
+                    text = text
+                        .replace(/^\d+\s*$/gm, '')
+                        .replace(/\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}/g, '')
+                        .replace(/\n{3,}/g, '\n\n')
+                        .trim();
+                }
+            }
+
+            const book = {
+                id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString() + Math.random().toString(36).slice(2),
+                name: file.name,
+                text: text,
+                addedDate: new Date().toISOString(),
+                lastPosition: 0,
+            };
+
+            state.library.push(book);
+            saveLibrary();
+            renderLibrary();
+            showToast(`Книга „${escapeHtml(file.name)}" добавена в библиотеката`, 'success');
+        } catch (err) {
+            showToast(`Грешка при добавяне: ${err.message}`, 'error');
+        }
+    }
+
+    function renderLibrary() {
+        if (state.library.length === 0) {
+            els.libraryList.innerHTML = '<p class="empty-state">Все още няма добавени книги.<br><small>Добавете книга чрез бутона по-горе.</small></p>';
+            return;
+        }
+
+        els.libraryList.innerHTML = state.library.map((book, index) => {
+            const charCount = book.text ? book.text.length : 0;
+            const wordCount = book.text && book.text.trim().length > 0 ? book.text.trim().split(/\s+/).length : 0;
+            return `
+                <div class="library-item" data-index="${index}">
+                    <span class="library-item-title">📖 ${escapeHtml(book.name)}</span>
+                    <div class="library-item-meta">
+                        <span>${charCount} символа · ${wordCount} думи</span>
+                        <span>${formatDate(book.addedDate)}</span>
+                    </div>
+                    <div class="library-item-actions">
+                        <button class="btn btn-outline btn-sm library-load" data-index="${index}" type="button">📝 Зареди</button>
+                        <button class="btn btn-outline btn-sm btn-danger library-delete" data-index="${index}" type="button">🗑️ Изтрий</button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        // Bind library events
+        els.libraryList.querySelectorAll('.library-load').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const idx = parseInt(btn.dataset.index);
+                if (idx >= 0 && idx < state.library.length) {
+                    els.textInput.value = state.library[idx].text;
+                    updateCharCount();
+                    togglePanel('library', false);
+                    showToast(`Книга „${escapeHtml(state.library[idx].name)}" заредена`, 'success');
+                }
+            });
+        });
+
+        els.libraryList.querySelectorAll('.library-delete').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const idx = parseInt(btn.dataset.index);
+                if (idx >= 0 && idx < state.library.length) {
+                    const name = state.library[idx].name;
+                    if (confirm(`Изтриване на „${name}" от библиотеката?`)) {
+                        state.library.splice(idx, 1);
+                        saveLibrary();
+                        renderLibrary();
+                        showToast(`Книга „${escapeHtml(name)}" изтрита`, 'info');
+                    }
+                }
+            });
+        });
     }
 
     // ==================== Download ====================

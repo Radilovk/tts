@@ -380,7 +380,8 @@ input[type="checkbox"]:checked + .toggle-slider::before {
 }
 
 .settings-panel,
-.history-panel {
+.history-panel,
+.library-panel {
     position: fixed;
     top: 0;
     right: -100%;
@@ -396,12 +397,14 @@ input[type="checkbox"]:checked + .toggle-slider::before {
 }
 
 .settings-panel.visible,
-.history-panel.visible {
+.history-panel.visible,
+.library-panel.visible {
     right: 0;
 }
 
 .settings-panel.hidden,
-.history-panel.hidden {
+.history-panel.hidden,
+.library-panel.hidden {
     right: -100%;
 }
 
@@ -635,42 +638,6 @@ input[type="range"]::-moz-range-thumb {
     justify-content: center;
 }
 
-/* Translation Bar */
-.translation-bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: var(--spacing-sm) var(--spacing-md);
-    background: var(--bg-card);
-    border-radius: var(--radius-md);
-    border: 1px solid var(--border);
-}
-
-.translation-status {
-    display: flex;
-    align-items: center;
-    gap: var(--spacing-xs);
-    font-size: 0.8rem;
-    color: var(--text-muted);
-}
-
-.translation-status.hidden {
-    display: none;
-}
-
-.status-dot {
-    width: 8px;
-    height: 8px;
-    background: var(--success);
-    border-radius: 50%;
-    animation: pulse 2s infinite;
-}
-
-@keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
-}
-
 /* Text Section */
 .text-section {
     background: var(--bg-card);
@@ -901,19 +868,6 @@ audio::-webkit-media-controls-panel {
     background: var(--bg-hover);
 }
 
-.player-actions {
-    display: flex;
-    gap: var(--spacing-sm);
-    justify-content: flex-end;
-}
-
-.player-controls-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--spacing-sm);
-}
-
 /* Seek Bar */
 .seek-bar {
     display: flex;
@@ -978,6 +932,115 @@ audio::-webkit-media-controls-panel {
 .speed-toggle-btn:hover:not(:disabled) {
     background: var(--primary);
     color: white;
+}
+
+/* Player Controls - Storytel-like */
+.player-controls-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--spacing-md);
+}
+
+.player-skip-btn {
+    width: 48px;
+    height: 48px;
+    color: var(--text);
+}
+
+.player-skip-btn:hover {
+    color: var(--primary);
+    background: var(--bg-hover);
+}
+
+.player-play-btn {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    padding: 0;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Library */
+.library-actions-bar {
+    display: flex;
+    gap: var(--spacing-sm);
+    margin-bottom: var(--spacing-sm);
+}
+
+.library-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm);
+}
+
+.library-item {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-xs);
+    padding: var(--spacing-sm) var(--spacing-md);
+    background: var(--bg-hover);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    transition: var(--transition);
+}
+
+.library-item:hover {
+    border-color: var(--primary);
+}
+
+.library-item-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+}
+
+.library-item-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.library-item-actions {
+    display: flex;
+    gap: var(--spacing-xs);
+    flex-wrap: wrap;
+}
+
+/* Voice Prompt Textarea */
+.voice-prompt-input {
+    width: 100%;
+    min-height: 70px;
+    max-height: 150px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-input);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 0.85rem;
+    line-height: 1.5;
+    resize: vertical;
+    outline: none;
+    transition: var(--transition);
+}
+
+.voice-prompt-input:focus {
+    border-color: var(--border-focus);
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+}
+
+.voice-prompt-input::placeholder {
+    color: var(--text-muted);
 }
 
 /* ==============================
@@ -1150,7 +1213,8 @@ audio::-webkit-media-controls-panel {
     }
 
     .settings-panel,
-    .history-panel {
+    .history-panel,
+    .library-panel {
         width: 400px;
     }
 }
