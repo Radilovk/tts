@@ -23,6 +23,7 @@
         VOICE_PROMPT: 'gemini_tts_voice_prompt',
         LIBRARY: 'gemini_tts_library',
         PLAYBACK_POSITION: 'gemini_tts_playback_position',
+        BOOK_POSITIONS: 'gemini_tts_book_positions',
     };
 
     // Only generativelanguage.googleapis.com supports CORS from browser.
@@ -127,6 +128,7 @@
         seekDuration: $('#seekDuration'),
         btnSpeedToggle: $('#btnSpeedToggle'),
         speedToggleLabel: $('#speedToggleLabel'),
+        audioPlayerNext: $('#audioPlayerNext'),
 
         // Other
         toastContainer: $('#toastContainer'),
@@ -161,6 +163,14 @@
         streamPlaybackSpeed: 1.0,  // current playback speed
         // Pause/resume position
         savedPosition: null,      // { chunkIndex, offsetInChunk, absoluteTime }
+        // Per-book tracking
+        currentBookId: null,      // ID of the currently loaded library book
+        estimatedCharRate: 0.05,  // seconds per character (refined as chunks are generated)
+        // Pre-loading for seamless transitions
+        preloadedChunkUrl: null,
+        preloadedChunkIndex: -1,
+        // PWA install
+        deferredInstallPrompt: null,
         // Media session / wake lock
         wakeLock: null,
     };
@@ -178,6 +188,8 @@
         setupOfflineDetection();
         registerServiceWorker();
         setupMediaSession();
+        setupPwaInstall();
+        setupPositionAutoSave();
     }
 
     // ==================== Settings ====================
@@ -254,6 +266,59 @@
                 // Service worker registration failed — not critical
             });
         }
+    }
+
+    // ==================== PWA Install ====================
+    function setupPwaInstall() {
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            state.deferredInstallPrompt = e;
+            const installGroup = document.getElementById('pwaInstallGroup');
+            if (installGroup) {
+                installGroup.style.display = '';
+            }
+        });
+
+        const btnInstall = document.getElementById('btnInstallPwa');
+        if (btnInstall) {
+            btnInstall.addEventListener('click', async () => {
+                if (!state.deferredInstallPrompt) {
+                    showToast('Приложението вече е инсталирано или не може да се инсталира от този браузър', 'info');
+                    return;
+                }
+                state.deferredInstallPrompt.prompt();
+                const result = await state.deferredInstallPrompt.userChoice;
+                if (result.outcome === 'accepted') {
+                    showToast('Приложението е инсталирано! 📲', 'success');
+                }
+                state.deferredInstallPrompt = null;
+                const installGroup = document.getElementById('pwaInstallGroup');
+                if (installGroup) {
+                    installGroup.style.display = 'none';
+                }
+            });
+        }
+
+        window.addEventListener('appinstalled', () => {
+            state.deferredInstallPrompt = null;
+            const installGroup = document.getElementById('pwaInstallGroup');
+            if (installGroup) {
+                installGroup.style.display = 'none';
+            }
+            showToast('Приложението е инсталирано успешно! 🎉', 'success');
+        });
+    }
+
+    // ==================== Auto-save Position ====================
+    function setupPositionAutoSave() {
+        window.addEventListener('beforeunload', () => {
+            savePlaybackPosition();
+        });
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') {
+                savePlaybackPosition();
+            }
+        });
     }
 
     // ==================== Playback Speed (cached) ====================
@@ -1124,7 +1189,8 @@
 
         const currentTime = els.audioPlayer.currentTime || 0;
         const absoluteTime = state.streamPlayedTime + currentTime;
-        const targetTime = Math.max(0, Math.min(absoluteTime + seconds, state.streamTotalDuration));
+        const estimatedTotal = getEstimatedTotalDuration();
+        const targetTime = Math.max(0, Math.min(absoluteTime + seconds, estimatedTotal));
 
         // Find the chunk that corresponds to this time
         let cumulative = 0;
@@ -1150,7 +1216,7 @@
         }
 
         // Update seek slider
-        const percent = (targetTime / state.streamTotalDuration) * 100;
+        const percent = (targetTime / estimatedTotal) * 100;
         els.seekSlider.value = Math.min(percent, 100);
         els.seekPosition.textContent = formatDuration(targetTime);
     }
@@ -1173,6 +1239,11 @@
         } catch {
             // localStorage might be full — not critical
         }
+
+        // Save per-book position
+        if (state.currentBookId) {
+            saveBookPosition(state.currentBookId, state.savedPosition);
+        }
     }
 
     function loadSavedPosition() {
@@ -1189,6 +1260,52 @@
     function clearSavedPosition() {
         state.savedPosition = null;
         localStorage.removeItem(STORAGE_KEYS.PLAYBACK_POSITION);
+    }
+
+    // ==================== Per-Book Position ====================
+    function saveBookPosition(bookId, position) {
+        try {
+            let positions = {};
+            const saved = localStorage.getItem(STORAGE_KEYS.BOOK_POSITIONS);
+            if (saved) positions = JSON.parse(saved);
+            positions[bookId] = position;
+            localStorage.setItem(STORAGE_KEYS.BOOK_POSITIONS, JSON.stringify(positions));
+
+            // Also update the library book's lastPosition for UI display
+            const bookIndex = state.library.findIndex(b => b.id === bookId);
+            if (bookIndex >= 0) {
+                state.library[bookIndex].lastPosition = position.absoluteTime;
+                saveLibrary();
+            }
+        } catch {
+            // localStorage might be full — not critical
+        }
+    }
+
+    function loadBookPosition(bookId) {
+        try {
+            const saved = localStorage.getItem(STORAGE_KEYS.BOOK_POSITIONS);
+            if (saved) {
+                const positions = JSON.parse(saved);
+                return positions[bookId] || null;
+            }
+        } catch {
+            // not critical
+        }
+        return null;
+    }
+
+    function clearBookPosition(bookId) {
+        try {
+            const saved = localStorage.getItem(STORAGE_KEYS.BOOK_POSITIONS);
+            if (saved) {
+                const positions = JSON.parse(saved);
+                delete positions[bookId];
+                localStorage.setItem(STORAGE_KEYS.BOOK_POSITIONS, JSON.stringify(positions));
+            }
+        } catch {
+            // not critical
+        }
     }
 
     // ==================== TTS Generation ====================
@@ -1243,6 +1360,13 @@
             state.streamTotalDuration = 0;
             state.streamPlayedTime = 0;
 
+            // Estimate initial durations for all chunks based on character count
+            // This allows the slider to cover the entire book from the start
+            for (let i = 0; i < chunks.length; i++) {
+                state.streamChunkDurations[i] = chunks[i].length * state.estimatedCharRate;
+            }
+            state.streamTotalDuration = state.streamChunkDurations.reduce((a, b) => a + b, 0);
+
             // Show player section immediately for streaming
             els.playerTitle.textContent = text.substring(0, 60) + (text.length > 60 ? '...' : '');
             els.playerSection.classList.remove('hidden');
@@ -1257,10 +1381,22 @@
                 });
             }
 
+            // Determine if we should resume from a saved position
+            let resumeChunkIndex = 0;
+            let resumeOffsetInChunk = 0;
+            if (state.savedPosition && state.savedPosition.chunkIndex > 0) {
+                // Validate the saved position is within the current chunks
+                if (state.savedPosition.chunkIndex < chunks.length) {
+                    resumeChunkIndex = state.savedPosition.chunkIndex;
+                    resumeOffsetInChunk = state.savedPosition.offsetInChunk || 0;
+                }
+                state.savedPosition = null;
+            }
+
             // Generate chunks with max 2 buffered ahead
             await generateChunksWithBuffering(
                 chunks, apiKey, model, voice, lang, translateMode,
-                translatedChunks, controller
+                translatedChunks, controller, resumeChunkIndex, resumeOffsetInChunk
             );
 
             // All chunks generated
@@ -1309,9 +1445,17 @@
 
     async function generateChunksWithBuffering(
         chunks, apiKey, model, voice, lang, translateMode,
-        translatedChunks, controller
+        translatedChunks, controller, resumeChunkIndex, resumeOffsetInChunk
     ) {
-        for (let i = 0; i < chunks.length; i++) {
+        resumeChunkIndex = resumeChunkIndex || 0;
+        resumeOffsetInChunk = resumeOffsetInChunk || 0;
+
+        // If resuming, start generating from the resume chunk
+        // but generate sequentially from the resume point for buffering
+        const startIndex = resumeChunkIndex;
+        state.streamCurrentChunk = startIndex;
+
+        for (let i = startIndex; i < chunks.length; i++) {
             // Check if cancelled
             if (controller.signal.aborted) {
                 throw new DOMException('Cancelled', 'AbortError');
@@ -1384,7 +1528,17 @@
 
             // If this is the chunk we need to play next, start playback
             if (i === state.streamCurrentChunk && !state.isStreamPlaying && els.autoPlay.checked) {
-                playChunkByIndex(i);
+                if (i === startIndex && resumeOffsetInChunk > 0) {
+                    // Resume from saved offset within the chunk
+                    seekToChunk(i, resumeOffsetInChunk);
+                } else {
+                    playChunkByIndex(i);
+                }
+            }
+
+            // Pre-load next chunk if this chunk is the one after the currently playing
+            if (i === state.streamCurrentChunk + 1) {
+                preloadNextChunk();
             }
 
             showProgress(
@@ -1433,15 +1587,24 @@
             state.streamPlayedTime += state.streamChunkDurations[j] || 0;
         }
 
-        // Revoke previous chunk URL
-        if (state.streamCurrentUrl) {
-            URL.revokeObjectURL(state.streamCurrentUrl);
+        // Check if this chunk was already pre-loaded
+        if (state.preloadedChunkIndex === index && state.preloadedChunkUrl) {
+            // Use pre-loaded URL (already warmed in browser cache)
+            if (state.streamCurrentUrl) {
+                URL.revokeObjectURL(state.streamCurrentUrl);
+            }
+            state.streamCurrentUrl = state.preloadedChunkUrl;
+            state.preloadedChunkUrl = null;
+            state.preloadedChunkIndex = -1;
+        } else {
+            // Revoke previous chunk URL
+            if (state.streamCurrentUrl) {
+                URL.revokeObjectURL(state.streamCurrentUrl);
+            }
+            state.streamCurrentUrl = URL.createObjectURL(state.streamChunkWavs[index]);
         }
 
-        const url = URL.createObjectURL(state.streamChunkWavs[index]);
-        state.streamCurrentUrl = url;
-
-        els.audioPlayer.src = url;
+        els.audioPlayer.src = state.streamCurrentUrl;
         els.audioPlayer.playbackRate = state.streamPlaybackSpeed;
         els.playerSection.classList.remove('hidden');
 
@@ -1450,6 +1613,9 @@
         els.audioPlayer.play().catch(() => {
             showToast('Натиснете ▶ за възпроизвеждане', 'info');
         });
+
+        // Pre-load next chunk for seamless transition
+        preloadNextChunk();
     }
 
     function playNextStreamChunk() {
@@ -1465,12 +1631,13 @@
             if (state.streamFinished) {
                 onStreamPlaybackComplete();
             }
+            savePlaybackPosition();
             releaseWakeLock();
             return;
         }
 
         if (state.streamChunkWavs[nextIndex]) {
-            // Next chunk is ready, play it
+            // Next chunk is ready — use pre-loaded URL for seamless transition
             playChunkByIndex(nextIndex);
         } else {
             // Next chunk not ready yet, wait for it
@@ -1542,6 +1709,12 @@
             URL.revokeObjectURL(state.streamCurrentUrl);
             state.streamCurrentUrl = null;
         }
+        // Revoke pre-loaded chunk URL
+        if (state.preloadedChunkUrl) {
+            URL.revokeObjectURL(state.preloadedChunkUrl);
+            state.preloadedChunkUrl = null;
+            state.preloadedChunkIndex = -1;
+        }
         for (const entry of state.audioQueue) {
             URL.revokeObjectURL(entry.url);
         }
@@ -1561,22 +1734,78 @@
         releaseWakeLock();
     }
 
+    // ==================== Estimated Duration ====================
+    function getEstimatedTotalDuration() {
+        let knownDuration = 0;
+        let knownChars = 0;
+        let unknownChars = 0;
+
+        for (let i = 0; i < state.streamChunks.length; i++) {
+            if (state.streamChunkDurations[i] > 0) {
+                knownDuration += state.streamChunkDurations[i];
+                knownChars += state.streamChunks[i].length;
+            } else {
+                unknownChars += (state.streamChunks[i] || '').length;
+            }
+        }
+
+        if (unknownChars === 0) return knownDuration;
+
+        // Use known ratio if available, otherwise use default estimate
+        const charRate = knownChars > 0
+            ? knownDuration / knownChars
+            : state.estimatedCharRate;
+
+        // Update the estimated char rate for future use
+        if (knownChars > 0) {
+            state.estimatedCharRate = charRate;
+        }
+
+        return knownDuration + (unknownChars * charRate);
+    }
+
+    // ==================== Pre-load Next Chunk ====================
+    function preloadNextChunk() {
+        const nextIndex = state.streamCurrentChunk + 1;
+        if (nextIndex >= state.streamChunks.length) return;
+        if (!state.streamChunkWavs[nextIndex]) return;
+        if (state.preloadedChunkIndex === nextIndex) return;
+
+        // Clean up previous preloaded URL
+        if (state.preloadedChunkUrl) {
+            URL.revokeObjectURL(state.preloadedChunkUrl);
+        }
+
+        state.preloadedChunkUrl = URL.createObjectURL(state.streamChunkWavs[nextIndex]);
+        state.preloadedChunkIndex = nextIndex;
+
+        // Pre-load into hidden audio element to warm browser cache
+        if (els.audioPlayerNext) {
+            els.audioPlayerNext.src = state.preloadedChunkUrl;
+            els.audioPlayerNext.playbackRate = state.streamPlaybackSpeed;
+            els.audioPlayerNext.load();
+        }
+    }
+
     // ==================== Seek Slider ====================
     function updateSeekSliderFromPlayback() {
-        if (!state.streamMode || state.streamTotalDuration <= 0) return;
+        if (!state.streamMode) return;
+        const estimatedTotal = getEstimatedTotalDuration();
+        if (estimatedTotal <= 0) return;
 
         const currentTime = els.audioPlayer.currentTime || 0;
         const absoluteTime = state.streamPlayedTime + currentTime;
-        const percent = (absoluteTime / state.streamTotalDuration) * 100;
+        const percent = (absoluteTime / estimatedTotal) * 100;
 
         els.seekSlider.value = Math.min(percent, 100);
         els.seekPosition.textContent = formatDuration(absoluteTime);
-        els.seekDuration.textContent = formatDuration(state.streamTotalDuration);
+        els.seekDuration.textContent = formatDuration(estimatedTotal);
     }
 
     function updateSeekSliderTotal() {
-        if (state.streamTotalDuration > 0) {
-            els.seekDuration.textContent = formatDuration(state.streamTotalDuration);
+        const estimatedTotal = getEstimatedTotalDuration();
+        if (estimatedTotal > 0) {
+            els.seekDuration.textContent = formatDuration(estimatedTotal);
         }
     }
 
@@ -1591,7 +1820,8 @@
 
     function handleSeekSliderInput() {
         const percent = parseFloat(els.seekSlider.value);
-        const targetTime = (percent / 100) * state.streamTotalDuration;
+        const estimatedTotal = getEstimatedTotalDuration();
+        const targetTime = (percent / 100) * estimatedTotal;
 
         // Find the chunk that corresponds to this time
         let cumulative = 0;
@@ -1656,6 +1886,9 @@
         els.audioPlayer.play().catch(() => {
             showToast('Натиснете ▶ за възпроизвеждане', 'info');
         });
+
+        // Pre-load next chunk for seamless transition
+        preloadNextChunk();
     }
 
     function getTextForSpeech() {
@@ -2038,6 +2271,9 @@
         els.libraryList.innerHTML = state.library.map((book, index) => {
             const charCount = book.text ? book.text.length : 0;
             const wordCount = book.text && book.text.trim().length > 0 ? book.text.trim().split(/\s+/).length : 0;
+            const savedPos = loadBookPosition(book.id);
+            const hasPosition = savedPos && savedPos.absoluteTime > 0;
+            const positionLabel = hasPosition ? formatDuration(savedPos.absoluteTime) : '';
             return `
                 <div class="library-item" data-index="${index}">
                     <span class="library-item-title">📖 ${escapeHtml(book.name)}</span>
@@ -2045,7 +2281,9 @@
                         <span>${charCount} символа · ${wordCount} думи</span>
                         <span>${formatDate(book.addedDate)}</span>
                     </div>
+                    ${hasPosition ? `<div class="library-item-resume-badge">⏸ Спряно на ${positionLabel}</div>` : ''}
                     <div class="library-item-actions">
+                        ${hasPosition ? `<button class="btn btn-primary btn-sm library-resume" data-index="${index}" type="button">▶️ Продължи</button>` : ''}
                         <button class="btn btn-outline btn-sm library-load" data-index="${index}" type="button">📝 Зареди</button>
                         <button class="btn btn-outline btn-sm btn-danger library-delete" data-index="${index}" type="button">🗑️ Изтрий</button>
                     </div>
@@ -2059,10 +2297,39 @@
                 e.stopPropagation();
                 const idx = parseInt(btn.dataset.index);
                 if (idx >= 0 && idx < state.library.length) {
-                    els.textInput.value = state.library[idx].text;
+                    const book = state.library[idx];
+                    state.currentBookId = book.id;
+                    els.textInput.value = book.text;
                     updateCharCount();
                     togglePanel('library', false);
-                    showToast(`Книга „${escapeHtml(state.library[idx].name)}" заредена`, 'success');
+                    showToast(`Книга „${escapeHtml(book.name)}" заредена`, 'success');
+                }
+            });
+        });
+
+        els.libraryList.querySelectorAll('.library-resume').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const idx = parseInt(btn.dataset.index);
+                if (idx >= 0 && idx < state.library.length) {
+                    const book = state.library[idx];
+                    state.currentBookId = book.id;
+                    els.textInput.value = book.text;
+                    updateCharCount();
+                    togglePanel('library', false);
+
+                    // Load saved position and auto-generate
+                    const savedPos = loadBookPosition(book.id);
+                    if (savedPos) {
+                        state.savedPosition = savedPos;
+                    }
+
+                    showToast(`Книга „${escapeHtml(book.name)}" — продължаване от ${formatDuration(savedPos?.absoluteTime || 0)}`, 'success');
+
+                    // Auto-start generation if we have an API key
+                    if (els.apiKey.value.trim()) {
+                        setTimeout(() => generateSpeech(), 300);
+                    }
                 }
             });
         });
@@ -2072,8 +2339,10 @@
                 e.stopPropagation();
                 const idx = parseInt(btn.dataset.index);
                 if (idx >= 0 && idx < state.library.length) {
+                    const bookId = state.library[idx].id;
                     const name = state.library[idx].name;
                     if (confirm(`Изтриване на „${name}" от библиотеката?`)) {
+                        clearBookPosition(bookId);
                         state.library.splice(idx, 1);
                         saveLibrary();
                         renderLibrary();
