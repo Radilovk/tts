@@ -24,6 +24,7 @@
         LIBRARY: 'gemini_tts_library',
         PLAYBACK_POSITION: 'gemini_tts_playback_position',
         BOOK_POSITIONS: 'gemini_tts_book_positions',
+        LAST_BOOK_ID: 'gemini_tts_last_book_id',
     };
 
     // Only generativelanguage.googleapis.com supports CORS from browser.
@@ -190,6 +191,7 @@
         setupMediaSession();
         setupPwaInstall();
         setupPositionAutoSave();
+        restoreLastBook();
     }
 
     // ==================== Settings ====================
@@ -319,6 +321,12 @@
                 savePlaybackPosition();
             }
         });
+        // Periodic auto-save every 15 seconds during playback
+        setInterval(() => {
+            if (state.streamMode && state.isStreamPlaying && !els.audioPlayer.paused) {
+                savePlaybackPosition();
+            }
+        }, 15000);
     }
 
     // ==================== Playback Speed (cached) ====================
@@ -1231,6 +1239,7 @@
             chunkIndex: state.streamCurrentChunk,
             offsetInChunk: currentTime,
             absoluteTime: absoluteTime,
+            bookId: state.currentBookId || null,
         };
 
         // Persist to localStorage for cross-session resume
@@ -1243,6 +1252,12 @@
         // Save per-book position
         if (state.currentBookId) {
             saveBookPosition(state.currentBookId, state.savedPosition);
+            // Persist last played book ID
+            try {
+                localStorage.setItem(STORAGE_KEYS.LAST_BOOK_ID, state.currentBookId);
+            } catch {
+                // not critical
+            }
         }
     }
 
@@ -1255,11 +1270,45 @@
         } catch {
             state.savedPosition = null;
         }
+
+        // Restore last played book ID
+        try {
+            const lastBookId = localStorage.getItem(STORAGE_KEYS.LAST_BOOK_ID);
+            if (lastBookId) {
+                state.currentBookId = lastBookId;
+            }
+        } catch {
+            // not critical
+        }
     }
 
     function clearSavedPosition() {
         state.savedPosition = null;
         localStorage.removeItem(STORAGE_KEYS.PLAYBACK_POSITION);
+        localStorage.removeItem(STORAGE_KEYS.LAST_BOOK_ID);
+    }
+
+    function restoreLastBook() {
+        // If we have a last book ID and it's in the library, auto-load it
+        if (!state.currentBookId) return;
+
+        const book = state.library.find(b => b.id === state.currentBookId);
+        if (!book) {
+            // Book was deleted — clear stale references
+            state.currentBookId = null;
+            localStorage.removeItem(STORAGE_KEYS.LAST_BOOK_ID);
+            return;
+        }
+
+        // Load the book text into the text area
+        els.textInput.value = book.text;
+        updateCharCount();
+
+        // Load per-book saved position (more reliable than the generic one)
+        const bookPos = loadBookPosition(book.id);
+        if (bookPos && (bookPos.chunkIndex > 0 || bookPos.offsetInChunk > 0)) {
+            state.savedPosition = bookPos;
+        }
     }
 
     // ==================== Per-Book Position ====================
@@ -1384,9 +1433,14 @@
             // Determine if we should resume from a saved position
             let resumeChunkIndex = 0;
             let resumeOffsetInChunk = 0;
-            if (state.savedPosition && state.savedPosition.chunkIndex > 0) {
+            if (state.savedPosition && (state.savedPosition.chunkIndex > 0 || state.savedPosition.offsetInChunk > 0)) {
+                // Only resume if the position belongs to the same book (or no book context)
+                const posBookId = state.savedPosition.bookId || null;
+                const currentBook = state.currentBookId || null;
+                const isPositionValid = !posBookId || !currentBook || posBookId === currentBook;
+
                 // Validate the saved position is within the current chunks
-                if (state.savedPosition.chunkIndex < chunks.length) {
+                if (isPositionValid && state.savedPosition.chunkIndex < chunks.length) {
                     resumeChunkIndex = state.savedPosition.chunkIndex;
                     resumeOffsetInChunk = state.savedPosition.offsetInChunk || 0;
                 }
@@ -2300,6 +2354,7 @@
                 if (idx >= 0 && idx < state.library.length) {
                     const book = state.library[idx];
                     state.currentBookId = book.id;
+                    try { localStorage.setItem(STORAGE_KEYS.LAST_BOOK_ID, book.id); } catch { /* not critical */ }
                     els.textInput.value = book.text;
                     updateCharCount();
                     togglePanel('library', false);
@@ -2315,6 +2370,7 @@
                 if (idx >= 0 && idx < state.library.length) {
                     const book = state.library[idx];
                     state.currentBookId = book.id;
+                    try { localStorage.setItem(STORAGE_KEYS.LAST_BOOK_ID, book.id); } catch { /* not critical */ }
                     els.textInput.value = book.text;
                     updateCharCount();
                     togglePanel('library', false);
@@ -2344,6 +2400,11 @@
                     const name = state.library[idx].name;
                     if (confirm(`Изтриване на „${name}" от библиотеката?`)) {
                         clearBookPosition(bookId);
+                        // Clear last book reference if this was the last played book
+                        if (state.currentBookId === bookId) {
+                            state.currentBookId = null;
+                            localStorage.removeItem(STORAGE_KEYS.LAST_BOOK_ID);
+                        }
                         state.library.splice(idx, 1);
                         saveLibrary();
                         renderLibrary();
