@@ -95,6 +95,7 @@
         textInput: $('#textInput'),
         charCount: $('#charCount'),
         btnPaste: $('#btnPaste'),
+        btnTranslateMain: $('#btnTranslateMain'),
         btnClear: $('#btnClear'),
         fileInput: $('#fileInput'),
         btnUpload: $('#btnUpload'),
@@ -512,6 +513,7 @@
         // Text input
         els.textInput.addEventListener('input', updateCharCount);
         els.btnPaste.addEventListener('click', pasteFromClipboard);
+        els.btnTranslateMain.addEventListener('click', translateAndReplace);
         els.btnClear.addEventListener('click', clearText);
 
         // File upload
@@ -1167,6 +1169,19 @@
         return translated;
     }
 
+    // ==================== Translate & Replace (Main screen button) ====================
+    async function translateAndReplace() {
+        if (state.isGenerating) {
+            showToast('Моля, изчакайте завършването на текущата операция', 'info');
+            return;
+        }
+        await translateText();
+        if (state.translatedContent) {
+            els.textInput.value = state.translatedContent;
+            updateCharCount();
+        }
+    }
+
     // ==================== Play/Pause & Skip ====================
     function togglePlayPause() {
         if (els.audioPlayer.paused) {
@@ -1509,6 +1524,22 @@
         const startIndex = resumeChunkIndex;
         state.streamCurrentChunk = startIndex;
 
+        // Pre-translate start + buffer segments before TTS generation
+        if (translateMode) {
+            const preTranslateEnd = Math.min(startIndex + MAX_BUFFER_AHEAD + 1, chunks.length);
+            for (let j = startIndex; j < preTranslateEnd; j++) {
+                if (controller.signal.aborted) {
+                    throw new DOMException('Cancelled', 'AbortError');
+                }
+                showProgress(
+                    `Превод: част ${j + 1} от ${chunks.length}...`,
+                    false,
+                    ((j - startIndex + 1) / (preTranslateEnd - startIndex)) * 30
+                );
+                translatedChunks[j] = await translateChunk(chunks[j], apiKey, controller.signal);
+            }
+        }
+
         for (let i = startIndex; i < chunks.length; i++) {
             // Check if cancelled
             if (controller.signal.aborted) {
@@ -1535,18 +1566,22 @@
 
             let ttsText = chunks[i];
 
-            // If translate mode, translate this chunk first
+            // If translate mode, use pre-translated text or translate now
             if (translateMode) {
-                showProgress(
-                    chunks.length > 1
-                        ? `Превод: част ${i + 1} от ${chunks.length}...`
-                        : 'Превеждане...',
-                    false,
-                    (i / chunks.length) * 100
-                );
+                if (translatedChunks[i]) {
+                    ttsText = translatedChunks[i];
+                } else {
+                    showProgress(
+                        chunks.length > 1
+                            ? `Превод: част ${i + 1} от ${chunks.length}...`
+                            : 'Превеждане...',
+                        false,
+                        (i / chunks.length) * 100
+                    );
 
-                ttsText = await translateChunk(chunks[i], apiKey, controller.signal);
-                translatedChunks[i] = ttsText;
+                    ttsText = await translateChunk(chunks[i], apiKey, controller.signal);
+                    translatedChunks[i] = ttsText;
+                }
             }
 
             // Generate TTS for this chunk — same model/voice/lang for consistency
@@ -1580,8 +1615,8 @@
             // Update seek slider total
             updateSeekSliderTotal();
 
-            // If this is the chunk we need to play next, start playback
-            if (i === state.streamCurrentChunk && !state.isStreamPlaying && els.autoPlay.checked) {
+            // Start playback immediately when the current chunk is ready
+            if (i === state.streamCurrentChunk && !state.isStreamPlaying) {
                 if (i === startIndex && resumeOffsetInChunk > 0) {
                     // Resume from saved offset within the chunk
                     seekToChunk(i, resumeOffsetInChunk);
@@ -1593,6 +1628,20 @@
             // Pre-load next chunk if this chunk is the one after the currently playing
             if (i === state.streamCurrentChunk + 1) {
                 preloadNextChunk();
+            }
+
+            // Pre-translate next buffer segment for seamless pipeline
+            if (translateMode) {
+                const nextToTranslate = i + MAX_BUFFER_AHEAD + 1;
+                if (nextToTranslate < chunks.length && !translatedChunks[nextToTranslate]) {
+                    try {
+                        translatedChunks[nextToTranslate] = await translateChunk(
+                            chunks[nextToTranslate], apiKey, controller.signal
+                        );
+                    } catch {
+                        // Will retry when reaching this chunk in the main loop
+                    }
+                }
             }
 
             showProgress(
