@@ -36,6 +36,8 @@
     const MAX_BUFFER_AHEAD = 2; // Buffer at most 2 chunks ahead of playback
     const SPEED_OPTIONS = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
     const CHUNK_WAIT_INTERVAL_MS = 200;
+    const FAST_START_CHARS = 300; // First chunk max size for faster playback start
+    const MIN_CHUNK_LENGTH = 50;  // Minimum sensible chunk length for sentence-break detection
 
     // Language instructions for TTS
     const LANGUAGE_INSTRUCTIONS = {
@@ -65,6 +67,10 @@
         btnPreviewVoice: $('#btnPreviewVoice'),
         btnClearHistory: $('#btnClearHistory'),
         btnClearAll: $('#btnClearAll'),
+
+        // Quick settings (main page, synced with settings panel)
+        quickVoice: $('#quickVoice'),
+        quickLang: $('#quickLang'),
 
         // Panels
         settingsPanel: $('#settingsPanel'),
@@ -177,6 +183,38 @@
         wakeLock: null,
     };
 
+    // ==================== API Key Helpers ====================
+    // Returns true when a key was injected at build time via the GEMINI_API_KEY secret.
+    function hasPreconfiguredKey() {
+        return typeof window.PRECONFIGURED_API_KEY === 'string' &&
+            window.PRECONFIGURED_API_KEY !== '__GEMINI_API_KEY__' &&
+            window.PRECONFIGURED_API_KEY.trim().length > 0;
+    }
+
+    // Returns the effective API key: build-time pre-configured key takes priority,
+    // then falls back to the user-entered key stored in localStorage.
+    function getEffectiveApiKey() {
+        if (hasPreconfiguredKey()) {
+            return window.PRECONFIGURED_API_KEY.trim();
+        }
+        return els.apiKey.value.trim();
+    }
+
+    // ==================== Text Chunking Helpers ====================
+    // Find a good sentence break at or before maxChars for fast-start first chunk.
+    function findSentenceBreak(text, maxChars) {
+        if (text.length <= maxChars) return text.length;
+        const snippet = text.substring(0, maxChars);
+        // Find the last sentence-ending punctuation
+        const match = snippet.match(/^([\s\S]*[.!?।\n])/);
+        if (match && match[0].trim().length >= MIN_CHUNK_LENGTH) {
+            return match[0].length;
+        }
+        // Fall back to last whitespace
+        const wsIdx = snippet.lastIndexOf(' ');
+        return wsIdx > MIN_CHUNK_LENGTH ? wsIdx + 1 : maxChars;
+    }
+
     // ==================== Initialization ====================
     function init() {
         loadSettings();
@@ -204,10 +242,20 @@
         els.voiceSelect.value = get(STORAGE_KEYS.VOICE, 'Kore');
         els.speedSlider.value = get(STORAGE_KEYS.SPEED, '1.0');
         els.autoPlay.checked = get(STORAGE_KEYS.AUTO_PLAY, 'true') === 'true';
-        els.chunkSize.value = get(STORAGE_KEYS.CHUNK_SIZE, '1000');
+        els.chunkSize.value = get(STORAGE_KEYS.CHUNK_SIZE, '500');
         els.translationModel.value = get(STORAGE_KEYS.TRANSLATION_MODEL, 'gemini-2.5-flash-lite');
         els.ttsLanguage.value = get(STORAGE_KEYS.TTS_LANGUAGE, 'bg');
         els.voicePrompt.value = get(STORAGE_KEYS.VOICE_PROMPT, '');
+
+        // Sync quick settings on main page
+        if (els.quickVoice) els.quickVoice.value = get(STORAGE_KEYS.VOICE, 'Kore');
+        if (els.quickLang) els.quickLang.value = get(STORAGE_KEYS.TTS_LANGUAGE, 'bg');
+
+        // Hide the manual API key entry when the key is pre-configured at build time.
+        if (hasPreconfiguredKey()) {
+            const group = document.getElementById('apiKeyGroup');
+            if (group) group.classList.add('hidden');
+        }
 
         // Theme
         const theme = get(STORAGE_KEYS.THEME, getPreferredTheme());
@@ -239,7 +287,7 @@
 
     // ==================== Onboarding ====================
     function checkOnboarding() {
-        const hasKey = els.apiKey.value.trim().length > 0;
+        const hasKey = getEffectiveApiKey().length > 0;
         if (!hasKey) {
             els.welcomeBanner.classList.remove('hidden');
         } else {
@@ -371,7 +419,7 @@
     function setupMediaSession() {
         if ('mediaSession' in navigator) {
             navigator.mediaSession.metadata = new MediaMetadata({
-                title: 'Gemini TTS',
+                title: 'Google AI Studio TTS',
                 artist: 'Четец на глас',
                 album: 'TTS',
             });
@@ -467,6 +515,13 @@
                 saveSettings();
                 updateGenerateButton();
                 checkOnboarding();
+                // Sync quick settings when main settings change
+                if (el === els.voiceSelect && els.quickVoice) {
+                    els.quickVoice.value = els.voiceSelect.value;
+                }
+                if (el === els.ttsLanguage && els.quickLang) {
+                    els.quickLang.value = els.ttsLanguage.value;
+                }
             });
             if (el.type === 'text' || el.type === 'password' || el.tagName === 'TEXTAREA') {
                 el.addEventListener('input', () => {
@@ -476,6 +531,20 @@
                 });
             }
         });
+
+        // Quick settings on main page — sync back to settings panel and save
+        if (els.quickVoice) {
+            els.quickVoice.addEventListener('change', () => {
+                els.voiceSelect.value = els.quickVoice.value;
+                saveSettings();
+            });
+        }
+        if (els.quickLang) {
+            els.quickLang.addEventListener('change', () => {
+                els.ttsLanguage.value = els.quickLang.value;
+                saveSettings();
+            });
+        }
 
         // Translation toggle in settings
         els.translateToggle.addEventListener('change', () => {
@@ -690,7 +759,7 @@
 
     // ==================== API Key Test ====================
     async function testApiKey() {
-        const apiKey = els.apiKey.value.trim();
+        const apiKey = getEffectiveApiKey();
         if (!apiKey) {
             setKeyStatus('Въведете API ключ', 'error');
             return;
@@ -751,7 +820,7 @@
 
     // ==================== Voice Preview ====================
     async function previewVoice() {
-        const apiKey = els.apiKey.value.trim();
+        const apiKey = getEffectiveApiKey();
         if (!apiKey) {
             showToast('Въведете API ключ, за да чуете примерен глас', 'error');
             return;
@@ -811,7 +880,7 @@
 
     function updateGenerateButton() {
         const hasText = els.textInput.value.trim().length > 0;
-        const hasKey = els.apiKey.value.trim().length > 0;
+        const hasKey = getEffectiveApiKey().length > 0;
         els.btnGenerate.disabled = !hasText || !hasKey || state.isGenerating;
     }
 
@@ -1043,7 +1112,7 @@
         const text = els.textInput.value.trim();
         if (!text) return;
 
-        const apiKey = els.apiKey.value.trim();
+        const apiKey = getEffectiveApiKey();
         if (!apiKey) {
             showToast('Моля, въведете API ключ в настройките', 'error');
             return;
@@ -1382,7 +1451,7 @@
             return;
         }
 
-        const apiKey = els.apiKey.value.trim();
+        const apiKey = getEffectiveApiKey();
         if (!apiKey) {
             showToast('Моля, въведете API ключ в настройките', 'error');
             togglePanel('settings', true);
@@ -1408,7 +1477,22 @@
 
         try {
             const chunkSize = parseInt(els.chunkSize.value);
-            const chunks = splitTextIntoChunks(text, chunkSize);
+            // Fast-start: for texts longer than FAST_START_CHARS, extract a small first
+            // chunk so audio starts playing much sooner (within the first 300 chars).
+            let chunks;
+            if (text.length > FAST_START_CHARS && text.length > chunkSize) {
+                const breakAt = findSentenceBreak(text, FAST_START_CHARS);
+                const firstChunk = text.substring(0, breakAt).trim();
+                const restText = text.substring(breakAt).trim();
+                if (firstChunk && restText) {
+                    chunks = [firstChunk, ...splitTextIntoChunks(restText, chunkSize)];
+                } else {
+                    chunks = splitTextIntoChunks(text, chunkSize);
+                }
+            } else {
+                chunks = splitTextIntoChunks(text, chunkSize);
+            }
+
             // Capture voice/model/lang at generation start for consistent timbre
             const model = els.modelSelect.value;
             const voice = els.voiceSelect.value;
@@ -1441,7 +1525,7 @@
                 navigator.mediaSession.metadata = new MediaMetadata({
                     title: text.substring(0, 60) + (text.length > 60 ? '...' : ''),
                     artist: `Глас: ${voice}`,
-                    album: 'Gemini TTS',
+                    album: 'Google AI Studio TTS',
                 });
             }
 
@@ -2433,7 +2517,7 @@
                     showToast(`Книга „${escapeHtml(book.name)}" — продължаване от ${formatDuration(savedPos ? savedPos.absoluteTime : 0)}`, 'success');
 
                     // Auto-start generation if we have an API key
-                    if (els.apiKey.value.trim()) {
+                    if (getEffectiveApiKey()) {
                         setTimeout(() => generateSpeech(), 300);
                     }
                 }
