@@ -762,6 +762,57 @@ textarea::placeholder {
     gap: var(--spacing-sm);
 }
 
+/* Quick Settings Bar */
+.quick-settings {
+    display: flex;
+    gap: var(--spacing-sm);
+    align-items: center;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: var(--spacing-xs) var(--spacing-sm);
+}
+
+.quick-setting {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    min-width: 0;
+}
+
+.quick-setting > label {
+    font-size: 1rem;
+    flex-shrink: 0;
+    line-height: 1;
+}
+
+.quick-setting > select {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 28px 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-input);
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+    background-position: right 4px center;
+    background-repeat: no-repeat;
+    background-size: 18px;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 0.83rem;
+    -webkit-appearance: none;
+    appearance: none;
+    cursor: pointer;
+    transition: var(--transition);
+}
+
+.quick-setting > select:focus {
+    outline: none;
+    border-color: var(--border-focus);
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+}
+
 .main-controls {
     display: flex;
     gap: var(--spacing-sm);
