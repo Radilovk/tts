@@ -39,6 +39,15 @@
     const FAST_START_CHARS = 300; // First chunk max size for faster playback start
     const MIN_CHUNK_LENGTH = 50;  // Minimum sensible chunk length for sentence-break detection
 
+    // System instruction sent with every TTS request to maintain consistent narrator voice.
+    // It is never read aloud — it guides the model's reading style across all chunks.
+    const NARRATOR_SYSTEM_INSTRUCTION =
+        'You are a professional audiobook narrator. ' +
+        'Read the text with a consistent, natural voice, steady pace, and unchanged tone. ' +
+        'Maintain exactly the same vocal quality and rhythm across every passage. ' +
+        'Do not add any extra words, sounds, or commentary beyond what is in the text. ' +
+        'This content is part of a continuous narration — read it seamlessly.';
+
     // Language instructions for TTS
     const LANGUAGE_INSTRUCTIONS = {
         bg: 'Прочети следния текст на български език с ясна дикция: ',
@@ -177,6 +186,9 @@
         // Pre-loading for seamless transitions
         preloadedChunkUrl: null,
         preloadedChunkIndex: -1,
+        // Seek state
+        isSeeking: false,          // true while an abort-and-restart seek is in progress
+        currentDisplayText: '',    // display text stored for seek restarts
         // PWA install
         deferredInstallPrompt: null,
         // Media session / wake lock
@@ -665,7 +677,14 @@
         });
 
         // Seek slider interaction
+        // `input` fires while dragging — only update the time label (no actual seek)
         els.seekSlider.addEventListener('input', () => {
+            if (state.streamMode || state.streamChunkWavs.length > 0) {
+                handleSeekSliderPreview();
+            }
+        });
+        // `change` fires on mouse/touch release — commit the seek
+        els.seekSlider.addEventListener('change', () => {
             if (state.streamMode || state.streamChunkWavs.length > 0) {
                 handleSeekSliderInput();
             }
@@ -1508,6 +1527,9 @@
             state.streamTotalDuration = 0;
             state.streamPlayedTime = 0;
 
+            // Store display text so seek-restart can finalize audio correctly
+            state.currentDisplayText = text;
+
             // Estimate initial durations for all chunks based on character count
             // This allows the slider to cover the entire book from the start
             for (let i = 0; i < chunks.length; i++) {
@@ -1556,22 +1578,23 @@
             state.streamFinished = true;
             const translatedFullText = translatedChunks.join('\n');
 
-            // If translate mode, update the translation preview
+            // If translate mode, update the translation preview and display text
             if (translateMode && translatedFullText) {
                 state.translatedContent = translatedFullText;
+                state.currentDisplayText = translatedFullText;
                 els.translatedText.textContent = translatedFullText;
                 els.translationPreview.classList.remove('hidden');
             }
 
             // Create combined WAV for download/replay
-            finalizeStreamAudio(translateMode ? translatedFullText : text);
+            finalizeStreamAudio(state.currentDisplayText);
 
             hideProgress();
             showToast('Речта е генерирана успешно! 🎉', 'success');
 
             // Add to history
             addToHistory(
-                translateMode ? translatedFullText : text,
+                state.currentDisplayText,
                 state.currentAudioBlob,
                 voice,
                 model
@@ -1579,18 +1602,27 @@
         } catch (err) {
             hideProgress();
             if (err.name === 'AbortError') {
-                showToast('Генерирането е спряно', 'info');
+                // isSeeking means this abort was triggered by a user seek — suppress toast
+                if (!state.isSeeking) {
+                    showToast('Генерирането е спряно', 'info');
+                }
             } else {
                 showToast(`Грешка: ${err.message}`, 'error');
             }
-            // Don't cleanup if we have some chunks already (allow replay)
-            if (state.streamChunkWavs.every(w => w === null)) {
-                cleanupStreamState();
-            } else {
-                state.streamFinished = true;
-                finalizeStreamAudio(text);
+            // When seeking, keep existing chunks intact for the restart
+            if (!state.isSeeking) {
+                // Don't cleanup if we have some chunks already (allow replay)
+                if (state.streamChunkWavs.every(w => w === null)) {
+                    cleanupStreamState();
+                } else {
+                    state.streamFinished = true;
+                    finalizeStreamAudio(state.currentDisplayText || text);
+                }
             }
         } finally {
+            // When seeking, the seek handler will call setGeneratingState(true) again;
+            // we still call false here so state.isGenerating becomes false and the
+            // seek-poll loop can unblock.
             setGeneratingState(false);
             state.abortController = null;
         }
@@ -2006,7 +2038,21 @@
         }
     }
 
+    // Called on slider `input` (dragging) — only update the time display, do not seek yet
+    function handleSeekSliderPreview() {
+        const percent = parseFloat(els.seekSlider.value);
+        const estimatedTotal = getEstimatedTotalDuration();
+        if (estimatedTotal > 0) {
+            els.seekPosition.textContent = formatDuration((percent / 100) * estimatedTotal);
+        }
+    }
+
+    // Called on slider `change` (release) — perform the actual seek
     function handleSeekSliderInput() {
+        if (state.isSeeking) {
+            showToast('Преместването е в процес — моля, изчакайте...', 'info');
+            return;
+        }
         const percent = parseFloat(els.seekSlider.value);
         const estimatedTotal = getEstimatedTotalDuration();
         const targetTime = (percent / 100) * estimatedTotal;
@@ -2037,7 +2083,10 @@
         if (chunkIndex < 0 || chunkIndex >= state.streamChunks.length) return;
 
         if (!state.streamChunkWavs[chunkIndex]) {
-            showToast('Тази част все още не е генерирана', 'info');
+            // Chunk not yet generated — abort current generation and restart from here
+            if (!state.isSeeking) {
+                jumpToUngeneratedChunk(chunkIndex, offsetInChunk);
+            }
             return;
         }
 
@@ -2077,6 +2126,83 @@
 
         // Pre-load next chunk for seamless transition
         preloadNextChunk();
+    }
+
+    // Abort current generation and restart from an ungenerated target chunk.
+    // Existing generated chunks are preserved so backward seeking still works.
+    async function jumpToUngeneratedChunk(targetChunk, offsetInChunk) {
+        if (targetChunk < 0 || targetChunk >= state.streamChunks.length) return;
+
+        const apiKey = getEffectiveApiKey();
+        if (!apiKey) return;
+
+        // Signal to generateSpeech's catch/finally that this abort is intentional
+        state.isSeeking = true;
+
+        // Abort any running generation
+        if (state.abortController) {
+            state.abortController.abort();
+        }
+
+        // Pause playback while we wait
+        els.audioPlayer.pause();
+        state.isStreamPlaying = false;
+
+        // Wait until generateSpeech's finally block has cleaned up
+        while (state.isGenerating) {
+            await new Promise(resolve => setTimeout(resolve, 50));
+        }
+
+        state.isSeeking = false;
+
+        // Update position tracking to the target chunk
+        state.streamCurrentChunk = targetChunk;
+        state.streamPlayedTime = 0;
+        for (let j = 0; j < targetChunk; j++) {
+            state.streamPlayedTime += state.streamChunkDurations[j] || 0;
+        }
+        updateSeekChunkInfo();
+
+        // Re-read settings (same as original generation)
+        const chunks = state.streamChunks;
+        const model = els.modelSelect.value;
+        const voice = els.voiceSelect.value;
+        const lang = els.ttsLanguage.value;
+        const translateMode = els.translateToggle.checked;
+        const translatedChunks = new Array(chunks.length).fill('');
+
+        const controller = new AbortController();
+        state.abortController = controller;
+        state.streamFinished = false;
+        state.streamMode = true;
+        setGeneratingState(true);
+        showProgress(`Генериране на част ${targetChunk + 1} от ${chunks.length}...`, true);
+
+        try {
+            await generateChunksWithBuffering(
+                chunks, apiKey, model, voice, lang, translateMode,
+                translatedChunks, controller, targetChunk, offsetInChunk
+            );
+
+            state.streamFinished = true;
+            if (state.currentDisplayText) {
+                finalizeStreamAudio(state.currentDisplayText);
+            }
+            hideProgress();
+        } catch (err) {
+            hideProgress();
+            if (err.name !== 'AbortError') {
+                showToast(`Грешка: ${err.message}`, 'error');
+            }
+            if (state.streamChunkWavs.some(w => w !== null)) {
+                state.streamFinished = true;
+            }
+        } finally {
+            setGeneratingState(false);
+            if (state.abortController === controller) {
+                state.abortController = null;
+            }
+        }
     }
 
     function getTextForSpeech() {
@@ -2133,19 +2259,20 @@
     }
 
     async function generateAudioChunk(text, apiKey, model, voice, lang, signal) {
-        // Build the text with language instruction and optional voice prompt
+        // Language hint prepended to the spoken text
         const langInstruction = LANGUAGE_INSTRUCTIONS[lang] || '';
         const voicePromptText = els.voicePrompt.value.trim();
-        let promptText = '';
-        if (voicePromptText) {
-            promptText += voicePromptText + '\n\n';
-        }
-        if (langInstruction) {
-            promptText += langInstruction;
-        }
-        promptText += text;
+        const promptText = langInstruction + text;
+
+        // Combine user voice prompt (if any) with the module-level narrator instruction.
+        const systemText = voicePromptText
+            ? voicePromptText + '\n\n' + NARRATOR_SYSTEM_INSTRUCTION
+            : NARRATOR_SYSTEM_INSTRUCTION;
 
         const requestBody = {
+            systemInstruction: {
+                parts: [{ text: systemText }]
+            },
             contents: [{
                 parts: [{
                     text: promptText
