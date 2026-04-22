@@ -39,6 +39,15 @@
     const FAST_START_CHARS = 300; // First chunk max size for faster playback start
     const MIN_CHUNK_LENGTH = 50;  // Minimum sensible chunk length for sentence-break detection
 
+    // System instruction sent with every TTS request to maintain consistent narrator voice.
+    // It is never read aloud — it guides the model's reading style across all chunks.
+    const NARRATOR_SYSTEM_INSTRUCTION =
+        'You are a professional audiobook narrator. ' +
+        'Read the text with a consistent, natural voice, steady pace, and unchanged tone. ' +
+        'Maintain exactly the same vocal quality and rhythm across every passage. ' +
+        'Do not add any extra words, sounds, or commentary beyond what is in the text. ' +
+        'This content is part of a continuous narration — read it seamlessly.';
+
     // Language instructions for TTS
     const LANGUAGE_INSTRUCTIONS = {
         bg: 'Прочети следния текст на български език с ясна дикция: ',
@@ -2040,7 +2049,10 @@
 
     // Called on slider `change` (release) — perform the actual seek
     function handleSeekSliderInput() {
-        if (state.isSeeking) return;
+        if (state.isSeeking) {
+            showToast('Преместването е в процес — моля, изчакайте...', 'info');
+            return;
+        }
         const percent = parseFloat(els.seekSlider.value);
         const estimatedTotal = getEstimatedTotalDuration();
         const targetTime = (percent / 100) * estimatedTotal;
@@ -2250,19 +2262,12 @@
         // Language hint prepended to the spoken text
         const langInstruction = LANGUAGE_INSTRUCTIONS[lang] || '';
         const voicePromptText = els.voicePrompt.value.trim();
-        const promptText = (langInstruction ? langInstruction : '') + text;
+        const promptText = langInstruction + text;
 
-        // System instruction keeps narrator style consistent across all chunks.
-        // It is NOT read aloud — the model treats it as behavioural guidance.
-        const baseNarratorInstruction =
-            'You are a professional audiobook narrator. ' +
-            'Read the text with a consistent, natural voice, steady pace, and unchanged tone. ' +
-            'Maintain exactly the same vocal quality and rhythm across every passage. ' +
-            'Do not add any extra words, sounds, or commentary beyond what is in the text. ' +
-            'This content is part of a continuous narration — read it seamlessly.';
+        // Combine user voice prompt (if any) with the module-level narrator instruction.
         const systemText = voicePromptText
-            ? voicePromptText + '\n\n' + baseNarratorInstruction
-            : baseNarratorInstruction;
+            ? voicePromptText + '\n\n' + NARRATOR_SYSTEM_INSTRUCTION
+            : NARRATOR_SYSTEM_INSTRUCTION;
 
         const requestBody = {
             systemInstruction: {
