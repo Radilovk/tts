@@ -39,15 +39,6 @@
     const FAST_START_CHARS = 300; // First chunk max size for faster playback start
     const MIN_CHUNK_LENGTH = 50;  // Minimum sensible chunk length for sentence-break detection
 
-    // System instruction sent with every TTS request to maintain consistent narrator voice.
-    // It is never read aloud — it guides the model's reading style across all chunks.
-    const NARRATOR_SYSTEM_INSTRUCTION =
-        'You are a professional audiobook narrator. ' +
-        'Read the text with a consistent, natural voice, steady pace, and unchanged tone. ' +
-        'Maintain exactly the same vocal quality and rhythm across every passage. ' +
-        'Do not add any extra words, sounds, or commentary beyond what is in the text. ' +
-        'This content is part of a continuous narration — read it seamlessly.';
-
     // Language instructions for TTS
     const LANGUAGE_INSTRUCTIONS = {
         bg: 'Прочети следния текст на български език с ясна дикция: ',
@@ -2259,20 +2250,21 @@
     }
 
     async function generateAudioChunk(text, apiKey, model, voice, lang, signal) {
-        // Language hint prepended to the spoken text
+        // Build the text with language instruction and optional voice prompt.
+        // Note: systemInstruction is not supported by Gemini TTS preview models,
+        // so style guidance is prepended inline before the actual text to read.
         const langInstruction = LANGUAGE_INSTRUCTIONS[lang] || '';
         const voicePromptText = els.voicePrompt.value.trim();
-        const promptText = langInstruction + text;
-
-        // Combine user voice prompt (if any) with the module-level narrator instruction.
-        const systemText = voicePromptText
-            ? voicePromptText + '\n\n' + NARRATOR_SYSTEM_INSTRUCTION
-            : NARRATOR_SYSTEM_INSTRUCTION;
+        let promptText = '';
+        if (voicePromptText) {
+            promptText += voicePromptText + '\n\n';
+        }
+        if (langInstruction) {
+            promptText += langInstruction;
+        }
+        promptText += text;
 
         const requestBody = {
-            systemInstruction: {
-                parts: [{ text: systemText }]
-            },
             contents: [{
                 parts: [{
                     text: promptText
