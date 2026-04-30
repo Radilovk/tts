@@ -2307,28 +2307,39 @@
                 ((i + (translateMode ? 0.5 : 0)) / chunks.length) * 100
             );
 
-            // After the first chunk, the skip-bytes logic no longer applies
-            const chunkCallback = i === startIndex ? onPcmChunk : (pcm, sr) => {
-                if (state.gaplessPlayer && state.streamMode) {
-                    state.gaplessPlayer.feed(pcm, sr);
-                }
-            };
+            // After the first chunk, the skip-bytes logic no longer applies.
+            // Wrap the callback with a leading-silence skipper for chunks 2+ so that
+            // the silence padding the TTS model prepends to each response is consumed
+            // before it reaches GaplessPlayer, eliminating audible inter-chunk gaps.
+            const chunkCallback = i === startIndex ? onPcmChunk : makeLeadingSilenceSkipper(
+                (pcm, sr) => {
+                    if (state.gaplessPlayer && state.streamMode) {
+                        state.gaplessPlayer.feed(pcm, sr);
+                    }
+                },
+                state.streamSampleRate
+            );
 
             const result = await generateAudioChunkWithRetry(
                 ttsText, apiKey, model, voice, lang, controller.signal, chunkCallback
             );
 
-            state.streamPcmChunks[i] = result.audioData;
             if (result.sampleRate) {
                 state.streamSampleRate = result.sampleRate;
             }
 
-            // Convert chunk to WAV (kept for seek / download / replay)
-            const chunkWav = pcmToWav(result.audioData, state.streamSampleRate);
+            // Trim leading/trailing silence so chunk boundaries are seamless.
+            // This removes the silence padding the TTS model adds at the start
+            // and end of every response, which is the primary cause of audible gaps.
+            const pcmData = trimPcmSilence(result.audioData, state.streamSampleRate);
+            state.streamPcmChunks[i] = pcmData;
+
+            // Convert trimmed chunk to WAV (kept for seek / download / replay)
+            const chunkWav = pcmToWav(pcmData, state.streamSampleRate);
             state.streamChunkWavs[i] = chunkWav;
 
             // Calculate exact duration of this chunk (16-bit PCM = 2 bytes per sample)
-            const chunkDuration = (result.audioData.byteLength / 2) / state.streamSampleRate;
+            const chunkDuration = (pcmData.byteLength / 2) / state.streamSampleRate;
             state.streamChunkDurations[i] = chunkDuration;
             state.streamTotalDuration = state.streamChunkDurations.reduce((a, b) => a + b, 0);
 
@@ -3060,6 +3071,111 @@
         }
         throw lastError;
     }
+    // ==================== Audio Processing ====================
+
+    // Trim leading and trailing silence from a 16-bit LE PCM ArrayBuffer.
+    // Applies a short fade-in and fade-out to avoid clicks at chunk boundaries.
+    // Returns a new ArrayBuffer (or the original if nothing needs trimming).
+    function trimPcmSilence(pcmBuffer, sampleRate) {
+        sampleRate = sampleRate || 24000;
+        const samples = new Int16Array(pcmBuffer);
+        const len = samples.length;
+        if (len === 0) return pcmBuffer;
+
+        const THRESHOLD    = 250;                              // ~0.76% of 32768 ≈ –42 dBFS
+        const MARGIN       = Math.floor(sampleRate * 0.006);  // 6 ms margin (keep natural attack)
+        const FADE_IN_LEN  = Math.floor(sampleRate * 0.004);  // 4 ms fade-in
+        const FADE_OUT_LEN = Math.floor(sampleRate * 0.015);  // 15 ms fade-out
+
+        // Find first and last non-silent samples
+        let first = -1;
+        for (let k = 0; k < len; k++) {
+            if (Math.abs(samples[k]) > THRESHOLD) { first = k; break; }
+        }
+        if (first === -1) return pcmBuffer; // entirely silent — leave untouched
+
+        let last = first;
+        for (let k = len - 1; k >= first; k--) {
+            if (Math.abs(samples[k]) > THRESHOLD) { last = k; break; }
+        }
+
+        const start = Math.max(0, first - MARGIN);
+        const end   = Math.min(len, last + 1 + MARGIN);
+
+        if (start === 0 && end === len) return pcmBuffer; // nothing to trim
+
+        // Copy trimmed slice into a new typed array so we can apply fades in-place
+        const trimmed = new Int16Array(samples.buffer, start * 2, end - start).slice();
+
+        // Fade-in
+        const fadeIn = Math.min(FADE_IN_LEN, trimmed.length);
+        for (let k = 0; k < fadeIn; k++) {
+            trimmed[k] = Math.round(trimmed[k] * (k / fadeIn));
+        }
+
+        // Fade-out
+        const fadeOut = Math.min(FADE_OUT_LEN, trimmed.length);
+        const foStart = trimmed.length - fadeOut;
+        for (let k = 0; k < fadeOut; k++) {
+            trimmed[foStart + k] = Math.round(trimmed[foStart + k] * (1 - (k + 1) / (fadeOut + 1)));
+        }
+
+        return trimmed.buffer;
+    }
+
+    // Returns a wrapper around feedFn that skips leading silence in the first
+    // PCM piece(s) of a streaming chunk.  Once the first non-silent sample is
+    // found, subsequent calls pass straight through.  Used for chunks 2+
+    // so that silence padding at the start of each chunk is eaten before the
+    // player schedules it, eliminating audible gaps between chunks.
+    function makeLeadingSilenceSkipper(feedFn, sampleRate) {
+        const sr        = sampleRate || 24000;
+        const THRESHOLD = 250;
+        const MARGIN    = Math.floor(sr * 0.006);  // 6 ms keep-before-sound
+        const FADE_IN   = Math.floor(sr * 0.004);  // 4 ms fade-in
+        const MAX_BUF   = sr;                       // 1 s safety limit
+
+        let done   = false;
+        let acc    = [];   // array of Int16Array pieces
+        let accLen = 0;    // total sample count accumulated
+
+        return (pcm, inSr) => {
+            if (done) { feedFn(pcm, inSr); return; }
+
+            acc.push(new Int16Array(pcm));
+            accLen += pcm.byteLength >> 1; // / 2
+
+            // Flatten all accumulated pieces
+            const combined = new Int16Array(accLen);
+            let off = 0;
+            for (const c of acc) { combined.set(c, off); off += c.length; }
+
+            // Search for first non-silent sample
+            let first = -1;
+            for (let k = 0; k < combined.length; k++) {
+                if (Math.abs(combined[k]) > THRESHOLD) { first = k; break; }
+            }
+
+            // If still all silence and under the safety limit, keep buffering
+            if (first === -1 && accLen < MAX_BUF) return;
+
+            // Either found sound or hit safety limit — commit and pass through
+            done  = true;
+            acc   = [];
+            accLen = 0;
+
+            const from    = first === -1 ? 0 : Math.max(0, first - MARGIN);
+            const trimmed = combined.slice(from);
+
+            const fadeLen = Math.min(FADE_IN, trimmed.length);
+            for (let k = 0; k < fadeLen; k++) {
+                trimmed[k] = Math.round(trimmed[k] * (k / fadeLen));
+            }
+
+            if (trimmed.length > 0) feedFn(trimmed.buffer, inSr);
+        };
+    }
+
     function combineArrayBuffers(buffers) {
         const totalLength = buffers.reduce((sum, buf) => sum + buf.byteLength, 0);
         const combined = new Uint8Array(totalLength);
