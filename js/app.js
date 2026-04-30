@@ -46,6 +46,187 @@
         auto: '', // No instruction, let the model auto-detect
     };
 
+    // ==================== Gapless Audio Player ====================
+    // Schedules PCM buffers back-to-back using Web Audio API so transitions
+    // between streaming chunks play with zero audible gap.
+    class GaplessPlayer {
+        constructor() {
+            this._ctx = null;
+            this._sampleRate = 24000;
+            this._nextPlayAt = 0;
+            this._sessionStartCtxTime = 0;
+            this._sessionStartOffset = 0; // seconds of audio already "played" before this session
+            this._isPlaying = false;
+            this._isPaused = false;
+            this._playbackRate = 1.0;
+            this._totalScheduled = 0;    // seconds of audio buffered (normal speed)
+            this._activeSources = [];
+            this._finished = false;
+            this._rafId = null;
+            // Callbacks
+            this.onTimeUpdate = null;
+            this.onEnded = null;
+            this.onPlay = null;
+            this.onPause = null;
+        }
+
+        _getCtx() {
+            if (!this._ctx || this._ctx.state === 'closed') {
+                this._ctx = new (window.AudioContext || window.webkitAudioContext)(
+                    { sampleRate: this._sampleRate }
+                );
+            }
+            return this._ctx;
+        }
+
+        // Append a raw PCM (16-bit LE) ArrayBuffer for gapless playback.
+        // Returns the duration (in seconds at normal speed) of the buffer.
+        feed(pcmBuffer, sampleRate) {
+            if (sampleRate && sampleRate !== this._sampleRate) {
+                this._sampleRate = sampleRate;
+            }
+            const ctx = this._getCtx();
+            if (ctx.state === 'suspended') { ctx.resume(); }
+
+            const int16 = new Int16Array(pcmBuffer);
+            if (int16.length === 0) return 0;
+
+            const float32 = new Float32Array(int16.length);
+            for (let k = 0; k < int16.length; k++) {
+                float32[k] = int16[k] / 32768.0;
+            }
+
+            const audioBuf = ctx.createBuffer(1, float32.length, this._sampleRate);
+            audioBuf.copyToChannel(float32, 0);
+
+            const source = ctx.createBufferSource();
+            source.buffer = audioBuf;
+            source.playbackRate.value = this._playbackRate;
+            source.connect(ctx.destination);
+
+            if (!this._isPlaying) {
+                const startDelay = 0.05; // 50 ms startup buffer
+                this._nextPlayAt = ctx.currentTime + startDelay;
+                this._sessionStartCtxTime = ctx.currentTime + startDelay;
+                this._totalScheduled = 0;
+                this._isPlaying = true;
+                this._isPaused = false;
+                this._finished = false;
+                this._startRAF();
+                if (this.onPlay) this.onPlay();
+            }
+
+            const scheduleAt = Math.max(this._nextPlayAt, ctx.currentTime + 0.01);
+            source.start(scheduleAt);
+
+            const bufDuration = float32.length / this._sampleRate;
+            const wallDuration = bufDuration / this._playbackRate;
+            this._nextPlayAt = scheduleAt + wallDuration;
+            this._totalScheduled += bufDuration;
+
+            source.addEventListener('ended', () => {
+                const idx = this._activeSources.indexOf(source);
+                if (idx !== -1) this._activeSources.splice(idx, 1);
+                if (this._activeSources.length === 0 && this._finished) {
+                    this._isPlaying = false;
+                    this._stopRAF();
+                    if (this.onEnded) this.onEnded();
+                }
+            });
+            this._activeSources.push(source);
+
+            return bufDuration;
+        }
+
+        // Signal that no more PCM data will be fed; fires onEnded when drained.
+        finish() {
+            this._finished = true;
+            if (this._isPlaying && this._activeSources.length === 0) {
+                this._isPlaying = false;
+                this._stopRAF();
+                if (this.onEnded) this.onEnded();
+            }
+        }
+
+        pause() {
+            if (!this._isPlaying || this._isPaused || !this._ctx) return;
+            this._sessionStartOffset = this.currentTime;
+            this._isPaused = true;
+            this._ctx.suspend();
+            this._stopRAF();
+            if (this.onPause) this.onPause();
+        }
+
+        resume() {
+            if (!this._isPaused || !this._isPlaying || !this._ctx) return;
+            this._ctx.resume().then(() => {
+                if (!this._ctx) return;
+                this._sessionStartCtxTime = this._ctx.currentTime;
+                this._isPaused = false;
+                this._startRAF();
+                if (this.onPlay) this.onPlay();
+            });
+        }
+
+        stop() {
+            this._stopRAF();
+            this._finished = true;
+            for (const src of this._activeSources) { try { src.stop(0); } catch {} }
+            this._activeSources = [];
+            if (this._ctx) { this._ctx.close().catch(() => {}); this._ctx = null; }
+            this._isPlaying = false;
+            this._isPaused = false;
+            this._nextPlayAt = 0;
+            this._sessionStartCtxTime = 0;
+            this._sessionStartOffset = 0;
+            this._totalScheduled = 0;
+        }
+
+        get currentTime() {
+            if (!this._isPlaying) return this._sessionStartOffset;
+            if (this._isPaused) return this._sessionStartOffset;
+            if (!this._ctx) return this._sessionStartOffset;
+            const elapsed = (this._ctx.currentTime - this._sessionStartCtxTime) * this._playbackRate;
+            return this._sessionStartOffset + Math.max(0, elapsed);
+        }
+
+        get totalDuration() { return this._totalScheduled; }
+        get paused() { return !this._isPlaying || this._isPaused; }
+
+        set playbackRate(rate) {
+            const prev = this._playbackRate;
+            this._playbackRate = rate;
+            for (const src of this._activeSources) { src.playbackRate.value = rate; }
+            // Adjust next-schedule clock for new rate
+            if (this._isPlaying && !this._isPaused && this._ctx && prev !== rate && prev > 0) {
+                const remaining = this._totalScheduled - this.currentTime;
+                if (remaining > 0) {
+                    this._nextPlayAt = this._ctx.currentTime + remaining / rate;
+                }
+            }
+        }
+        get playbackRate() { return this._playbackRate; }
+
+        _startRAF() {
+            if (this._rafId) return;
+            let lastTime = -1;
+            const tick = () => {
+                if (!this._isPlaying || this._isPaused) { this._rafId = null; return; }
+                const ct = this.currentTime;
+                if (Math.abs(ct - lastTime) >= 0.25) {
+                    lastTime = ct;
+                    if (this.onTimeUpdate) this.onTimeUpdate(ct);
+                }
+                this._rafId = requestAnimationFrame(tick);
+            };
+            this._rafId = requestAnimationFrame(tick);
+        }
+
+        _stopRAF() {
+            if (this._rafId) { cancelAnimationFrame(this._rafId); this._rafId = null; }
+        }
+    }
+
     // ==================== DOM Elements ====================
     const $ = (sel) => document.querySelector(sel);
 
@@ -166,9 +347,11 @@
         streamChunkDurations: [], // duration in seconds per chunk
         streamCurrentChunk: 0,    // currently playing chunk index
         streamTotalDuration: 0,   // estimated total duration
-        streamPlayedTime: 0,      // cumulative played time before current chunk
+        streamPlayedTime: 0,      // cumulative played time before current GaplessPlayer session
         streamGeneratingIndex: -1, // chunk index currently being generated
         streamPlaybackSpeed: 1.0,  // current playback speed
+        // Gapless Web Audio API player (used for streaming TTS playback)
+        gaplessPlayer: null,
         // Pause/resume position
         savedPosition: null,      // { chunkIndex, offsetInChunk, absoluteTime }
         // Per-book tracking
@@ -201,6 +384,35 @@
             return window.PRECONFIGURED_API_KEY.trim();
         }
         return els.apiKey.value.trim();
+    }
+
+    // Create a GaplessPlayer wired to the current UI/state callbacks.
+    function createGaplessPlayer() {
+        const player = new GaplessPlayer();
+        player.playbackRate = state.streamPlaybackSpeed;
+        player.onTimeUpdate = () => {
+            if (state.streamMode) {
+                updateSeekSliderFromPlayback();
+            }
+        };
+        player.onPlay = () => {
+            state.isStreamPlaying = true;
+            updatePlayPauseIcon();
+        };
+        player.onPause = () => {
+            state.isStreamPlaying = false;
+            updatePlayPauseIcon();
+        };
+        player.onEnded = () => {
+            state.isStreamPlaying = false;
+            updatePlayPauseIcon();
+            if (state.streamFinished) {
+                onStreamPlaybackComplete();
+            }
+            savePlaybackPosition();
+            releaseWakeLock();
+        };
+        return player;
     }
 
     // ==================== Text Chunking Helpers ====================
@@ -245,7 +457,7 @@
         els.voiceSelect.value = get(STORAGE_KEYS.VOICE, 'Kore');
         els.speedSlider.value = get(STORAGE_KEYS.SPEED, '1.0');
         els.autoPlay.checked = get(STORAGE_KEYS.AUTO_PLAY, 'true') === 'true';
-        els.chunkSize.value = get(STORAGE_KEYS.CHUNK_SIZE, '500');
+        els.chunkSize.value = get(STORAGE_KEYS.CHUNK_SIZE, '3000');
         els.translationModel.value = get(STORAGE_KEYS.TRANSLATION_MODEL, 'gemini-2.5-flash-lite');
         els.ttsLanguage.value = get(STORAGE_KEYS.TTS_LANGUAGE, 'bg');
         els.voicePrompt.value = get(STORAGE_KEYS.VOICE_PROMPT, '');
@@ -375,7 +587,7 @@
         });
         // Periodic auto-save every 15 seconds during playback
         setInterval(() => {
-            if (state.streamMode && state.isStreamPlaying && !els.audioPlayer.paused) {
+            if (state.streamMode && state.isStreamPlaying) {
                 savePlaybackPosition();
             }
         }, 15000);
@@ -402,7 +614,10 @@
         savePlaybackSpeed();
         updateSpeedToggleLabel();
 
-        // Apply to currently playing audio
+        // Apply to GaplessPlayer (streaming mode) or HTML audio element (replay mode)
+        if (state.gaplessPlayer) {
+            state.gaplessPlayer.playbackRate = state.streamPlaybackSpeed;
+        }
         if (els.audioPlayer.src) {
             els.audioPlayer.playbackRate = state.streamPlaybackSpeed;
         }
@@ -428,11 +643,19 @@
             });
 
             navigator.mediaSession.setActionHandler('play', () => {
-                els.audioPlayer.play().catch(() => {});
+                if (state.gaplessPlayer && state.streamMode) {
+                    state.gaplessPlayer.resume();
+                } else {
+                    els.audioPlayer.play().catch(() => {});
+                }
                 updatePlayPauseIcon();
             });
             navigator.mediaSession.setActionHandler('pause', () => {
-                els.audioPlayer.pause();
+                if (state.gaplessPlayer && state.streamMode) {
+                    state.gaplessPlayer.pause();
+                } else {
+                    els.audioPlayer.pause();
+                }
                 savePlaybackPosition();
                 updatePlayPauseIcon();
             });
@@ -645,23 +868,27 @@
             }
         });
 
-        // Track current time for seek slider
+        // Track current time for seek slider (non-streaming mode)
         els.audioPlayer.addEventListener('timeupdate', () => {
-            if (state.streamMode) {
+            if (state.streamMode && !state.gaplessPlayer) {
                 updateSeekSliderFromPlayback();
             }
         });
 
-        // Update play/pause icon on play/pause events
-        els.audioPlayer.addEventListener('play', updatePlayPauseIcon);
+        // Update play/pause icon on play/pause events (non-streaming mode)
+        els.audioPlayer.addEventListener('play', () => {
+            if (!state.gaplessPlayer) updatePlayPauseIcon();
+        });
         els.audioPlayer.addEventListener('pause', () => {
-            savePlaybackPosition();
-            updatePlayPauseIcon();
+            if (!state.gaplessPlayer) {
+                savePlaybackPosition();
+                updatePlayPauseIcon();
+            }
         });
 
-        // Streaming playback: when a chunk finishes, play next in queue
+        // Chunk-end handler used after replay (streamMode=false) or as fallback
         els.audioPlayer.addEventListener('ended', () => {
-            if (state.streamMode) {
+            if (state.streamMode && !state.gaplessPlayer) {
                 playNextStreamChunk();
             }
             updatePlayPauseIcon();
@@ -1263,13 +1490,24 @@
 
     // ==================== Play/Pause & Skip ====================
     function togglePlayPause() {
-        if (els.audioPlayer.paused) {
-            els.audioPlayer.play().catch(() => {
-                showToast('Натиснете ▶ за възпроизвеждане', 'info');
-            });
+        if (state.gaplessPlayer && state.streamMode) {
+            // Streaming mode: delegate to GaplessPlayer
+            if (state.gaplessPlayer.paused) {
+                state.gaplessPlayer.resume();
+            } else {
+                state.gaplessPlayer.pause();
+                savePlaybackPosition();
+            }
         } else {
-            els.audioPlayer.pause();
-            savePlaybackPosition();
+            // Replay / non-streaming mode: use HTML audio element
+            if (els.audioPlayer.paused) {
+                els.audioPlayer.play().catch(() => {
+                    showToast('Натиснете ▶ за възпроизвеждане', 'info');
+                });
+            } else {
+                els.audioPlayer.pause();
+                savePlaybackPosition();
+            }
         }
         updatePlayPauseIcon();
     }
@@ -1277,20 +1515,25 @@
     function updatePlayPauseIcon() {
         const playIcon = els.btnPlayPause.querySelector('.icon-play');
         const pauseIcon = els.btnPlayPause.querySelector('.icon-pause');
-        if (els.audioPlayer.paused) {
-            playIcon.style.display = '';
-            pauseIcon.style.display = 'none';
-        } else {
+        const isPlaying = (state.gaplessPlayer && state.streamMode)
+            ? !state.gaplessPlayer.paused
+            : !els.audioPlayer.paused;
+        if (isPlaying) {
             playIcon.style.display = 'none';
             pauseIcon.style.display = '';
+        } else {
+            playIcon.style.display = '';
+            pauseIcon.style.display = 'none';
         }
     }
 
     function skipTime(seconds) {
         if (!state.streamMode && !state.streamChunkWavs.length) return;
 
-        const currentTime = els.audioPlayer.currentTime || 0;
-        const absoluteTime = state.streamPlayedTime + currentTime;
+        // Get absolute position from GaplessPlayer or HTML audio element
+        const absoluteTime = state.gaplessPlayer
+            ? state.streamPlayedTime + state.gaplessPlayer.currentTime
+            : state.streamPlayedTime + (els.audioPlayer.currentTime || 0);
         const estimatedTotal = getEstimatedTotalDuration();
         const targetTime = Math.max(0, Math.min(absoluteTime + seconds, estimatedTotal));
 
@@ -1310,12 +1553,8 @@
             targetChunk = Math.min(i + 1, state.streamChunkDurations.length - 1);
         }
 
-        // If same chunk, just seek within it
-        if (targetChunk === state.streamCurrentChunk && state.streamChunkWavs[targetChunk]) {
-            els.audioPlayer.currentTime = offsetInChunk;
-        } else {
-            seekToChunk(targetChunk, offsetInChunk);
-        }
+        // Always delegate to seekToChunk — GaplessPlayer cannot seek in-place
+        seekToChunk(targetChunk, offsetInChunk);
 
         // Update seek slider
         const percent = (targetTime / estimatedTotal) * 100;
@@ -1326,13 +1565,35 @@
     function savePlaybackPosition() {
         if (!state.streamMode && !state.streamChunkWavs.length) return;
 
-        const currentTime = els.audioPlayer.currentTime || 0;
-        const absoluteTime = state.streamPlayedTime + currentTime;
+        // Get current playback time from GaplessPlayer (streaming) or HTML audio (replay)
+        const gaplessTime = state.gaplessPlayer ? state.gaplessPlayer.currentTime : 0;
+        const htmlTime = els.audioPlayer.currentTime || 0;
+        const absoluteTime = state.gaplessPlayer
+            ? state.streamPlayedTime + gaplessTime
+            : state.streamPlayedTime + htmlTime;
+
+        // Derive chunk index and offset within chunk from absolute time
+        let chunkIndex = state.streamCurrentChunk;
+        let offsetInChunk = state.gaplessPlayer ? gaplessTime : htmlTime;
+        if (state.gaplessPlayer) {
+            let cumulative = 0;
+            for (let i = 0; i < state.streamChunkDurations.length; i++) {
+                const dur = state.streamChunkDurations[i];
+                if (cumulative + dur > absoluteTime) {
+                    chunkIndex = i;
+                    offsetInChunk = absoluteTime - cumulative;
+                    break;
+                }
+                cumulative += dur;
+                chunkIndex = Math.min(i + 1, state.streamChunkDurations.length - 1);
+                offsetInChunk = 0;
+            }
+        }
 
         state.savedPosition = {
-            chunkIndex: state.streamCurrentChunk,
-            offsetInChunk: currentTime,
-            absoluteTime: absoluteTime,
+            chunkIndex,
+            offsetInChunk,
+            absoluteTime,
             bookId: state.currentBookId || null,
         };
 
@@ -1626,10 +1887,40 @@
         resumeChunkIndex = resumeChunkIndex || 0;
         resumeOffsetInChunk = resumeOffsetInChunk || 0;
 
-        // If resuming, start generating from the resume chunk
-        // but generate sequentially from the resume point for buffering
         const startIndex = resumeChunkIndex;
         state.streamCurrentChunk = startIndex;
+
+        // Set absolute start offset for GaplessPlayer time-tracking
+        state.streamPlayedTime = resumeOffsetInChunk;
+        for (let j = 0; j < startIndex; j++) {
+            state.streamPlayedTime += state.streamChunkDurations[j] || 0;
+        }
+
+        // Create a fresh GaplessPlayer for this (re)start
+        if (state.gaplessPlayer) {
+            state.gaplessPlayer.stop();
+        }
+        state.gaplessPlayer = createGaplessPlayer();
+
+        // Number of bytes to skip in the first chunk when resuming mid-chunk
+        let resumeSkipBytes = Math.floor(resumeOffsetInChunk * state.streamSampleRate) * 2;
+
+        // Callback fed to generateAudioChunk: forwards each PCM piece to GaplessPlayer
+        // as it arrives from the SSE stream, enabling playback to begin before the
+        // full chunk has been received.
+        const onPcmChunk = (pcm, sr) => {
+            if (!state.gaplessPlayer || !state.streamMode) return;
+            if (resumeSkipBytes > 0) {
+                if (pcm.byteLength <= resumeSkipBytes) {
+                    resumeSkipBytes -= pcm.byteLength;
+                    return; // skip this PCM piece entirely
+                }
+                // Partial skip
+                pcm = pcm.slice(resumeSkipBytes);
+                resumeSkipBytes = 0;
+            }
+            state.gaplessPlayer.feed(pcm, sr);
+        };
 
         // Pre-translate start + buffer segments before TTS generation
         if (translateMode) {
@@ -1664,8 +1955,11 @@
                 throw new DOMException('Cancelled', 'AbortError');
             }
 
-            // Skip if this chunk was already generated (e.g. after a seek)
+            // Skip if already generated; feed PCM to GaplessPlayer for continuity
             if (state.streamChunkWavs[i]) {
+                if (state.gaplessPlayer && state.streamPcmChunks[i] && i > startIndex) {
+                    state.gaplessPlayer.feed(state.streamPcmChunks[i], state.streamSampleRate);
+                }
                 continue;
             }
 
@@ -1691,7 +1985,8 @@
                 }
             }
 
-            // Generate TTS for this chunk — same model/voice/lang for consistency
+            // Generate TTS for this chunk — streaming via SSE so audio starts playing
+            // as soon as the first PCM data arrives (onPcmChunk feeds GaplessPlayer)
             showProgress(
                 chunks.length > 1
                     ? `Реч: част ${i + 1} от ${chunks.length}...`
@@ -1700,8 +1995,15 @@
                 ((i + (translateMode ? 0.5 : 0)) / chunks.length) * 100
             );
 
+            // After the first chunk, the skip-bytes logic no longer applies
+            const chunkCallback = i === startIndex ? onPcmChunk : (pcm, sr) => {
+                if (state.gaplessPlayer && state.streamMode) {
+                    state.gaplessPlayer.feed(pcm, sr);
+                }
+            };
+
             const result = await generateAudioChunk(
-                ttsText, apiKey, model, voice, lang, controller.signal
+                ttsText, apiKey, model, voice, lang, controller.signal, chunkCallback
             );
 
             state.streamPcmChunks[i] = result.audioData;
@@ -1709,33 +2011,17 @@
                 state.streamSampleRate = result.sampleRate;
             }
 
-            // Convert chunk to WAV
+            // Convert chunk to WAV (kept for seek / download / replay)
             const chunkWav = pcmToWav(result.audioData, state.streamSampleRate);
             state.streamChunkWavs[i] = chunkWav;
 
-            // Calculate duration of this chunk
-            // 16-bit PCM = 2 bytes per sample
+            // Calculate exact duration of this chunk (16-bit PCM = 2 bytes per sample)
             const chunkDuration = (result.audioData.byteLength / 2) / state.streamSampleRate;
             state.streamChunkDurations[i] = chunkDuration;
             state.streamTotalDuration = state.streamChunkDurations.reduce((a, b) => a + b, 0);
 
             // Update seek slider total
             updateSeekSliderTotal();
-
-            // Start playback immediately when the current chunk is ready
-            if (i === state.streamCurrentChunk && !state.isStreamPlaying) {
-                if (i === startIndex && resumeOffsetInChunk > 0) {
-                    // Resume from saved offset within the chunk
-                    seekToChunk(i, resumeOffsetInChunk);
-                } else {
-                    playChunkByIndex(i);
-                }
-            }
-
-            // Pre-load next chunk if this chunk is the one after the currently playing
-            if (i === state.streamCurrentChunk + 1) {
-                preloadNextChunk();
-            }
 
             // Pre-translate next buffer segment for seamless pipeline
             if (translateMode) {
@@ -1759,7 +2045,12 @@
                 ((i + 1) / chunks.length) * 100
             );
         }
+
         state.streamGeneratingIndex = -1;
+        // Signal GaplessPlayer that all audio has been fed
+        if (state.gaplessPlayer) {
+            state.gaplessPlayer.finish();
+        }
     }
 
     function stopGeneration() {
@@ -1770,8 +2061,12 @@
         // Stop streaming playback and save position
         if (state.streamMode) {
             savePlaybackPosition();
+            // Stop GaplessPlayer (streaming) and HTML audio (replay)
+            if (state.gaplessPlayer) {
+                state.gaplessPlayer.pause();
+            }
             els.audioPlayer.pause();
-            // Don't cleanup if we have generated chunks (allow seek)
+            // Don't cleanup if we have generated chunks (allow seek / replay)
             if (state.streamChunkWavs.some(w => w !== null)) {
                 state.streamFinished = true;
                 state.isStreamPlaying = false;
@@ -1784,6 +2079,8 @@
     }
 
     // ==================== Streaming Playback Queue ====================
+    // playChunkByIndex is kept as a fallback for the HTML audio element
+    // (used in non-GaplessPlayer contexts such as replay after finalizeStreamAudio).
     function playChunkByIndex(index) {
         if (index < 0 || index >= state.streamChunkWavs.length) return;
         if (!state.streamChunkWavs[index]) return; // not generated yet
@@ -1791,48 +2088,27 @@
         state.isStreamPlaying = true;
         state.streamCurrentChunk = index;
 
-        // Calculate played time before this chunk
-        state.streamPlayedTime = 0;
-        for (let j = 0; j < index; j++) {
-            state.streamPlayedTime += state.streamChunkDurations[j] || 0;
+        if (state.streamCurrentUrl) {
+            URL.revokeObjectURL(state.streamCurrentUrl);
         }
-
-        // Check if this chunk was already pre-loaded
-        if (state.preloadedChunkIndex === index && state.preloadedChunkUrl) {
-            // Use pre-loaded URL (already warmed in browser cache)
-            if (state.streamCurrentUrl) {
-                URL.revokeObjectURL(state.streamCurrentUrl);
-            }
-            state.streamCurrentUrl = state.preloadedChunkUrl;
-            state.preloadedChunkUrl = null;
-            state.preloadedChunkIndex = -1;
-        } else {
-            // Revoke previous chunk URL
-            if (state.streamCurrentUrl) {
-                URL.revokeObjectURL(state.streamCurrentUrl);
-            }
-            state.streamCurrentUrl = URL.createObjectURL(state.streamChunkWavs[index]);
-        }
-
+        state.streamCurrentUrl = URL.createObjectURL(state.streamChunkWavs[index]);
         els.audioPlayer.src = state.streamCurrentUrl;
         els.audioPlayer.playbackRate = state.streamPlaybackSpeed;
         els.playerSection.classList.remove('hidden');
 
         updateSeekChunkInfo();
-
         els.audioPlayer.play().catch(() => {
             showToast('Натиснете ▶ за възпроизвеждане', 'info');
         });
-
-        // Pre-load next chunk for seamless transition
-        preloadNextChunk();
     }
 
+    // playNextStreamChunk is used as a fallback when no GaplessPlayer is active
+    // (e.g. after replay mode is engaged via onStreamPlaybackComplete).
     function playNextStreamChunk() {
+        if (state.gaplessPlayer) return; // GaplessPlayer handles transitions
         const nextIndex = state.streamCurrentChunk + 1;
 
         if (nextIndex >= state.streamChunks.length) {
-            // All chunks played
             state.isStreamPlaying = false;
             if (state.streamCurrentUrl) {
                 URL.revokeObjectURL(state.streamCurrentUrl);
@@ -1847,10 +2123,8 @@
         }
 
         if (state.streamChunkWavs[nextIndex]) {
-            // Next chunk is ready — use pre-loaded URL for seamless transition
             playChunkByIndex(nextIndex);
         } else {
-            // Next chunk not ready yet, wait for it
             state.streamCurrentChunk = nextIndex;
             state.isStreamPlaying = false;
             updateSeekChunkInfo();
@@ -1878,10 +2152,15 @@
     }
 
     function onStreamPlaybackComplete() {
-        // All chunks generated and played — set combined audio for replay/download
+        // All chunks generated and played — hand off to HTML audio element for replay/download
         if (state.currentAudioUrl) {
             els.audioPlayer.src = state.currentAudioUrl;
             els.audioPlayer.playbackRate = state.streamPlaybackSpeed;
+        }
+        // Stop GaplessPlayer now that we're in replay mode
+        if (state.gaplessPlayer) {
+            state.gaplessPlayer.stop();
+            state.gaplessPlayer = null;
         }
         state.streamMode = false;
         releaseWakeLock();
@@ -1904,8 +2183,12 @@
         els.playerTitle.textContent =
             displayText.substring(0, 60) + (displayText.length > 60 ? '...' : '');
 
-        // If playback already finished (single chunk case), set combined audio now
+        // If GaplessPlayer is no longer active and all chunks are ready, switch to replay mode
         if (!state.isStreamPlaying && state.streamChunkWavs.every(w => w !== null)) {
+            if (state.gaplessPlayer) {
+                state.gaplessPlayer.stop();
+                state.gaplessPlayer = null;
+            }
             els.audioPlayer.src = state.currentAudioUrl;
             els.audioPlayer.playbackRate = state.streamPlaybackSpeed;
             els.playerSection.classList.remove('hidden');
@@ -1914,6 +2197,11 @@
     }
 
     function cleanupStreamState() {
+        // Stop and destroy GaplessPlayer
+        if (state.gaplessPlayer) {
+            state.gaplessPlayer.stop();
+            state.gaplessPlayer = null;
+        }
         // Revoke currently playing chunk URL
         if (state.streamCurrentUrl) {
             URL.revokeObjectURL(state.streamCurrentUrl);
@@ -2004,13 +2292,28 @@
         const estimatedTotal = getEstimatedTotalDuration();
         if (estimatedTotal <= 0) return;
 
-        const currentTime = els.audioPlayer.currentTime || 0;
-        const absoluteTime = state.streamPlayedTime + currentTime;
+        // Prefer GaplessPlayer time; fall back to HTML audio element for replay mode
+        const absoluteTime = state.gaplessPlayer
+            ? state.streamPlayedTime + state.gaplessPlayer.currentTime
+            : state.streamPlayedTime + (els.audioPlayer.currentTime || 0);
         const percent = (absoluteTime / estimatedTotal) * 100;
 
         els.seekSlider.value = Math.min(percent, 100);
         els.seekPosition.textContent = formatDuration(absoluteTime);
         els.seekDuration.textContent = formatDuration(estimatedTotal);
+
+        // Keep state.streamCurrentChunk in sync with actual playback position
+        let cumulative = 0;
+        for (let i = 0; i < state.streamChunkDurations.length; i++) {
+            if (cumulative + state.streamChunkDurations[i] > absoluteTime) {
+                if (state.streamCurrentChunk !== i) {
+                    state.streamCurrentChunk = i;
+                    updateSeekChunkInfo();
+                }
+                break;
+            }
+            cumulative += state.streamChunkDurations[i];
+        }
     }
 
     function updateSeekSliderTotal() {
@@ -2081,42 +2384,48 @@
             return;
         }
 
+        // Stop the current GaplessPlayer session
+        if (state.gaplessPlayer) {
+            state.gaplessPlayer.stop();
+            state.gaplessPlayer = null;
+        }
+
+        // Update position tracking
         state.streamCurrentChunk = chunkIndex;
         state.streamPlayedTime = 0;
         for (let j = 0; j < chunkIndex; j++) {
             state.streamPlayedTime += state.streamChunkDurations[j] || 0;
         }
+        state.streamPlayedTime += offsetInChunk;
 
-        // Revoke previous URL
-        if (state.streamCurrentUrl) {
-            URL.revokeObjectURL(state.streamCurrentUrl);
+        // Create a fresh GaplessPlayer and feed the target chunk (with skip)
+        state.gaplessPlayer = createGaplessPlayer();
+
+        const pcm = state.streamPcmChunks[chunkIndex];
+        if (pcm) {
+            const skipBytes = Math.floor(offsetInChunk * state.streamSampleRate) * 2;
+            const feedPcm = (skipBytes > 0 && skipBytes < pcm.byteLength)
+                ? pcm.slice(skipBytes)
+                : (skipBytes >= pcm.byteLength ? null : pcm);
+            if (feedPcm) {
+                state.gaplessPlayer.feed(feedPcm, state.streamSampleRate);
+            }
         }
 
-        const url = URL.createObjectURL(state.streamChunkWavs[chunkIndex]);
-        state.streamCurrentUrl = url;
-
-        els.audioPlayer.src = url;
-        els.audioPlayer.playbackRate = state.streamPlaybackSpeed;
-
-        // If an offset within the chunk was requested, seek to it once loaded
-        if (offsetInChunk && offsetInChunk > 0) {
-            const onCanPlay = () => {
-                els.audioPlayer.currentTime = offsetInChunk;
-                els.audioPlayer.removeEventListener('canplay', onCanPlay);
-            };
-            els.audioPlayer.addEventListener('canplay', onCanPlay);
+        // Feed any subsequent already-generated chunks for seamless continuation
+        for (let i = chunkIndex + 1; i < state.streamChunkWavs.length; i++) {
+            if (state.streamChunkWavs[i] && state.streamPcmChunks[i]) {
+                state.gaplessPlayer.feed(state.streamPcmChunks[i], state.streamSampleRate);
+            } else {
+                break; // generation pipeline will feed the rest via onPcmChunk
+            }
         }
 
         state.isStreamPlaying = true;
         state.streamMode = true;
+        els.playerSection.classList.remove('hidden');
         updateSeekChunkInfo();
-
-        els.audioPlayer.play().catch(() => {
-            showToast('Натиснете ▶ за възпроизвеждане', 'info');
-        });
-
-        // Pre-load next chunk for seamless transition
-        preloadNextChunk();
+        updatePlayPauseIcon();
     }
 
     // Abort current generation and restart from an ungenerated target chunk.
@@ -2135,7 +2444,11 @@
             state.abortController.abort();
         }
 
-        // Pause playback while we wait
+        // Pause GaplessPlayer and HTML audio while we wait
+        if (state.gaplessPlayer) {
+            state.gaplessPlayer.stop();
+            state.gaplessPlayer = null;
+        }
         els.audioPlayer.pause();
         state.isStreamPlaying = false;
 
@@ -2146,12 +2459,7 @@
 
         state.isSeeking = false;
 
-        // Update position tracking to the target chunk
-        state.streamCurrentChunk = targetChunk;
-        state.streamPlayedTime = 0;
-        for (let j = 0; j < targetChunk; j++) {
-            state.streamPlayedTime += state.streamChunkDurations[j] || 0;
-        }
+        // streamCurrentChunk and streamPlayedTime will be set by generateChunksWithBuffering
         updateSeekChunkInfo();
 
         // Re-read settings (same as original generation)
@@ -2249,10 +2557,89 @@
         return chunks.length > 0 ? chunks : [text];
     }
 
-    async function generateAudioChunk(text, apiKey, model, voice, lang, signal) {
-        // Build the text with language instruction and optional voice prompt.
-        // Note: systemInstruction is not supported by Gemini TTS preview models,
-        // so style guidance is prepended inline before the actual text to read.
+    // Decode a base64-aligned string to a 16-bit PCM ArrayBuffer.
+    // Any trailing odd byte is silently dropped to maintain int16 alignment.
+    function base64ToPcmBuffer(aligned) {
+        const binary = atob(aligned);
+        const bytes = new Uint8Array(binary.length);
+        for (let k = 0; k < binary.length; k++) bytes[k] = binary.charCodeAt(k);
+        const evenLen = bytes.length - (bytes.length % 2);
+        return evenLen > 0 ? bytes.slice(0, evenLen).buffer : null;
+    }
+
+    // Parse a Gemini streamGenerateContent SSE response body,
+    // yielding each PCM chunk as { pcm: ArrayBuffer, sampleRate: number }
+    // (or { text: string } when the model returns text instead of audio).
+    async function* parseAudioSSE(bodyStream, signal) {
+        const reader = bodyStream.getReader();
+        const decoder = new TextDecoder();
+        let lineBuffer = '';
+        let base64Residual = '';
+        let sampleRate = 24000;
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (signal && signal.aborted) {
+                    throw new DOMException('Cancelled', 'AbortError');
+                }
+                lineBuffer += decoder.decode(value, { stream: true });
+
+                let newlineIdx;
+                while ((newlineIdx = lineBuffer.indexOf('\n')) !== -1) {
+                    const line = lineBuffer.slice(0, newlineIdx).trimEnd();
+                    lineBuffer = lineBuffer.slice(newlineIdx + 1);
+                    if (!line.startsWith('data: ')) continue;
+                    const data = line.slice(6).trim();
+                    if (!data || data === '[DONE]') continue;
+
+                    try {
+                        const json = JSON.parse(data);
+                        if (json.error) {
+                            throw new Error(json.error.message || 'API streaming error');
+                        }
+                        const parts = json.candidates?.[0]?.content?.parts || [];
+                        for (const part of parts) {
+                            if (part.inlineData?.data) {
+                                const m = part.inlineData.mimeType?.match(/rate=(\d+)/);
+                                if (m) sampleRate = parseInt(m[1]);
+                                // Accumulate base64 and decode in complete 4-char groups
+                                const full = base64Residual + part.inlineData.data;
+                                const alignedLen = Math.floor(full.length / 4) * 4;
+                                base64Residual = full.slice(alignedLen);
+                                const aligned = full.slice(0, alignedLen);
+                                if (!aligned) continue;
+                                const pcm = base64ToPcmBuffer(aligned);
+                                if (pcm) yield { pcm, sampleRate };
+                            } else if (part.text) {
+                                yield { text: part.text, pcm: null, sampleRate };
+                            }
+                        }
+                    } catch (parseErr) {
+                        if (parseErr.name === 'AbortError') throw parseErr;
+                        // Skip malformed SSE events silently
+                    }
+                }
+            }
+
+            // Flush any remaining base64 residual
+            if (base64Residual.length >= 4) {
+                const alignedLen = Math.floor(base64Residual.length / 4) * 4;
+                const aligned = base64Residual.slice(0, alignedLen);
+                try {
+                    const pcm = base64ToPcmBuffer(aligned);
+                    if (pcm) yield { pcm, sampleRate };
+                } catch {}
+            }
+        } finally {
+            reader.releaseLock();
+        }
+    }
+
+    // Generate audio for a single text chunk using the streaming SSE endpoint.
+    // onPcmChunk(pcm, sampleRate) is called for each PCM piece as it arrives,
+    // enabling GaplessPlayer to start before the full response is received.
+    async function generateAudioChunk(text, apiKey, model, voice, lang, signal, onPcmChunk) {
         const langInstruction = LANGUAGE_INSTRUCTIONS[lang] || '';
         const voicePromptText = els.voicePrompt.value.trim();
         let promptText = '';
@@ -2266,24 +2653,21 @@
 
         const requestBody = {
             contents: [{
-                parts: [{
-                    text: promptText
-                }]
+                parts: [{ text: promptText }]
             }],
             generationConfig: {
                 responseModalities: ['AUDIO'],
                 speechConfig: {
                     voiceConfig: {
-                        prebuiltVoiceConfig: {
-                            voiceName: voice
-                        }
+                        prebuiltVoiceConfig: { voiceName: voice }
                     }
                 }
             }
         };
 
+        // Use the streaming endpoint so audio starts arriving immediately
         const response = await fetchWithTimeout(
-            `${API_BASE}/${model}:generateContent?key=${apiKey}`,
+            `${API_BASE}/${model}:streamGenerateContent?alt=sse&key=${apiKey}`,
             {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -2297,53 +2681,30 @@
             throw await createApiError(response);
         }
 
-        const data = await response.json();
+        const pcmChunks = [];
+        let sampleRate = 24000;
+        let hasAudio = false;
+        const textParts = [];
 
-        // Parse response — can be a single object or array (streaming format)
-        const candidates = Array.isArray(data) ? data : [data];
-        let audioBase64 = '';
-        let mimeType = 'audio/L16;rate=24000';
-
-        for (const item of candidates) {
-            const candidateList = item.candidates || [];
-            for (const candidate of candidateList) {
-                if (candidate.content && candidate.content.parts) {
-                    for (const part of candidate.content.parts) {
-                        if (part.inlineData) {
-                            audioBase64 += part.inlineData.data;
-                            if (part.inlineData.mimeType) {
-                                mimeType = part.inlineData.mimeType;
-                            }
-                        }
-                    }
-                }
+        for await (const chunk of parseAudioSSE(response.body, signal)) {
+            if (chunk.pcm) {
+                sampleRate = chunk.sampleRate;
+                pcmChunks.push(chunk.pcm);
+                hasAudio = true;
+                if (onPcmChunk) onPcmChunk(chunk.pcm, chunk.sampleRate);
+            } else if (chunk.text) {
+                textParts.push(chunk.text);
             }
         }
 
-        if (!audioBase64) {
-            // Check if the model returned text instead of audio
-            const textResponse = extractTextFromResponse(data);
-            if (textResponse) {
+        if (!hasAudio) {
+            if (textParts.length > 0) {
                 throw new Error('Моделът върна текст вместо аудио. Проверете дали моделът поддържа TTS.');
             }
             throw new Error('Не е получено аудио от API. Проверете дали избраният модел поддържа TTS.');
         }
 
-        // Parse sample rate from mime type
-        let sampleRate = 24000;
-        const rateMatch = mimeType.match(/rate=(\d+)/);
-        if (rateMatch) {
-            sampleRate = parseInt(rateMatch[1]);
-        }
-
-        // Decode base64 to ArrayBuffer
-        const binaryString = atob(audioBase64);
-        const audioData = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-            audioData[i] = binaryString.charCodeAt(i);
-        }
-
-        return { audioData: audioData.buffer, sampleRate };
+        return { audioData: combineArrayBuffers(pcmChunks), sampleRate };
     }
 
     // ==================== Audio Processing ====================

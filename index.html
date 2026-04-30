@@ -127,12 +127,14 @@
                 <label for="chunkSize">📏 Макс. блок текст</label>
                 <select id="chunkSize">
                     <option value="300">300 символа (кратко)</option>
-                    <option value="500" selected>500 символа (препоръчан)</option>
+                    <option value="500">500 символа</option>
                     <option value="1000">1000 символа</option>
                     <option value="2000">2000 символа</option>
+                    <option value="3000" selected>3000 символа (препоръчан)</option>
                     <option value="5000">5000 символа</option>
+                    <option value="8000">8000 символа (дълго)</option>
                 </select>
-                <small class="hint">Размер на частите при разделяне на дълги текстове. Първата е винаги кратка за по-бърз старт.</small>
+                <small class="hint">По-голям блок = по-малко API заявки и по-плавно четене. Стрийминг стартира звука веднага, без да чака целия блок.</small>
             </div>
 
             <!-- Voice Prompt -->
