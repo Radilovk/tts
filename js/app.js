@@ -36,26 +36,46 @@
     const MAX_BUFFER_AHEAD = 2; // Buffer at most 2 chunks ahead of playback
     const SPEED_OPTIONS = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
     const CHUNK_WAIT_INTERVAL_MS = 200;
-    const FAST_START_CHARS = 150; // First chunk max size for faster playback start (reduced from 300)
-    const MIN_CHUNK_LENGTH = 50;  // Minimum sensible chunk length for sentence-break detection
     const MAX_RETRIES = 3;        // Retries for failed TTS API requests
 
+    // Instruction prefix appended to continuation chunks (2nd chunk onwards) so the
+    // model maintains the same voice character, pace and intonation across API calls.
+    const CONTINUATION_PREFIXES = {
+        bg: 'Продължи четенето точно в същия стил, темп и тоналност на гласа — не променяй начина на четене.\n\n',
+        en: 'Continue reading in exactly the same style, pace and vocal tone — do not change the way you read.\n\n',
+        de: 'Lies weiter in genau demselben Stil, Tempo und Tonfall — ändere die Leseart nicht.\n\n',
+        fr: 'Continuez la lecture dans exactement le même style, rythme et ton vocal — ne changez pas la façon de lire.\n\n',
+        es: 'Continúa leyendo en exactamente el mismo estilo, ritmo y tono vocal — no cambies la manera de leer.\n\n',
+        it: 'Continua a leggere esattamente nello stesso stile, ritmo e tono vocale — non cambiare il modo di leggere.\n\n',
+        ru: 'Продолжай читать в точно таком же стиле, темпе и тональности голоса — не меняй манеру чтения.\n\n',
+        pl: 'Kontynuuj czytanie w dokładnie tym samym stylu, tempie i tonie głosu — nie zmieniaj sposobu czytania.\n\n',
+        nl: 'Ga verder met lezen in exact dezelfde stijl, tempo en vocale toon — verander de manier van lezen niet.\n\n',
+        pt: 'Continue lendo exatamente no mesmo estilo, ritmo e tom vocal — não mude a forma de ler.\n\n',
+        zh: '继续以完全相同的风格、节奏和语调朗读——不要改变朗读方式。\n\n',
+        ja: '全く同じスタイル、ペース、声のトーンで読み続けてください——読み方を変えないでください。\n\n',
+        ar: 'استمر في القراءة بنفس الأسلوب والإيقاع ونبرة الصوت تمامًا — لا تغيّر طريقة القراءة.\n\n',
+        tr: 'Okumaya tam olarak aynı tarz, tempo ve ses tonuyla devam et — okuma biçimini değiştirme.\n\n',
+        auto: 'Continue reading in exactly the same style, pace and vocal tone — do not change the way you read.\n\n',
+    };
+
     // Language instructions for TTS
+    // Each instruction emphasises a steady, consistent reading style so that when
+    // a long text is split across multiple API calls the voice sounds uniform.
     const LANGUAGE_INSTRUCTIONS = {
-        bg: 'Прочети следния текст на български език с ясна дикция: ',
-        en: 'Read the following text in English with clear pronunciation: ',
-        de: 'Lies den folgenden Text auf Deutsch mit klarer Aussprache vor: ',
-        fr: 'Lisez le texte suivant en français avec une prononciation claire : ',
-        es: 'Lee el siguiente texto en español con pronunciación clara: ',
-        it: 'Leggi il seguente testo in italiano con pronuncia chiara: ',
-        ru: 'Прочитай следующий текст на русском языке с чёткой дикцией: ',
-        pl: 'Przeczytaj poniższy tekst po polsku wyraźną dykcją: ',
-        nl: 'Lees de volgende tekst in het Nederlands voor met duidelijke uitspraak: ',
-        pt: 'Leia o seguinte texto em português com pronúncia clara: ',
-        zh: '请用普通话清晰地朗读以下文本：',
-        ja: '以下のテキストを日本語で明確に読み上げてください：',
-        ar: 'اقرأ النص التالي باللغة العربية بنطق واضح: ',
-        tr: 'Aşağıdaki metni Türkçe olarak açık bir telaffuzla oku: ',
+        bg: 'Прочети следния текст на български с ясна и постоянна дикция, равномерен темп и естествена интонация: ',
+        en: 'Read the following text in English with clear, consistent pronunciation, steady pace and natural intonation: ',
+        de: 'Lies den folgenden Text auf Deutsch mit klarer, gleichmäßiger Aussprache und natürlicher Intonation vor: ',
+        fr: 'Lisez le texte suivant en français avec une prononciation claire, un rythme régulier et une intonation naturelle : ',
+        es: 'Lee el siguiente texto en español con pronunciación clara, ritmo constante y entonación natural: ',
+        it: 'Leggi il seguente testo in italiano con pronuncia chiara, ritmo costante e intonazione naturale: ',
+        ru: 'Прочитай следующий текст на русском языке с чёткой, равномерной дикцией и естественной интонацией: ',
+        pl: 'Przeczytaj poniższy tekst po polsku wyraźną, równomierną dykcją i naturalną intonacją: ',
+        nl: 'Lees de volgende tekst in het Nederlands voor met duidelijke, consistente uitspraak en een natuurlijke intonatie: ',
+        pt: 'Leia o seguinte texto em português com pronúncia clara, ritmo constante e entonação natural: ',
+        zh: '请用普通话以清晰、平稳的语气和自然的语调朗读以下文本：',
+        ja: '以下のテキストを日本語で、明確で一定のペース、自然なイントネーションで読み上げてください：',
+        ar: 'اقرأ النص التالي باللغة العربية بنطق واضح ووتيرة ثابتة ونبرة طبيعية: ',
+        tr: 'Aşağıdaki metni Türkçe olarak açık, tutarlı bir telaffuz ve doğal bir tonlamayla oku: ',
         auto: '', // No instruction, let the model auto-detect
     };
 
@@ -247,6 +267,272 @@
         _stopRAF() {
             if (this._rafId) { cancelAnimationFrame(this._rafId); this._rafId = null; }
         }
+    }
+
+    // ==================== Gemini Live Session (WebSocket) ====================
+    // Manages a persistent WebSocket to the Gemini Multimodal Live API.
+    // Reusing one connection across TTS requests gives ~150–300 ms first-audio
+    // latency instead of ~500 ms per new HTTPS request.
+    // Used automatically when a model whose name contains "live" is selected.
+    class GeminiLiveSession {
+        constructor() {
+            this._ws          = null;
+            this._state       = 'closed'; // 'closed'|'connecting'|'ready'|'generating'
+            this._apiKey      = null;
+            this._model       = null;
+            this._voice       = null;
+            this._setupAge    = 0;        // Date.now() when setup last completed
+            this._setupResolve = null;
+            this._setupReject  = null;
+            this._chunkResolve = null;
+            this._chunkReject  = null;
+            this._onPcmChunk   = null;
+            this._pcmAccum     = [];
+            this._sampleRate   = 24000;
+        }
+
+        // Ensure the session is open and configured for the given api-key/model/voice.
+        // Silently reconnects when the config changes or the session is approaching
+        // the 12-minute mark (Google enforces a 15-minute hard limit per session).
+        async ensureReady(apiKey, model, voice) {
+            const age        = Date.now() - this._setupAge;
+            const configSame = apiKey === this._apiKey &&
+                               model  === this._model  &&
+                               voice  === this._voice;
+            const wsOpen     = this._ws && this._ws.readyState === WebSocket.OPEN;
+
+            if (this._state === 'ready' && wsOpen && configSame && age < 12 * 60 * 1000) {
+                return; // Healthy session — reuse
+            }
+
+            this.close();
+            await this._openSocket(apiKey, model, voice);
+        }
+
+        _openSocket(apiKey, model, voice) {
+            return new Promise((resolve, reject) => {
+                const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+                let ws;
+                try {
+                    ws = new WebSocket(wsUrl);
+                } catch (e) {
+                    reject(new Error(`Live API: не може да се отвори WebSocket: ${e.message}`));
+                    return;
+                }
+
+                this._ws          = ws;
+                this._state       = 'connecting';
+                this._apiKey      = apiKey;
+                this._model       = model;
+                this._voice       = voice;
+                this._setupResolve = resolve;
+                this._setupReject  = reject;
+
+                const timeout = setTimeout(() => {
+                    if (this._state === 'connecting') {
+                        this.close();
+                        reject(new Error('Live API: времето за свързване изтече'));
+                    }
+                }, 15000);
+
+                ws.onopen = () => {
+                    clearTimeout(timeout);
+                    const setupMsg = {
+                        setup: {
+                            model: `models/${model}`,
+                            generationConfig: {
+                                responseModalities: ['AUDIO'],
+                                speechConfig: {
+                                    voiceConfig: {
+                                        prebuiltVoiceConfig: { voiceName: voice }
+                                    }
+                                }
+                            }
+                        }
+                    };
+                    try {
+                        ws.send(JSON.stringify(setupMsg));
+                    } catch (e) {
+                        this.close();
+                        reject(new Error(`Live API setup грешка: ${e.message}`));
+                    }
+                };
+
+                ws.onmessage = (event) => this._handleMessage(event);
+
+                ws.onerror = () => {
+                    clearTimeout(timeout);
+                    const err = new Error('Live API: WebSocket грешка');
+                    if (this._state === 'connecting') {
+                        this.close();
+                        reject(err);
+                    } else {
+                        this._failChunk(err);
+                    }
+                };
+
+                ws.onclose = () => {
+                    clearTimeout(timeout);
+                    const wasConnecting = this._state === 'connecting';
+                    this._state = 'closed';
+                    if (wasConnecting && this._setupReject) {
+                        const r       = this._setupReject;
+                        this._setupResolve = null;
+                        this._setupReject  = null;
+                        r(new Error('Live API: връзката е затворена преди готовност'));
+                    }
+                    this._failChunk(new Error('Live API: връзката е затворена неочаквано'));
+                };
+            });
+        }
+
+        _handleMessage(event) {
+            let msg;
+            try { msg = JSON.parse(event.data); } catch { return; }
+
+            // Session ready
+            if (msg.setupComplete !== undefined) {
+                this._state    = 'ready';
+                this._setupAge = Date.now();
+                if (this._setupResolve) {
+                    const r           = this._setupResolve;
+                    this._setupResolve = null;
+                    this._setupReject  = null;
+                    r();
+                }
+                return;
+            }
+
+            // Audio content streaming back
+            if (msg.serverContent) {
+                const sc = msg.serverContent;
+                if (sc.modelTurn && sc.modelTurn.parts) {
+                    for (const part of sc.modelTurn.parts) {
+                        if (part.inlineData && part.inlineData.data) {
+                            const m = part.inlineData.mimeType &&
+                                      part.inlineData.mimeType.match(/rate=(\d+)/);
+                            if (m) this._sampleRate = parseInt(m[1]);
+                            const pcm = base64ToPcmBuffer(part.inlineData.data);
+                            if (pcm) {
+                                this._pcmAccum.push(pcm);
+                                if (this._onPcmChunk) this._onPcmChunk(pcm, this._sampleRate);
+                            }
+                        }
+                    }
+                }
+                // Model finished its turn
+                if (sc.turnComplete) {
+                    this._state = 'ready';
+                    if (this._chunkResolve) {
+                        const allPcm       = combineArrayBuffers(this._pcmAccum);
+                        const r            = this._chunkResolve;
+                        this._pcmAccum     = [];
+                        this._chunkResolve = null;
+                        this._chunkReject  = null;
+                        this._onPcmChunk   = null;
+                        r({ audioData: allPcm, sampleRate: this._sampleRate });
+                    }
+                }
+            }
+
+            // API-level error
+            if (msg.error) {
+                this._state = 'ready';
+                this._failChunk(new Error(msg.error.message || 'Live API грешка'));
+            }
+        }
+
+        _failChunk(err) {
+            if (!this._chunkReject) return;
+            const r           = this._chunkReject;
+            this._chunkResolve = null;
+            this._chunkReject  = null;
+            this._onPcmChunk   = null;
+            this._pcmAccum     = [];
+            r(err);
+        }
+
+        // Send a text turn and stream PCM back via onPcmChunk until turnComplete.
+        // Returns { audioData: ArrayBuffer, sampleRate: number } when done.
+        generateChunk(text, onPcmChunk, signal) {
+            if (this._state !== 'ready') {
+                return Promise.reject(new Error('Live сесията не е готова'));
+            }
+
+            return new Promise((resolve, reject) => {
+                if (signal && signal.aborted) {
+                    return reject(new DOMException('Cancelled', 'AbortError'));
+                }
+
+                this._state        = 'generating';
+                this._chunkResolve = resolve;
+                this._chunkReject  = reject;
+                this._onPcmChunk   = onPcmChunk;
+                this._pcmAccum     = [];
+
+                const onAbort = () => {
+                    if (!this._chunkReject) return;
+                    const r           = this._chunkReject;
+                    this._chunkResolve = null;
+                    this._chunkReject  = null;
+                    this._onPcmChunk   = null;
+                    this._pcmAccum     = [];
+                    this._state        = 'ready';
+                    // Ask the model to stop mid-stream
+                    if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+                        try {
+                            this._ws.send(JSON.stringify({ clientContent: { turnComplete: true } }));
+                        } catch {}
+                    }
+                    r(new DOMException('Cancelled', 'AbortError'));
+                };
+                if (signal) signal.addEventListener('abort', onAbort, { once: true });
+
+                try {
+                    this._ws.send(JSON.stringify({
+                        clientContent: {
+                            turns: [{ role: 'user', parts: [{ text }] }],
+                            turnComplete: true
+                        }
+                    }));
+                } catch (e) {
+                    this._state        = 'ready';
+                    this._chunkResolve = null;
+                    this._chunkReject  = null;
+                    this._onPcmChunk   = null;
+                    reject(new Error(`Live send грешка: ${e.message}`));
+                }
+            });
+        }
+
+        close() {
+            if (this._ws) {
+                this._ws.onmessage = null;
+                this._ws.onerror   = null;
+                this._ws.onclose   = null;
+                try { this._ws.close(); } catch {}
+                this._ws = null;
+            }
+            this._state        = 'closed';
+            this._setupResolve = null;
+            this._setupReject  = null;
+            this._failChunk(new DOMException('Cancelled', 'AbortError'));
+            // Reset chunk callbacks (failChunk already cleared them)
+        }
+
+        get isReady() {
+            return this._state === 'ready' &&
+                   this._ws !== null &&
+                   this._ws.readyState === WebSocket.OPEN;
+        }
+    }
+
+    // Singleton — kept alive across TTS requests for low latency.
+    const geminiLiveSession = new GeminiLiveSession();
+
+    // Returns true when model name indicates a Live (WebSocket) model.
+    function isLiveModel(model) {
+        return typeof model === 'string' && model.includes('live');
     }
 
     // ==================== DOM Elements ====================
@@ -465,20 +751,6 @@
     }
 
     // ==================== Text Chunking Helpers ====================
-    // Find a good sentence break at or before maxChars for fast-start first chunk.
-    function findSentenceBreak(text, maxChars) {
-        if (text.length <= maxChars) return text.length;
-        const snippet = text.substring(0, maxChars);
-        // Find the last sentence-ending punctuation
-        const match = snippet.match(/^([\s\S]*[.!?।\n])/);
-        if (match && match[0].trim().length >= MIN_CHUNK_LENGTH) {
-            return match[0].length;
-        }
-        // Fall back to last whitespace
-        const wsIdx = snippet.lastIndexOf(' ');
-        return wsIdx > MIN_CHUNK_LENGTH ? wsIdx + 1 : maxChars;
-    }
-
     // Compute character offsets of each chunk in the original text.
     // Used by the reader view to highlight the currently playing chunk.
     function computeChunkOffsets(originalText, chunks) {
@@ -714,6 +986,8 @@
         setupPwaInstall();
         setupPositionAutoSave();
         restoreLastBook();
+        // Pre-warm Live WebSocket if a live model is already selected
+        prewarmLiveSession();
         // Initialize waveform canvas with idle state
         if (els.waveformCanvas) {
             setTimeout(() => drawWaveformIdle(els.waveformCanvas), 100);
@@ -851,6 +1125,7 @@
     function setupPositionAutoSave() {
         window.addEventListener('beforeunload', () => {
             savePlaybackPosition();
+            geminiLiveSession.close();
         });
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'hidden') {
@@ -1019,6 +1294,14 @@
                 }
                 if (el === els.ttsLanguage && els.quickLang) {
                     els.quickLang.value = els.ttsLanguage.value;
+                }
+                // Pre-warm Live session on model/voice change; clean up if switching away
+                if (el === els.modelSelect || el === els.voiceSelect) {
+                    if (isLiveModel(els.modelSelect.value)) {
+                        prewarmLiveSession();
+                    } else {
+                        geminiLiveSession.close();
+                    }
                 }
             });
             if (el.type === 'text' || el.type === 'password' || el.tagName === 'TEXTAREA') {
@@ -2056,21 +2339,11 @@
 
         try {
             const chunkSize = parseInt(els.chunkSize.value);
-            // Fast-start: for texts longer than FAST_START_CHARS, extract a small first
-            // chunk so audio starts playing much sooner (within the first 300 chars).
-            let chunks;
-            if (text.length > FAST_START_CHARS && text.length > chunkSize) {
-                const breakAt = findSentenceBreak(text, FAST_START_CHARS);
-                const firstChunk = text.substring(0, breakAt).trim();
-                const restText = text.substring(breakAt).trim();
-                if (firstChunk && restText) {
-                    chunks = [firstChunk, ...splitTextIntoChunks(restText, chunkSize)];
-                } else {
-                    chunks = splitTextIntoChunks(text, chunkSize);
-                }
-            } else {
-                chunks = splitTextIntoChunks(text, chunkSize);
-            }
+            // Split text into full-size chunks.  The SSE streaming endpoint delivers
+            // the first PCM data almost immediately regardless of chunk length, so
+            // there is no benefit in creating a tiny "fast-start" first chunk – it
+            // only caused gaps and intonation breaks between chunks.
+            const chunks = splitTextIntoChunks(text, chunkSize);
 
             // Capture voice/model/lang at generation start for consistent timbre
             const model = els.modelSelect.value;
@@ -2321,7 +2594,8 @@
             );
 
             const result = await generateAudioChunkWithRetry(
-                ttsText, apiKey, model, voice, lang, controller.signal, chunkCallback
+                ttsText, apiKey, model, voice, lang, controller.signal, chunkCallback,
+                /* isContinuation */ i > startIndex
             );
 
             if (result.sampleRate) {
@@ -2979,12 +3253,19 @@
     // Generate audio for a single text chunk using the streaming SSE endpoint.
     // onPcmChunk(pcm, sampleRate) is called for each PCM piece as it arrives,
     // enabling GaplessPlayer to start before the full response is received.
-    async function generateAudioChunk(text, apiKey, model, voice, lang, signal, onPcmChunk) {
+    // isContinuation=true signals that this is not the first chunk; a prefix
+    // is prepended to encourage the model to maintain the same voice character.
+    async function generateAudioChunk(text, apiKey, model, voice, lang, signal, onPcmChunk, isContinuation) {
         const langInstruction = LANGUAGE_INSTRUCTIONS[lang] || '';
         const voicePromptText = els.voicePrompt.value.trim();
         let promptText = '';
         if (voicePromptText) {
             promptText += voicePromptText + '\n\n';
+        }
+        // For subsequent chunks, tell the model to continue in the same style so
+        // intonation, pace and timbre remain consistent across API call boundaries.
+        if (isContinuation) {
+            promptText += CONTINUATION_PREFIXES[lang] || CONTINUATION_PREFIXES.en;
         }
         if (langInstruction) {
             promptText += langInstruction;
@@ -3047,9 +3328,56 @@
         return { audioData: combineArrayBuffers(pcmChunks), sampleRate };
     }
 
+    // Generate audio for a text chunk using the Gemini Live WebSocket API.
+    // Mirrors generateAudioChunk but routes through geminiLiveSession instead
+    // of a fresh HTTPS request, delivering audio with ~150–300 ms first-packet
+    // latency instead of ~500 ms.
+    async function generateAudioChunkLive(text, apiKey, model, voice, lang, signal, onPcmChunk, isContinuation) {
+        const langInstruction = LANGUAGE_INSTRUCTIONS[lang] || '';
+        const voicePromptText = els.voicePrompt.value.trim();
+        let promptText = '';
+        if (voicePromptText) promptText += voicePromptText + '\n\n';
+        if (isContinuation) promptText += CONTINUATION_PREFIXES[lang] || CONTINUATION_PREFIXES.en;
+        if (langInstruction) promptText += langInstruction;
+        promptText += text;
+
+        await geminiLiveSession.ensureReady(apiKey, model, voice);
+        const result = await geminiLiveSession.generateChunk(promptText, onPcmChunk, signal);
+
+        if (!result || !result.audioData || result.audioData.byteLength === 0) {
+            throw new Error('Live API: не е получено аудио. Проверете дали моделът поддържа TTS.');
+        }
+        return result;
+    }
+
+    // Pre-warm the Live WebSocket so the first request has zero connection overhead.
+    function prewarmLiveSession() {
+        const model  = els.modelSelect.value;
+        if (!isLiveModel(model)) return;
+        const apiKey = getEffectiveApiKey();
+        if (!apiKey) return;
+        const voice  = els.voiceSelect.value;
+        geminiLiveSession.ensureReady(apiKey, model, voice).catch(() => {
+            // Pre-warm failure is not critical — session will connect on first use
+        });
+    }
+
     // Wrapper around generateAudioChunk that retries up to MAX_RETRIES times
     // with exponential backoff for transient network / server errors.
-    async function generateAudioChunkWithRetry(text, apiKey, model, voice, lang, signal, onPcmChunk) {
+    // For Live models it routes to generateAudioChunkLive and retries once with
+    // a fresh connection.
+    async function generateAudioChunkWithRetry(text, apiKey, model, voice, lang, signal, onPcmChunk, isContinuation) {
+        if (isLiveModel(model)) {
+            try {
+                return await generateAudioChunkLive(text, apiKey, model, voice, lang, signal, onPcmChunk, isContinuation);
+            } catch (err) {
+                if (err.name === 'AbortError') throw err;
+                // Retry once with a fresh WebSocket connection
+                geminiLiveSession.close();
+                return await generateAudioChunkLive(text, apiKey, model, voice, lang, signal, onPcmChunk, isContinuation);
+            }
+        }
+
         let lastError;
         for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
             if (signal && signal.aborted) throw new DOMException('Cancelled', 'AbortError');
@@ -3059,7 +3387,7 @@
                 // or never fed to GaplessPlayer (cb=null below), so we collect the full
                 // result and return it; generateChunksWithBuffering will re-feed it.
                 const cb = attempt === 0 ? onPcmChunk : null;
-                return await generateAudioChunk(text, apiKey, model, voice, lang, signal, cb);
+                return await generateAudioChunk(text, apiKey, model, voice, lang, signal, cb, isContinuation);
             } catch (err) {
                 if (err.name === 'AbortError') throw err;
                 lastError = err;
