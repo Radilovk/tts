@@ -269,6 +269,272 @@
         }
     }
 
+    // ==================== Gemini Live Session (WebSocket) ====================
+    // Manages a persistent WebSocket to the Gemini Multimodal Live API.
+    // Reusing one connection across TTS requests gives ~150–300 ms first-audio
+    // latency instead of ~500 ms per new HTTPS request.
+    // Used automatically when a model whose name contains "live" is selected.
+    class GeminiLiveSession {
+        constructor() {
+            this._ws          = null;
+            this._state       = 'closed'; // 'closed'|'connecting'|'ready'|'generating'
+            this._apiKey      = null;
+            this._model       = null;
+            this._voice       = null;
+            this._setupAge    = 0;        // Date.now() when setup last completed
+            this._setupResolve = null;
+            this._setupReject  = null;
+            this._chunkResolve = null;
+            this._chunkReject  = null;
+            this._onPcmChunk   = null;
+            this._pcmAccum     = [];
+            this._sampleRate   = 24000;
+        }
+
+        // Ensure the session is open and configured for the given api-key/model/voice.
+        // Silently reconnects when the config changes or the session is ≥ 12 minutes old
+        // (Google enforces a 15-minute hard limit per session).
+        async ensureReady(apiKey, model, voice) {
+            const age        = Date.now() - this._setupAge;
+            const configSame = apiKey === this._apiKey &&
+                               model  === this._model  &&
+                               voice  === this._voice;
+            const wsOpen     = this._ws && this._ws.readyState === WebSocket.OPEN;
+
+            if (this._state === 'ready' && wsOpen && configSame && age < 12 * 60 * 1000) {
+                return; // Healthy session — reuse
+            }
+
+            this.close();
+            await this._openSocket(apiKey, model, voice);
+        }
+
+        _openSocket(apiKey, model, voice) {
+            return new Promise((resolve, reject) => {
+                const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+                let ws;
+                try {
+                    ws = new WebSocket(wsUrl);
+                } catch (e) {
+                    reject(new Error(`Live API: не може да се отвори WebSocket: ${e.message}`));
+                    return;
+                }
+
+                this._ws          = ws;
+                this._state       = 'connecting';
+                this._apiKey      = apiKey;
+                this._model       = model;
+                this._voice       = voice;
+                this._setupResolve = resolve;
+                this._setupReject  = reject;
+
+                const timeout = setTimeout(() => {
+                    if (this._state === 'connecting') {
+                        this.close();
+                        reject(new Error('Live API: времето за свързване изтече'));
+                    }
+                }, 15000);
+
+                ws.onopen = () => {
+                    clearTimeout(timeout);
+                    const setupMsg = {
+                        setup: {
+                            model: `models/${model}`,
+                            generationConfig: {
+                                responseModalities: ['AUDIO'],
+                                speechConfig: {
+                                    voiceConfig: {
+                                        prebuiltVoiceConfig: { voiceName: voice }
+                                    }
+                                }
+                            }
+                        }
+                    };
+                    try {
+                        ws.send(JSON.stringify(setupMsg));
+                    } catch (e) {
+                        this.close();
+                        reject(new Error(`Live API setup грешка: ${e.message}`));
+                    }
+                };
+
+                ws.onmessage = (event) => this._handleMessage(event);
+
+                ws.onerror = () => {
+                    clearTimeout(timeout);
+                    const err = new Error('Live API: WebSocket грешка');
+                    if (this._state === 'connecting') {
+                        this.close();
+                        reject(err);
+                    } else {
+                        this._failChunk(err);
+                    }
+                };
+
+                ws.onclose = () => {
+                    clearTimeout(timeout);
+                    const wasConnecting = this._state === 'connecting';
+                    this._state = 'closed';
+                    if (wasConnecting && this._setupReject) {
+                        const r       = this._setupReject;
+                        this._setupResolve = null;
+                        this._setupReject  = null;
+                        r(new Error('Live API: връзката е затворена преди готовност'));
+                    }
+                    this._failChunk(new Error('Live API: връзката е затворена неочаквано'));
+                };
+            });
+        }
+
+        _handleMessage(event) {
+            let msg;
+            try { msg = JSON.parse(event.data); } catch { return; }
+
+            // Session ready
+            if (msg.setupComplete !== undefined) {
+                this._state    = 'ready';
+                this._setupAge = Date.now();
+                if (this._setupResolve) {
+                    const r           = this._setupResolve;
+                    this._setupResolve = null;
+                    this._setupReject  = null;
+                    r();
+                }
+                return;
+            }
+
+            // Audio content streaming back
+            if (msg.serverContent) {
+                const sc = msg.serverContent;
+                if (sc.modelTurn && sc.modelTurn.parts) {
+                    for (const part of sc.modelTurn.parts) {
+                        if (part.inlineData && part.inlineData.data) {
+                            const m = part.inlineData.mimeType &&
+                                      part.inlineData.mimeType.match(/rate=(\d+)/);
+                            if (m) this._sampleRate = parseInt(m[1]);
+                            const pcm = base64ToPcmBuffer(part.inlineData.data);
+                            if (pcm) {
+                                this._pcmAccum.push(pcm);
+                                if (this._onPcmChunk) this._onPcmChunk(pcm, this._sampleRate);
+                            }
+                        }
+                    }
+                }
+                // Model finished its turn
+                if (sc.turnComplete) {
+                    this._state = 'ready';
+                    if (this._chunkResolve) {
+                        const allPcm       = combineArrayBuffers(this._pcmAccum);
+                        const r            = this._chunkResolve;
+                        this._pcmAccum     = [];
+                        this._chunkResolve = null;
+                        this._chunkReject  = null;
+                        this._onPcmChunk   = null;
+                        r({ audioData: allPcm, sampleRate: this._sampleRate });
+                    }
+                }
+            }
+
+            // API-level error
+            if (msg.error) {
+                this._state = 'ready';
+                this._failChunk(new Error(msg.error.message || 'Live API грешка'));
+            }
+        }
+
+        _failChunk(err) {
+            if (!this._chunkReject) return;
+            const r           = this._chunkReject;
+            this._chunkResolve = null;
+            this._chunkReject  = null;
+            this._onPcmChunk   = null;
+            this._pcmAccum     = [];
+            r(err);
+        }
+
+        // Send a text turn and stream PCM back via onPcmChunk until turnComplete.
+        // Returns { audioData: ArrayBuffer, sampleRate: number } when done.
+        generateChunk(text, onPcmChunk, signal) {
+            if (this._state !== 'ready') {
+                return Promise.reject(new Error('Live сесията не е готова'));
+            }
+
+            return new Promise((resolve, reject) => {
+                if (signal && signal.aborted) {
+                    return reject(new DOMException('Cancelled', 'AbortError'));
+                }
+
+                this._state        = 'generating';
+                this._chunkResolve = resolve;
+                this._chunkReject  = reject;
+                this._onPcmChunk   = onPcmChunk;
+                this._pcmAccum     = [];
+
+                const onAbort = () => {
+                    if (!this._chunkReject) return;
+                    const r           = this._chunkReject;
+                    this._chunkResolve = null;
+                    this._chunkReject  = null;
+                    this._onPcmChunk   = null;
+                    this._pcmAccum     = [];
+                    this._state        = 'ready';
+                    // Ask the model to stop mid-stream
+                    if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+                        try {
+                            this._ws.send(JSON.stringify({ clientContent: { turnComplete: true } }));
+                        } catch {}
+                    }
+                    r(new DOMException('Cancelled', 'AbortError'));
+                };
+                if (signal) signal.addEventListener('abort', onAbort, { once: true });
+
+                try {
+                    this._ws.send(JSON.stringify({
+                        clientContent: {
+                            turns: [{ role: 'user', parts: [{ text }] }],
+                            turnComplete: true
+                        }
+                    }));
+                } catch (e) {
+                    this._state        = 'ready';
+                    this._chunkResolve = null;
+                    this._chunkReject  = null;
+                    this._onPcmChunk   = null;
+                    reject(new Error(`Live send грешка: ${e.message}`));
+                }
+            });
+        }
+
+        close() {
+            if (this._ws) {
+                this._ws.onmessage = null;
+                this._ws.onerror   = null;
+                this._ws.onclose   = null;
+                try { this._ws.close(); } catch {}
+                this._ws = null;
+            }
+            this._state        = 'closed';
+            this._setupResolve = null;
+            this._setupReject  = null;
+            this._failChunk(new DOMException('Cancelled', 'AbortError'));
+            // Reset chunk callbacks (failChunk already cleared them)
+        }
+
+        get isReady() {
+            return this._state === 'ready' &&
+                   this._ws !== null &&
+                   this._ws.readyState === WebSocket.OPEN;
+        }
+    }
+
+    // Singleton — kept alive across TTS requests for low latency.
+    const geminiLiveSession = new GeminiLiveSession();
+
+    // Returns true when model name indicates a Live (WebSocket) model.
+    function isLiveModel(model) {
+        return typeof model === 'string' && model.includes('live');
+    }
+
     // ==================== DOM Elements ====================
     const $ = (sel) => document.querySelector(sel);
 
@@ -720,6 +986,8 @@
         setupPwaInstall();
         setupPositionAutoSave();
         restoreLastBook();
+        // Pre-warm Live WebSocket if a live model is already selected
+        prewarmLiveSession();
         // Initialize waveform canvas with idle state
         if (els.waveformCanvas) {
             setTimeout(() => drawWaveformIdle(els.waveformCanvas), 100);
@@ -857,6 +1125,7 @@
     function setupPositionAutoSave() {
         window.addEventListener('beforeunload', () => {
             savePlaybackPosition();
+            geminiLiveSession.close();
         });
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'hidden') {
@@ -1025,6 +1294,14 @@
                 }
                 if (el === els.ttsLanguage && els.quickLang) {
                     els.quickLang.value = els.ttsLanguage.value;
+                }
+                // Pre-warm Live session on model/voice change; clean up if switching away
+                if (el === els.modelSelect || el === els.voiceSelect) {
+                    if (isLiveModel(els.modelSelect.value)) {
+                        prewarmLiveSession();
+                    } else {
+                        geminiLiveSession.close();
+                    }
                 }
             });
             if (el.type === 'text' || el.type === 'password' || el.tagName === 'TEXTAREA') {
@@ -3051,9 +3328,56 @@
         return { audioData: combineArrayBuffers(pcmChunks), sampleRate };
     }
 
+    // Generate audio for a text chunk using the Gemini Live WebSocket API.
+    // Mirrors generateAudioChunk but routes through geminiLiveSession instead
+    // of a fresh HTTPS request, delivering audio with ~150–300 ms first-packet
+    // latency instead of ~500 ms.
+    async function generateAudioChunkLive(text, apiKey, model, voice, lang, signal, onPcmChunk, isContinuation) {
+        const langInstruction = LANGUAGE_INSTRUCTIONS[lang] || '';
+        const voicePromptText = els.voicePrompt.value.trim();
+        let promptText = '';
+        if (voicePromptText) promptText += voicePromptText + '\n\n';
+        if (isContinuation) promptText += CONTINUATION_PREFIXES[lang] || CONTINUATION_PREFIXES.en;
+        if (langInstruction) promptText += langInstruction;
+        promptText += text;
+
+        await geminiLiveSession.ensureReady(apiKey, model, voice);
+        const result = await geminiLiveSession.generateChunk(promptText, onPcmChunk, signal);
+
+        if (!result || !result.audioData || result.audioData.byteLength === 0) {
+            throw new Error('Live API: не е получено аудио. Проверете дали моделът поддържа TTS.');
+        }
+        return result;
+    }
+
+    // Pre-warm the Live WebSocket so the first request has zero connection overhead.
+    function prewarmLiveSession() {
+        const model  = els.modelSelect.value;
+        if (!isLiveModel(model)) return;
+        const apiKey = getEffectiveApiKey();
+        if (!apiKey) return;
+        const voice  = els.voiceSelect.value;
+        geminiLiveSession.ensureReady(apiKey, model, voice).catch(() => {
+            // Pre-warm failure is not critical — session will connect on first use
+        });
+    }
+
     // Wrapper around generateAudioChunk that retries up to MAX_RETRIES times
     // with exponential backoff for transient network / server errors.
+    // For Live models it routes to generateAudioChunkLive and retries once with
+    // a fresh connection.
     async function generateAudioChunkWithRetry(text, apiKey, model, voice, lang, signal, onPcmChunk, isContinuation) {
+        if (isLiveModel(model)) {
+            try {
+                return await generateAudioChunkLive(text, apiKey, model, voice, lang, signal, onPcmChunk, isContinuation);
+            } catch (err) {
+                if (err.name === 'AbortError') throw err;
+                // Retry once with a fresh WebSocket connection
+                geminiLiveSession.close();
+                return await generateAudioChunkLive(text, apiKey, model, voice, lang, signal, onPcmChunk, isContinuation);
+            }
+        }
+
         let lastError;
         for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
             if (signal && signal.aborted) throw new DOMException('Cancelled', 'AbortError');
