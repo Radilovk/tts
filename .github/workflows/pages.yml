@@ -30,15 +30,15 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           if [ -n "$GEMINI_API_KEY" ]; then
-            python3 -c "
-import os
-key = os.environ['GEMINI_API_KEY']
-with open('js/config.js', 'r') as f:
-    content = f.read()
-content = content.replace('__GEMINI_API_KEY__', key)
-with open('js/config.js', 'w') as f:
-    f.write(content)
-"
+            python3 - << 'PYEOF'
+          import os
+          key = os.environ['GEMINI_API_KEY']
+          with open('js/config.js', 'r') as f:
+              content = f.read()
+          content = content.replace('__GEMINI_API_KEY__', key)
+          with open('js/config.js', 'w') as f:
+              f.write(content)
+          PYEOF
           fi
 
       - name: Setup Pages
