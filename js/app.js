@@ -292,8 +292,8 @@
         }
 
         // Ensure the session is open and configured for the given api-key/model/voice.
-        // Silently reconnects when the config changes or the session is ≥ 12 minutes old
-        // (Google enforces a 15-minute hard limit per session).
+        // Silently reconnects when the config changes or the session is approaching
+        // the 12-minute mark (Google enforces a 15-minute hard limit per session).
         async ensureReady(apiKey, model, voice) {
             const age        = Date.now() - this._setupAge;
             const configSame = apiKey === this._apiKey &&
