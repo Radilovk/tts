@@ -85,18 +85,47 @@
             <div class="setting-group">
                 <label for="voiceSelect">🎙️ Глас</label>
                 <select id="voiceSelect">
-                    <optgroup label="Женски гласове">
-                        <option value="Zephyr">Zephyr — Ярък, жизнерадостен</option>
-                        <option value="Kore" selected>Kore — Ясен, уверен</option>
-                        <option value="Aoede">Aoede — Мелодичен, топъл</option>
-                        <option value="Leda">Leda — Младежки, енергичен</option>
+                    <optgroup label="⭐ Популярни">
+                        <option value="Kore" selected>Kore — Уверен, ясен (Ж)</option>
+                        <option value="Puck">Puck — Весел, приятен (М)</option>
+                        <option value="Aoede">Aoede — Мелодичен, топъл (Ж)</option>
+                        <option value="Charon">Charon — Сериозен, информативен (М)</option>
+                        <option value="Fenrir">Fenrir — Дълбок, изразителен (М)</option>
+                        <option value="Zephyr">Zephyr — Ярък, жизнерадостен (Ж)</option>
                     </optgroup>
-                    <optgroup label="Мъжки гласове">
-                        <option value="Puck">Puck — Весел, приятен</option>
-                        <option value="Charon">Charon — Сериозен, информативен</option>
-                        <option value="Fenrir">Fenrir — Дълбок, изразителен</option>
-                        <option value="Orus">Orus — Стабилен, спокоен</option>
-                        <option value="Perseus">Perseus — Неутрален, балансиран</option>
+                    <optgroup label="♀ Женски гласове">
+                        <option value="Zephyr">Zephyr — Ярък</option>
+                        <option value="Kore">Kore — Уверен</option>
+                        <option value="Aoede">Aoede — Мелодичен</option>
+                        <option value="Leda">Leda — Младежки</option>
+                        <option value="Callirrhoe">Callirrhoe — Мек</option>
+                        <option value="Autonoe">Autonoe — Спокоен</option>
+                        <option value="Despina">Despina — Нежен</option>
+                        <option value="Erinome">Erinome — Топъл</option>
+                        <option value="Laomedeia">Laomedeia — Ясен</option>
+                        <option value="Achernar">Achernar — Звучен</option>
+                        <option value="Gacrux">Gacrux — Зрял</option>
+                        <option value="Pulcherrima">Pulcherrima — Красив</option>
+                        <option value="Vindemiatrix">Vindemiatrix — Характерен</option>
+                        <option value="Sadachbia">Sadachbia — Приятен</option>
+                    </optgroup>
+                    <optgroup label="♂ Мъжки гласове">
+                        <option value="Puck">Puck — Весел</option>
+                        <option value="Charon">Charon — Информативен</option>
+                        <option value="Fenrir">Fenrir — Изразителен</option>
+                        <option value="Orus">Orus — Стабилен</option>
+                        <option value="Iapetus">Iapetus — Уверен</option>
+                        <option value="Umbriel">Umbriel — Спокоен</option>
+                        <option value="Algieba">Algieba — Богат</option>
+                        <option value="Algenib">Algenib — Ясен</option>
+                        <option value="Rasalgethi">Rasalgethi — Топъл</option>
+                        <option value="Alnilam">Alnilam — Неутрален</option>
+                        <option value="Schedar">Schedar — Звучен</option>
+                        <option value="Achird">Achird — Приятен</option>
+                        <option value="Zubenelgenubi">Zubenelgenubi — Характерен</option>
+                        <option value="Sadaltager">Sadaltager — Дълбок</option>
+                        <option value="Sulafat">Sulafat — Мек</option>
+                        <option value="Enceladus">Enceladus — Силен</option>
                     </optgroup>
                 </select>
                 <button id="btnPreviewVoice" class="btn btn-outline btn-sm" type="button">🔊 Чуй примерен глас</button>
@@ -167,9 +196,21 @@
             <div class="setting-group">
                 <label for="ttsLanguage">🗣️ Език за четене</label>
                 <select id="ttsLanguage">
-                    <option value="bg" selected>Български</option>
-                    <option value="en">English</option>
-                    <option value="auto">Автоматично (според текста)</option>
+                    <option value="bg" selected>🇧🇬 Български</option>
+                    <option value="en">🇬🇧 English</option>
+                    <option value="de">🇩🇪 Deutsch</option>
+                    <option value="fr">🇫🇷 Français</option>
+                    <option value="es">🇪🇸 Español</option>
+                    <option value="it">🇮🇹 Italiano</option>
+                    <option value="ru">🇷🇺 Русский</option>
+                    <option value="pl">🇵🇱 Polski</option>
+                    <option value="nl">🇳🇱 Nederlands</option>
+                    <option value="pt">🇵🇹 Português</option>
+                    <option value="zh">🇨🇳 中文</option>
+                    <option value="ja">🇯🇵 日本語</option>
+                    <option value="ar">🇸🇦 العربية</option>
+                    <option value="tr">🇹🇷 Türkçe</option>
+                    <option value="auto">🌐 Автоматично (според текста)</option>
                 </select>
                 <small class="hint">Указва на модела на какъв език да произнесе текста</small>
             </div>
@@ -350,6 +391,9 @@
                     <span class="player-meta" id="playerMeta"></span>
                 </div>
 
+                <!-- Waveform visualization -->
+                <canvas id="waveformCanvas" class="waveform-canvas" width="300" height="40" aria-hidden="true"></canvas>
+
                 <!-- Seek Slider (global across all chunks) -->
                 <div class="seek-bar" id="seekBar">
                     <input type="range" id="seekSlider" min="0" max="100" step="0.1" value="0" class="seek-slider" aria-label="Позиция на четене">
@@ -363,7 +407,7 @@
                 <audio id="audioPlayer" preload="auto"></audio>
                 <audio id="audioPlayerNext" preload="auto" style="display:none"></audio>
 
-                <!-- Player Controls: skip back, play/pause, skip forward, speed -->
+                <!-- Player Controls: skip back, play/pause, skip forward, speed, extra -->
                 <div class="player-controls-row">
                     <button id="btnSkipBack" class="icon-btn player-skip-btn" type="button" title="Назад 10 секунди" aria-label="Назад 10 секунди">
                         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/><text x="12" y="16" text-anchor="middle" font-size="8" fill="currentColor" stroke="none" font-weight="700">10</text></svg>
@@ -378,8 +422,42 @@
                     <button id="btnSpeedToggle" class="btn btn-outline btn-sm speed-toggle-btn" type="button" title="Скорост на четене">
                         ⚡ <span id="speedToggleLabel">1.0x</span>
                     </button>
+                    <button id="btnReaderView" class="icon-btn player-extra-btn" type="button" title="Режим четец — маркира текста" aria-label="Режим четец">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                    </button>
+                    <button id="btnSleepTimer" class="icon-btn player-extra-btn" type="button" title="Таймер за сън" aria-label="Таймер за сън">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+                        <span id="sleepTimerLabel" class="sleep-timer-badge hidden"></span>
+                    </button>
+                    <button id="btnDownloadPlayer" class="icon-btn player-extra-btn" type="button" title="Изтегли аудио файл" aria-label="Изтегли">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    </button>
+                </div>
+
+                <!-- Sleep Timer Dropdown -->
+                <div id="sleepTimerDropdown" class="sleep-timer-dropdown hidden" role="menu">
+                    <div class="sleep-timer-title">🌙 Таймер за сън</div>
+                    <div class="sleep-timer-options">
+                        <button class="sleep-option" data-minutes="15" type="button">15 мин</button>
+                        <button class="sleep-option" data-minutes="30" type="button">30 мин</button>
+                        <button class="sleep-option" data-minutes="45" type="button">45 мин</button>
+                        <button class="sleep-option" data-minutes="60" type="button">60 мин</button>
+                        <button class="sleep-option" data-minutes="90" type="button">90 мин</button>
+                        <button class="sleep-option sleep-option-off" data-minutes="0" type="button">❌ Изкл.</button>
+                    </div>
                 </div>
             </div>
+        </div>
+
+        <!-- Reader View (text with highlighted current chunk) -->
+        <div id="readerView" class="reader-view hidden" aria-live="polite">
+            <div class="reader-view-header">
+                <span class="reader-view-title">📖 Режим четец</span>
+                <button id="btnCloseReaderView" class="icon-btn-sm" type="button" aria-label="Затвори четец">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+            </div>
+            <div id="readerContent" class="reader-content"></div>
         </div>
     </main>
 

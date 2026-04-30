@@ -36,13 +36,26 @@
     const MAX_BUFFER_AHEAD = 2; // Buffer at most 2 chunks ahead of playback
     const SPEED_OPTIONS = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
     const CHUNK_WAIT_INTERVAL_MS = 200;
-    const FAST_START_CHARS = 300; // First chunk max size for faster playback start
+    const FAST_START_CHARS = 150; // First chunk max size for faster playback start (reduced from 300)
     const MIN_CHUNK_LENGTH = 50;  // Minimum sensible chunk length for sentence-break detection
+    const MAX_RETRIES = 3;        // Retries for failed TTS API requests
 
     // Language instructions for TTS
     const LANGUAGE_INSTRUCTIONS = {
         bg: 'Прочети следния текст на български език с ясна дикция: ',
         en: 'Read the following text in English with clear pronunciation: ',
+        de: 'Lies den folgenden Text auf Deutsch mit klarer Aussprache vor: ',
+        fr: 'Lisez le texte suivant en français avec une prononciation claire : ',
+        es: 'Lee el siguiente texto en español con pronunciación clara: ',
+        it: 'Leggi il seguente testo in italiano con pronuncia chiara: ',
+        ru: 'Прочитай следующий текст на русском языке с чёткой дикцией: ',
+        pl: 'Przeczytaj poniższy tekst po polsku wyraźną dykcją: ',
+        nl: 'Lees de volgende tekst in het Nederlands voor met duidelijke uitspraak: ',
+        pt: 'Leia o seguinte texto em português com pronúncia clara: ',
+        zh: '请用普通话清晰地朗读以下文本：',
+        ja: '以下のテキストを日本語で明確に読み上げてください：',
+        ar: 'اقرأ النص التالي باللغة العربية بنطق واضح: ',
+        tr: 'Aşağıdaki metni Türkçe olarak açık bir telaffuzla oku: ',
         auto: '', // No instruction, let the model auto-detect
     };
 
@@ -52,6 +65,7 @@
     class GaplessPlayer {
         constructor() {
             this._ctx = null;
+            this._analyser = null;
             this._sampleRate = 24000;
             this._nextPlayAt = 0;
             this._sessionStartCtxTime = 0;
@@ -75,6 +89,11 @@
                 this._ctx = new (window.AudioContext || window.webkitAudioContext)(
                     { sampleRate: this._sampleRate }
                 );
+                // Create analyser node for waveform visualization
+                this._analyser = this._ctx.createAnalyser();
+                this._analyser.fftSize = 128;
+                this._analyser.smoothingTimeConstant = 0.75;
+                this._analyser.connect(this._ctx.destination);
             }
             return this._ctx;
         }
@@ -102,7 +121,8 @@
             const source = ctx.createBufferSource();
             source.buffer = audioBuf;
             source.playbackRate.value = this._playbackRate;
-            source.connect(ctx.destination);
+            // Connect through analyser for waveform visualization
+            source.connect(this._analyser || ctx.destination);
 
             if (!this._isPlaying) {
                 const startDelay = 0.05; // 50 ms startup buffer
@@ -174,6 +194,7 @@
             for (const src of this._activeSources) { try { src.stop(0); } catch {} }
             this._activeSources = [];
             if (this._ctx) { this._ctx.close().catch(() => {}); this._ctx = null; }
+            this._analyser = null;
             this._isPlaying = false;
             this._isPaused = false;
             this._nextPlayAt = 0;
@@ -192,6 +213,7 @@
 
         get totalDuration() { return this._totalScheduled; }
         get paused() { return !this._isPlaying || this._isPaused; }
+        get analyser() { return this._analyser; }
 
         set playbackRate(rate) {
             const prev = this._playbackRate;
@@ -318,6 +340,15 @@
         btnSpeedToggle: $('#btnSpeedToggle'),
         speedToggleLabel: $('#speedToggleLabel'),
         audioPlayerNext: $('#audioPlayerNext'),
+        waveformCanvas: $('#waveformCanvas'),
+        btnReaderView: $('#btnReaderView'),
+        btnSleepTimer: $('#btnSleepTimer'),
+        sleepTimerLabel: $('#sleepTimerLabel'),
+        sleepTimerDropdown: $('#sleepTimerDropdown'),
+        btnDownloadPlayer: $('#btnDownloadPlayer'),
+        readerView: $('#readerView'),
+        readerContent: $('#readerContent'),
+        btnCloseReaderView: $('#btnCloseReaderView'),
 
         // Other
         toastContainer: $('#toastContainer'),
@@ -367,6 +398,17 @@
         deferredInstallPrompt: null,
         // Media session / wake lock
         wakeLock: null,
+        // Reader view
+        chunkOffsets: [],          // [{start, end}] of each chunk in the display text
+        readerViewActive: false,   // is reader view shown?
+        lastHighlightedChunk: -1,  // last chunk index highlighted in reader view
+        // Waveform animation
+        waveformRafId: null,
+        waveformDataArray: null,
+        // Sleep timer
+        sleepTimer: null,
+        sleepTimerMinutes: 0,
+        sleepTimerStartTime: 0,
     };
 
     // ==================== API Key Helpers ====================
@@ -390,22 +432,29 @@
     function createGaplessPlayer() {
         const player = new GaplessPlayer();
         player.playbackRate = state.streamPlaybackSpeed;
-        player.onTimeUpdate = () => {
+        player.onTimeUpdate = (ct) => {
             if (state.streamMode) {
                 updateSeekSliderFromPlayback();
+                // Update reader view highlight when chunk changes
+                if (state.readerViewActive) {
+                    updateReaderHighlight(state.streamCurrentChunk);
+                }
             }
         };
         player.onPlay = () => {
             state.isStreamPlaying = true;
             updatePlayPauseIcon();
+            startWaveform();
         };
         player.onPause = () => {
             state.isStreamPlaying = false;
             updatePlayPauseIcon();
+            stopWaveform();
         };
         player.onEnded = () => {
             state.isStreamPlaying = false;
             updatePlayPauseIcon();
+            stopWaveform();
             if (state.streamFinished) {
                 onStreamPlaybackComplete();
             }
@@ -430,6 +479,225 @@
         return wsIdx > MIN_CHUNK_LENGTH ? wsIdx + 1 : maxChars;
     }
 
+    // Compute character offsets of each chunk in the original text.
+    // Used by the reader view to highlight the currently playing chunk.
+    function computeChunkOffsets(originalText, chunks) {
+        const offsets = [];
+        let searchFrom = 0;
+        for (const chunk of chunks) {
+            const chunkTrimmed = chunk.trim();
+            let idx = originalText.indexOf(chunkTrimmed, searchFrom);
+            if (idx === -1) {
+                // Fallback: use last known position
+                idx = searchFrom;
+            }
+            offsets.push({ start: idx, end: idx + chunkTrimmed.length });
+            searchFrom = idx + chunkTrimmed.length;
+        }
+        return offsets;
+    }
+
+    // ==================== Waveform Visualization ====================
+    function startWaveform() {
+        if (state.waveformRafId) return;
+        const canvas = els.waveformCanvas;
+        if (!canvas) return;
+        canvas.classList.add('active');
+
+        const draw = () => {
+            const player = state.gaplessPlayer;
+            const analyser = player ? player.analyser : null;
+
+            if (!analyser || !state.isStreamPlaying) {
+                drawWaveformIdle(canvas);
+                state.waveformRafId = null;
+                return;
+            }
+
+            if (!state.waveformDataArray || state.waveformDataArray.length !== analyser.frequencyBinCount) {
+                state.waveformDataArray = new Uint8Array(analyser.frequencyBinCount);
+            }
+            analyser.getByteFrequencyData(state.waveformDataArray);
+            drawWaveformBars(canvas, state.waveformDataArray);
+            state.waveformRafId = requestAnimationFrame(draw);
+        };
+        state.waveformRafId = requestAnimationFrame(draw);
+    }
+
+    function stopWaveform() {
+        if (state.waveformRafId) {
+            cancelAnimationFrame(state.waveformRafId);
+            state.waveformRafId = null;
+        }
+        const canvas = els.waveformCanvas;
+        if (canvas) {
+            canvas.classList.remove('active');
+            drawWaveformIdle(canvas);
+        }
+        state.waveformDataArray = null;
+    }
+
+    function drawWaveformBars(canvas, data) {
+        const ctx2d = canvas.getContext('2d');
+        if (!ctx2d) return;
+
+        const dpr = window.devicePixelRatio || 1;
+        const w = canvas.offsetWidth * dpr;
+        const h = canvas.offsetHeight * dpr;
+        if (canvas.width !== w || canvas.height !== h) {
+            canvas.width = w;
+            canvas.height = h;
+        }
+
+        ctx2d.clearRect(0, 0, w, h);
+
+        const barCount = Math.min(data.length, 40);
+        const barGap = 2 * dpr;
+        const barWidth = Math.max(2, (w - barGap * (barCount - 1)) / barCount);
+        const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+        const color1 = isDark ? '#818cf8' : '#6366f1';
+        const color2 = isDark ? '#c084fc' : '#8b5cf6';
+
+        const gradient = ctx2d.createLinearGradient(0, 0, w, 0);
+        gradient.addColorStop(0, color1);
+        gradient.addColorStop(1, color2);
+        ctx2d.fillStyle = gradient;
+
+        for (let i = 0; i < barCount; i++) {
+            const value = data[i] / 255;
+            const barHeight = Math.max(2 * dpr, value * h * 0.9);
+            const x = i * (barWidth + barGap);
+            const y = (h - barHeight) / 2;
+            const radius = barWidth / 2;
+            ctx2d.beginPath();
+            ctx2d.roundRect
+                ? ctx2d.roundRect(x, y, barWidth, barHeight, radius)
+                : ctx2d.rect(x, y, barWidth, barHeight);
+            ctx2d.fill();
+        }
+    }
+
+    function drawWaveformIdle(canvas) {
+        const ctx2d = canvas.getContext('2d');
+        if (!ctx2d) return;
+        const dpr = window.devicePixelRatio || 1;
+        const w = canvas.offsetWidth * dpr;
+        const h = canvas.offsetHeight * dpr;
+        if (canvas.width !== w || canvas.height !== h) {
+            canvas.width = w;
+            canvas.height = h;
+        }
+        ctx2d.clearRect(0, 0, w, h);
+
+        const barCount = 40;
+        const barGap = 2 * dpr;
+        const barWidth = Math.max(2, (w - barGap * (barCount - 1)) / barCount);
+        const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+        ctx2d.fillStyle = isDark ? 'rgba(100,116,139,0.3)' : 'rgba(148,163,184,0.4)';
+
+        for (let i = 0; i < barCount; i++) {
+            const barHeight = 3 * dpr;
+            const x = i * (barWidth + barGap);
+            const y = (h - barHeight) / 2;
+            ctx2d.fillRect(x, y, barWidth, barHeight);
+        }
+    }
+
+    // ==================== Reader View ====================
+    function toggleReaderView(force) {
+        const show = force !== undefined ? force : !state.readerViewActive;
+        state.readerViewActive = show;
+
+        if (show) {
+            els.readerView.classList.remove('hidden');
+            els.btnReaderView.classList.add('active');
+            // Render current state
+            if (state.currentDisplayText) {
+                renderReaderView(state.currentDisplayText, state.lastHighlightedChunk);
+            }
+        } else {
+            els.readerView.classList.add('hidden');
+            els.btnReaderView.classList.remove('active');
+        }
+    }
+
+    function renderReaderView(text, highlightChunk) {
+        if (!state.readerViewActive || !els.readerContent) return;
+        if (!text) { els.readerContent.innerHTML = ''; return; }
+
+        const offsets = state.chunkOffsets;
+        if (!offsets || offsets.length === 0 || highlightChunk < 0) {
+            // No chunk info: show full text
+            els.readerContent.textContent = text;
+            return;
+        }
+
+        const chunk = offsets[highlightChunk];
+        if (!chunk) {
+            els.readerContent.textContent = text;
+            return;
+        }
+
+        // Build three segments: before (done), current (highlighted), after
+        const before = text.substring(0, chunk.start);
+        const current = text.substring(chunk.start, chunk.end);
+        const after = text.substring(chunk.end);
+
+        const div = els.readerContent;
+        div.innerHTML =
+            '<span class="chunk-done">' + escapeHtml(before) + '</span>' +
+            '<mark class="chunk-highlight" id="chunkHighlightMark">' + escapeHtml(current) + '</mark>' +
+            '<span>' + escapeHtml(after) + '</span>';
+
+        // Smooth-scroll to highlighted chunk
+        const mark = div.querySelector('#chunkHighlightMark');
+        if (mark) {
+            mark.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        }
+    }
+
+    function updateReaderHighlight(chunkIndex) {
+        if (!state.readerViewActive) return;
+        if (chunkIndex === state.lastHighlightedChunk) return;
+        state.lastHighlightedChunk = chunkIndex;
+        renderReaderView(state.currentDisplayText, chunkIndex);
+    }
+
+    // ==================== Sleep Timer ====================
+    function setSleepTimer(minutes) {
+        if (state.sleepTimer) {
+            clearTimeout(state.sleepTimer);
+            state.sleepTimer = null;
+        }
+        state.sleepTimerMinutes = minutes;
+        if (minutes > 0) {
+            state.sleepTimerStartTime = Date.now();
+            state.sleepTimer = setTimeout(() => {
+                stopGeneration();
+                showToast('🌙 Таймерът изтече — спряно', 'info', 5000);
+                state.sleepTimer = null;
+                state.sleepTimerMinutes = 0;
+                updateSleepTimerButton();
+            }, minutes * 60 * 1000);
+        }
+        updateSleepTimerButton();
+        // Close dropdown
+        els.sleepTimerDropdown.classList.add('hidden');
+    }
+
+    function updateSleepTimerButton() {
+        const label = els.sleepTimerLabel;
+        if (!label) return;
+        if (state.sleepTimerMinutes > 0) {
+            label.textContent = state.sleepTimerMinutes + 'm';
+            label.classList.remove('hidden');
+            els.btnSleepTimer.classList.add('active');
+        } else {
+            label.classList.add('hidden');
+            els.btnSleepTimer.classList.remove('active');
+        }
+    }
+
     // ==================== Initialization ====================
     function init() {
         loadSettings();
@@ -446,6 +714,10 @@
         setupPwaInstall();
         setupPositionAutoSave();
         restoreLastBook();
+        // Initialize waveform canvas with idle state
+        if (els.waveformCanvas) {
+            setTimeout(() => drawWaveformIdle(els.waveformCanvas), 100);
+        }
     }
 
     // ==================== Settings ====================
@@ -917,6 +1189,42 @@
 
         // Speed toggle button
         els.btnSpeedToggle.addEventListener('click', cyclePlaybackSpeed);
+
+        // Reader view toggle
+        if (els.btnReaderView) {
+            els.btnReaderView.addEventListener('click', () => toggleReaderView());
+        }
+        if (els.btnCloseReaderView) {
+            els.btnCloseReaderView.addEventListener('click', () => toggleReaderView(false));
+        }
+
+        // Sleep timer
+        if (els.btnSleepTimer) {
+            els.btnSleepTimer.addEventListener('click', (e) => {
+                e.stopPropagation();
+                els.sleepTimerDropdown.classList.toggle('hidden');
+            });
+        }
+        if (els.sleepTimerDropdown) {
+            els.sleepTimerDropdown.querySelectorAll('.sleep-option').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const mins = parseInt(btn.dataset.minutes);
+                    setSleepTimer(mins);
+                    showToast(mins > 0 ? `🌙 Таймер: ${mins} мин` : '🌙 Таймер изключен', 'info');
+                });
+            });
+            // Close dropdown when clicking elsewhere
+            document.addEventListener('click', (e) => {
+                if (!els.btnSleepTimer.contains(e.target) && !els.sleepTimerDropdown.contains(e.target)) {
+                    els.sleepTimerDropdown.classList.add('hidden');
+                }
+            });
+        }
+
+        // Download button in player
+        if (els.btnDownloadPlayer) {
+            els.btnDownloadPlayer.addEventListener('click', downloadAudio);
+        }
 
         // Keep playing when visibility changes (background/screen off)
         document.addEventListener('visibilitychange', () => {
@@ -1779,6 +2087,10 @@
             state.streamTotalDuration = 0;
             state.streamPlayedTime = 0;
 
+            // Compute character offsets for reader view highlighting
+            state.chunkOffsets = computeChunkOffsets(text, chunks);
+            state.lastHighlightedChunk = -1;
+
             // Store display text so seek-restart can finalize audio correctly
             state.currentDisplayText = text;
 
@@ -2002,7 +2314,7 @@
                 }
             };
 
-            const result = await generateAudioChunk(
+            const result = await generateAudioChunkWithRetry(
                 ttsText, apiKey, model, voice, lang, controller.signal, chunkCallback
             );
 
@@ -2163,6 +2475,7 @@
             state.gaplessPlayer = null;
         }
         state.streamMode = false;
+        stopWaveform();
         releaseWakeLock();
     }
 
@@ -2229,6 +2542,9 @@
         state.streamTotalDuration = 0;
         state.streamPlayedTime = 0;
         state.streamGeneratingIndex = -1;
+        state.chunkOffsets = [];
+        state.lastHighlightedChunk = -1;
+        stopWaveform();
         releaseWakeLock();
     }
 
@@ -2426,6 +2742,8 @@
         els.playerSection.classList.remove('hidden');
         updateSeekChunkInfo();
         updatePlayPauseIcon();
+        startWaveform();
+        if (state.readerViewActive) updateReaderHighlight(chunkIndex);
     }
 
     // Abort current generation and restart from an ungenerated target chunk.
@@ -2515,43 +2833,54 @@
         if (text.length <= maxSize) return [text];
 
         const chunks = [];
-        // Split by sentence-ending punctuation
-        const sentences = text.split(/(?<=[.!?。！？\n])\s*/);
-        let currentChunk = '';
 
-        for (const sentence of sentences) {
-            if (!sentence.trim()) continue;
+        // First, try to split by double-newlines (paragraphs) to preserve structure
+        const paragraphs = text.split(/\n{2,}/);
 
-            if (sentence.length > maxSize) {
-                // Flush current chunk first
-                if (currentChunk.trim()) {
-                    chunks.push(currentChunk.trim());
-                    currentChunk = '';
+        for (const para of paragraphs) {
+            const trimmedPara = para.trim();
+            if (!trimmedPara) continue;
+
+            if (trimmedPara.length <= maxSize) {
+                // Whole paragraph fits — keep it together for better voice flow
+                if (chunks.length > 0 && (chunks[chunks.length - 1] + '\n\n' + trimmedPara).length <= maxSize) {
+                    chunks[chunks.length - 1] += '\n\n' + trimmedPara;
+                } else {
+                    chunks.push(trimmedPara);
                 }
-                // Split long sentence by words
-                const words = sentence.split(/\s+/);
-                for (const word of words) {
-                    if ((currentChunk + ' ' + word).length > maxSize) {
-                        if (currentChunk.trim()) {
-                            chunks.push(currentChunk.trim());
-                        }
-                        currentChunk = word;
-                    } else {
-                        currentChunk += (currentChunk ? ' ' : '') + word;
-                    }
-                }
-            } else if ((currentChunk + ' ' + sentence).length > maxSize) {
-                if (currentChunk.trim()) {
-                    chunks.push(currentChunk.trim());
-                }
-                currentChunk = sentence;
-            } else {
-                currentChunk += (currentChunk ? ' ' : '') + sentence;
+                continue;
             }
-        }
 
-        if (currentChunk.trim()) {
-            chunks.push(currentChunk.trim());
+            // Paragraph too long — split by sentences
+            const sentences = trimmedPara.split(/(?<=[.!?।।。！？;])\s+/);
+            let currentChunk = '';
+
+            for (const sentence of sentences) {
+                if (!sentence.trim()) continue;
+
+                if (sentence.length > maxSize) {
+                    if (currentChunk.trim()) {
+                        chunks.push(currentChunk.trim());
+                        currentChunk = '';
+                    }
+                    // Split long sentence by words
+                    const words = sentence.split(/\s+/);
+                    for (const word of words) {
+                        if ((currentChunk + ' ' + word).length > maxSize) {
+                            if (currentChunk.trim()) chunks.push(currentChunk.trim());
+                            currentChunk = word;
+                        } else {
+                            currentChunk += (currentChunk ? ' ' : '') + word;
+                        }
+                    }
+                } else if ((currentChunk + ' ' + sentence).length > maxSize) {
+                    if (currentChunk.trim()) chunks.push(currentChunk.trim());
+                    currentChunk = sentence;
+                } else {
+                    currentChunk += (currentChunk ? ' ' : '') + sentence;
+                }
+            }
+            if (currentChunk.trim()) chunks.push(currentChunk.trim());
         }
 
         return chunks.length > 0 ? chunks : [text];
@@ -2707,7 +3036,28 @@
         return { audioData: combineArrayBuffers(pcmChunks), sampleRate };
     }
 
-    // ==================== Audio Processing ====================
+    // Wrapper around generateAudioChunk that retries up to MAX_RETRIES times
+    // with exponential backoff for transient network / server errors.
+    async function generateAudioChunkWithRetry(text, apiKey, model, voice, lang, signal, onPcmChunk) {
+        let lastError;
+        for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+            if (signal && signal.aborted) throw new DOMException('Cancelled', 'AbortError');
+            try {
+                // On retry attempts, don't use onPcmChunk for streaming (full response only)
+                // so the player isn't fed partial data from a failed attempt.
+                const cb = attempt === 0 ? onPcmChunk : null;
+                return await generateAudioChunk(text, apiKey, model, voice, lang, signal, cb);
+            } catch (err) {
+                if (err.name === 'AbortError') throw err;
+                lastError = err;
+                if (attempt < MAX_RETRIES - 1) {
+                    const delayMs = Math.pow(2, attempt) * 1000; // 1s, 2s
+                    await new Promise(resolve => setTimeout(resolve, delayMs));
+                }
+            }
+        }
+        throw lastError;
+    }
     function combineArrayBuffers(buffers) {
         const totalLength = buffers.reduce((sum, buf) => sum + buf.byteLength, 0);
         const combined = new Uint8Array(totalLength);
