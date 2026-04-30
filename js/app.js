@@ -2863,7 +2863,7 @@
             }
 
             // Paragraph too long — split by sentences
-            const sentences = trimmedPara.split(/(?<=[.!?।।。！？;])\s+/);
+            const sentences = trimmedPara.split(/(?<=[.!?।。！？;])\s+/);
             let currentChunk = '';
 
             for (const sentence of sentences) {
@@ -3082,7 +3082,7 @@
         const len = samples.length;
         if (len === 0) return pcmBuffer;
 
-        const THRESHOLD    = 250;                              // ~0.76% of 32768 ≈ –42 dBFS
+        const THRESHOLD    = 250;                              // ~0.76% of 32768 (-42 dBFS)
         const MARGIN       = Math.floor(sampleRate * 0.006);  // 6 ms margin (keep natural attack)
         const FADE_IN_LEN  = Math.floor(sampleRate * 0.004);  // 4 ms fade-in
         const FADE_OUT_LEN = Math.floor(sampleRate * 0.015);  // 15 ms fade-out
