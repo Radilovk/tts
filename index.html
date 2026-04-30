@@ -160,17 +160,17 @@
                     <option value="1000">1000 символа</option>
                     <option value="2000">2000 символа</option>
                     <option value="3000" selected>3000 символа (препоръчан)</option>
-                    <option value="5000">5000 символа</option>
-                    <option value="8000">8000 символа (дълго)</option>
+                    <option value="5000">5000 символа (по-плавно)</option>
+                    <option value="8000">8000 символа (минимум прекъсвания)</option>
                 </select>
-                <small class="hint">По-голям блок = по-малко API заявки и по-плавно четене. Стрийминг стартира звука веднага, без да чака целия блок.</small>
+                <small class="hint">По-голям блок = по-малко API заявки, по-малко прекъсвания и по-стабилна интонация. Стрийминг стартира звука веднага щом пристигнат първите данни.</small>
             </div>
 
             <!-- Voice Prompt -->
             <div class="setting-group">
                 <label for="voicePrompt">🎭 Инструкции за гласа</label>
-                <textarea id="voicePrompt" rows="3" placeholder="Напр.: Чети бавно и ясно, с топла интонация. Правете кратки паузи между изреченията." spellcheck="true" class="voice-prompt-input" aria-describedby="voicePromptHint"></textarea>
-                <small class="hint" id="voicePromptHint">Допълнителни инструкции за звученето на гласа и интонацията при четене</small>
+                <textarea id="voicePrompt" rows="3" placeholder="Напр.: Чети плавно и естествено с постоянна интонация, сякаш разказваш история." spellcheck="true" class="voice-prompt-input" aria-describedby="voicePromptHint"></textarea>
+                <small class="hint" id="voicePromptHint">Допълнителни инструкции за стила, тоналността и темпото на четене</small>
             </div>
 
             <!-- Translation Toggle -->
