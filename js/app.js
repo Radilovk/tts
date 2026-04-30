@@ -2557,6 +2557,16 @@
         return chunks.length > 0 ? chunks : [text];
     }
 
+    // Decode a base64-aligned string to a 16-bit PCM ArrayBuffer.
+    // Any trailing odd byte is silently dropped to maintain int16 alignment.
+    function base64ToPcmBuffer(aligned) {
+        const binary = atob(aligned);
+        const bytes = new Uint8Array(binary.length);
+        for (let k = 0; k < binary.length; k++) bytes[k] = binary.charCodeAt(k);
+        const evenLen = bytes.length - (bytes.length % 2);
+        return evenLen > 0 ? bytes.slice(0, evenLen).buffer : null;
+    }
+
     // Parse a Gemini streamGenerateContent SSE response body,
     // yielding each PCM chunk as { pcm: ArrayBuffer, sampleRate: number }
     // (or { text: string } when the model returns text instead of audio).
@@ -2599,16 +2609,8 @@
                                 base64Residual = full.slice(alignedLen);
                                 const aligned = full.slice(0, alignedLen);
                                 if (!aligned) continue;
-                                const binary = atob(aligned);
-                                const bytes = new Uint8Array(binary.length);
-                                for (let k = 0; k < binary.length; k++) {
-                                    bytes[k] = binary.charCodeAt(k);
-                                }
-                                // Ensure 2-byte (int16) alignment
-                                const evenLen = bytes.length - (bytes.length % 2);
-                                if (evenLen > 0) {
-                                    yield { pcm: bytes.slice(0, evenLen).buffer, sampleRate };
-                                }
+                                const pcm = base64ToPcmBuffer(aligned);
+                                if (pcm) yield { pcm, sampleRate };
                             } else if (part.text) {
                                 yield { text: part.text, pcm: null, sampleRate };
                             }
@@ -2625,13 +2627,8 @@
                 const alignedLen = Math.floor(base64Residual.length / 4) * 4;
                 const aligned = base64Residual.slice(0, alignedLen);
                 try {
-                    const binary = atob(aligned);
-                    const bytes = new Uint8Array(binary.length);
-                    for (let k = 0; k < binary.length; k++) bytes[k] = binary.charCodeAt(k);
-                    const evenLen = bytes.length - (bytes.length % 2);
-                    if (evenLen > 0) {
-                        yield { pcm: bytes.slice(0, evenLen).buffer, sampleRate };
-                    }
+                    const pcm = base64ToPcmBuffer(aligned);
+                    if (pcm) yield { pcm, sampleRate };
                 } catch {}
             }
         } finally {
