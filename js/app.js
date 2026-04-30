@@ -3043,8 +3043,10 @@
         for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
             if (signal && signal.aborted) throw new DOMException('Cancelled', 'AbortError');
             try {
-                // On retry attempts, don't use onPcmChunk for streaming (full response only)
-                // so the player isn't fed partial data from a failed attempt.
+                // Only pass the streaming onPcmChunk callback on the first attempt.
+                // On retries the first attempt's partial PCM data was already discarded
+                // or never fed to GaplessPlayer (cb=null below), so we collect the full
+                // result and return it; generateChunksWithBuffering will re-feed it.
                 const cb = attempt === 0 ? onPcmChunk : null;
                 return await generateAudioChunk(text, apiKey, model, voice, lang, signal, cb);
             } catch (err) {
