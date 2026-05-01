@@ -11,6 +11,7 @@
     const STORAGE_KEYS = {
         API_KEY: 'gemini_tts_api_key',
         MODEL: 'gemini_tts_model',
+        CUSTOM_MODEL: 'gemini_tts_custom_model',
         VOICE: 'gemini_tts_voice',
         SPEED: 'gemini_tts_speed',
         AUTO_PLAY: 'gemini_tts_autoplay',
@@ -542,6 +543,8 @@
         // Settings
         apiKey: $('#apiKey'),
         modelSelect: $('#modelSelect'),
+        customModel: $('#customModel'),
+        btnClearCustomModel: $('#btnClearCustomModel'),
         voiceSelect: $('#voiceSelect'),
         speedSlider: $('#speedSlider'),
         speedValue: $('#speedValue'),
@@ -712,6 +715,13 @@
             return window.PRECONFIGURED_API_KEY.trim();
         }
         return els.apiKey.value.trim();
+    }
+
+    // Returns the active model ID: user-entered custom model takes priority
+    // over the dropdown selection, allowing any valid Gemini model to be used.
+    function getActiveModel() {
+        const custom = els.customModel ? els.customModel.value.trim() : '';
+        return custom || els.modelSelect.value;
     }
 
     // Create a GaplessPlayer wired to the current UI/state callbacks.
@@ -1000,6 +1010,7 @@
 
         els.apiKey.value = get(STORAGE_KEYS.API_KEY, '');
         els.modelSelect.value = get(STORAGE_KEYS.MODEL, 'gemini-2.5-flash-preview-tts');
+        if (els.customModel) els.customModel.value = get(STORAGE_KEYS.CUSTOM_MODEL, '');
         els.voiceSelect.value = get(STORAGE_KEYS.VOICE, 'Kore');
         els.speedSlider.value = get(STORAGE_KEYS.SPEED, '1.0');
         els.autoPlay.checked = get(STORAGE_KEYS.AUTO_PLAY, 'true') === 'true';
@@ -1037,6 +1048,7 @@
         // and the key is entered and managed entirely by the user on their own device.
         localStorage.setItem(STORAGE_KEYS.API_KEY, els.apiKey.value); // nosemgrep: clear-text-storage
         localStorage.setItem(STORAGE_KEYS.MODEL, els.modelSelect.value);
+        if (els.customModel) localStorage.setItem(STORAGE_KEYS.CUSTOM_MODEL, els.customModel.value.trim());
         localStorage.setItem(STORAGE_KEYS.VOICE, els.voiceSelect.value);
         localStorage.setItem(STORAGE_KEYS.SPEED, els.speedSlider.value);
         localStorage.setItem(STORAGE_KEYS.AUTO_PLAY, els.autoPlay.checked);
@@ -1297,7 +1309,7 @@
                 }
                 // Pre-warm Live session on model/voice change; clean up if switching away
                 if (el === els.modelSelect || el === els.voiceSelect) {
-                    if (isLiveModel(els.modelSelect.value)) {
+                    if (isLiveModel(getActiveModel())) {
                         prewarmLiveSession();
                     } else {
                         geminiLiveSession.close();
@@ -1312,6 +1324,33 @@
                 });
             }
         });
+
+        // Custom model input — save on change and re-evaluate live session
+        if (els.customModel) {
+            const onCustomModelChange = () => {
+                saveSettings();
+                updateGenerateButton();
+                if (isLiveModel(getActiveModel())) {
+                    prewarmLiveSession();
+                } else {
+                    geminiLiveSession.close();
+                }
+            };
+            els.customModel.addEventListener('change', onCustomModelChange);
+            els.customModel.addEventListener('input', onCustomModelChange);
+        }
+        if (els.btnClearCustomModel) {
+            els.btnClearCustomModel.addEventListener('click', () => {
+                els.customModel.value = '';
+                saveSettings();
+                updateGenerateButton();
+                if (isLiveModel(getActiveModel())) {
+                    prewarmLiveSession();
+                } else {
+                    geminiLiveSession.close();
+                }
+            });
+        }
 
         // Quick settings on main page — sync back to settings panel and save
         if (els.quickVoice) {
@@ -1655,7 +1694,7 @@
         }
 
         const voice = els.voiceSelect.value;
-        const model = els.modelSelect.value;
+        const model = getActiveModel();
         els.btnPreviewVoice.disabled = true;
         els.btnPreviewVoice.textContent = '⏳ Генериране...';
 
@@ -2346,7 +2385,7 @@
             const chunks = splitTextIntoChunks(text, chunkSize);
 
             // Capture voice/model/lang at generation start for consistent timbre
-            const model = els.modelSelect.value;
+            const model = getActiveModel();
             const voice = els.voiceSelect.value;
             const lang = els.ttsLanguage.value;
             let translatedChunks = new Array(chunks.length).fill('');
@@ -3067,7 +3106,7 @@
 
         // Re-read settings (same as original generation)
         const chunks = state.streamChunks;
-        const model = els.modelSelect.value;
+        const model = getActiveModel();
         const voice = els.voiceSelect.value;
         const lang = els.ttsLanguage.value;
         const translateMode = els.translateToggle.checked;
@@ -3352,7 +3391,7 @@
 
     // Pre-warm the Live WebSocket so the first request has zero connection overhead.
     function prewarmLiveSession() {
-        const model  = els.modelSelect.value;
+        const model  = getActiveModel();
         if (!isLiveModel(model)) return;
         const apiKey = getEffectiveApiKey();
         if (!apiKey) return;
