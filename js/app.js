@@ -12,6 +12,7 @@
         API_KEY: 'gemini_tts_api_key',
         MODEL: 'gemini_tts_model',
         CUSTOM_MODEL: 'gemini_tts_custom_model',
+        MODEL_TYPE: 'gemini_tts_model_type',
         VOICE: 'gemini_tts_voice',
         SPEED: 'gemini_tts_speed',
         AUTO_PLAY: 'gemini_tts_autoplay',
@@ -531,9 +532,25 @@
     // Singleton — kept alive across TTS requests for low latency.
     const geminiLiveSession = new GeminiLiveSession();
 
+    // Returns the effective request type for the given model:
+    //   'tts'   — REST request with speechConfig (dedicated TTS models)
+    //   'audio' — REST request with responseModalities only (general native-audio models)
+    //   'live'  — WebSocket via GeminiLiveSession
+    // When the user has set an explicit type in the settings panel that overrides
+    // auto-detection.  Falls back to name-based heuristics when set to 'auto'.
+    function getModelRequestType(model) {
+        const explicit = els.modelType ? els.modelType.value : 'auto';
+        if (explicit && explicit !== 'auto') return explicit;
+        // Auto-detection heuristics
+        if (typeof model !== 'string') return 'tts';
+        if (model.includes('live')) return 'live';
+        if (/(?:^|-)tts(?:-|$)/.test(model)) return 'tts';
+        return 'audio';
+    }
+
     // Returns true when model name indicates a Live (WebSocket) model.
     function isLiveModel(model) {
-        return typeof model === 'string' && model.includes('live');
+        return getModelRequestType(model) === 'live';
     }
 
     // ==================== DOM Elements ====================
@@ -545,6 +562,7 @@
         modelSelect: $('#modelSelect'),
         customModel: $('#customModel'),
         btnClearCustomModel: $('#btnClearCustomModel'),
+        modelType: $('#modelType'),
         voiceSelect: $('#voiceSelect'),
         speedSlider: $('#speedSlider'),
         speedValue: $('#speedValue'),
@@ -1011,6 +1029,7 @@
         els.apiKey.value = get(STORAGE_KEYS.API_KEY, '');
         els.modelSelect.value = get(STORAGE_KEYS.MODEL, 'gemini-2.5-flash-preview-tts');
         if (els.customModel) els.customModel.value = get(STORAGE_KEYS.CUSTOM_MODEL, '');
+        if (els.modelType) els.modelType.value = get(STORAGE_KEYS.MODEL_TYPE, 'auto');
         els.voiceSelect.value = get(STORAGE_KEYS.VOICE, 'Kore');
         els.speedSlider.value = get(STORAGE_KEYS.SPEED, '1.0');
         els.autoPlay.checked = get(STORAGE_KEYS.AUTO_PLAY, 'true') === 'true';
@@ -1049,6 +1068,7 @@
         localStorage.setItem(STORAGE_KEYS.API_KEY, els.apiKey.value); // nosemgrep: clear-text-storage
         localStorage.setItem(STORAGE_KEYS.MODEL, els.modelSelect.value);
         if (els.customModel) localStorage.setItem(STORAGE_KEYS.CUSTOM_MODEL, els.customModel.value.trim());
+        if (els.modelType) localStorage.setItem(STORAGE_KEYS.MODEL_TYPE, els.modelType.value);
         localStorage.setItem(STORAGE_KEYS.VOICE, els.voiceSelect.value);
         localStorage.setItem(STORAGE_KEYS.SPEED, els.speedSlider.value);
         localStorage.setItem(STORAGE_KEYS.AUTO_PLAY, els.autoPlay.checked);
@@ -1338,6 +1358,17 @@
             };
             els.customModel.addEventListener('change', onCustomModelChange);
             els.customModel.addEventListener('input', onCustomModelChange);
+        }
+        // Model type selector — re-evaluate live session when request type changes
+        if (els.modelType) {
+            els.modelType.addEventListener('change', () => {
+                saveSettings();
+                if (isLiveModel(getActiveModel())) {
+                    prewarmLiveSession();
+                } else {
+                    geminiLiveSession.close();
+                }
+            });
         }
         if (els.btnClearCustomModel) {
             els.btnClearCustomModel.addEventListener('click', () => {
@@ -3311,10 +3342,11 @@
         }
         promptText += text;
 
-        // Dedicated TTS models and Live models support speechConfig for voice
-        // selection.  General native-audio models (e.g. gemini-1.5-flash-8b)
-        // only accept responseModalities and reject speechConfig.
-        const supportsSpeechConfig = /(?:^|-)tts(?:-|$)/.test(model) || isLiveModel(model);
+        // Dedicated TTS models support speechConfig for voice selection.
+        // General native-audio models (e.g. gemini-1.5-flash-8b) only accept
+        // responseModalities and reject speechConfig.
+        // The user can override auto-detection via the Model Type selector.
+        const supportsSpeechConfig = getModelRequestType(model) === 'tts';
         const generationConfig = { responseModalities: ['AUDIO'] };
         if (supportsSpeechConfig) {
             generationConfig.speechConfig = {
