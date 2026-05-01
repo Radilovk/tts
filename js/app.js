@@ -1695,6 +1695,7 @@
 
         const voice = els.voiceSelect.value;
         const model = getActiveModel();
+        els.btnPreviewVoice.disabled = true;
         els.btnPreviewVoice.textContent = '⏳ Генериране...';
 
         try {
