@@ -539,7 +539,9 @@
     // When the user has set an explicit type in the settings panel that overrides
     // auto-detection.  Falls back to name-based heuristics when set to 'auto'.
     function getModelRequestType(model) {
-        const explicit = els.modelType ? els.modelType.value : 'auto';
+        const explicit = els.modelType
+            ? els.modelType.value
+            : (localStorage.getItem(STORAGE_KEYS.MODEL_TYPE) || 'auto');
         if (explicit && explicit !== 'auto') return explicit;
         // Auto-detection heuristics
         if (typeof model !== 'string') return 'tts';
