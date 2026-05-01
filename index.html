@@ -78,12 +78,25 @@
                     <optgroup label="⚡ Live модели (WebSocket, ниска латентност)">
                         <option value="gemini-2.5-flash-exp-native-audio-thinking-dialog">Gemini 2.5 Flash Live (⚡ ~150 ms)</option>
                     </optgroup>
+                    <optgroup label="🚀 Бързи модели (нативно аудио)">
+                        <option value="gemini-1.5-flash-8b">Gemini 1.5 Flash-8B (🚀 най-бърз старт)</option>
+                    </optgroup>
                 </select>
                 <div class="input-with-btn custom-model-row">
                     <input type="text" id="customModel" placeholder="напр. gemini-2.5-pro-preview-tts" autocomplete="off" spellcheck="false">
                     <button id="btnClearCustomModel" class="btn btn-outline btn-sm" type="button" title="Изчисти собствения модел">✕</button>
                 </div>
                 <small class="hint">✏️ <strong>Собствен модел</strong> — въведете ID на модел ако не е в списъка. Когато е попълнено, се използва вместо избора по-горе. <a href="https://ai.google.dev/gemini-api/docs/models" target="_blank" rel="noopener noreferrer">Виж наличните модели →</a></small>
+            </div>
+            <div class="setting-group">
+                <label for="modelType">⚙️ Тип на заявката</label>
+                <select id="modelType">
+                    <option value="auto">Автоматично (по името на модела)</option>
+                    <option value="tts">TTS — с гласова конфигурация (speechConfig)</option>
+                    <option value="audio">Нативно аудио — само responseModalities</option>
+                    <option value="live">Live WebSocket (ниска латентност)</option>
+                </select>
+                <small class="hint">Изберете ръчно при собствен модел, чието име не съдържа "tts" или "live".</small>
             </div>
 
             <!-- Voice -->
