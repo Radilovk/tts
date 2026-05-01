@@ -422,10 +422,14 @@
                         }
                     }
                 }
-                // Model finished its turn
-                if (sc.turnComplete) {
-                    this._state = 'ready';
-                    if (this._chunkResolve) {
+                // Model finished its turn.
+                // Thinking models (e.g. native-audio-thinking-dialog) may emit an
+                // intermediate turnComplete for their thinking/reasoning phase before
+                // sending the actual audio turn.  Only resolve when we have PCM data;
+                // otherwise keep accumulating — the audio turn will follow.
+                if (sc.turnComplete && this._chunkResolve) {
+                    if (this._pcmAccum.length > 0) {
+                        this._state = 'ready';
                         const allPcm       = combineArrayBuffers(this._pcmAccum);
                         const r            = this._chunkResolve;
                         this._pcmAccum     = [];
@@ -434,6 +438,7 @@
                         this._onPcmChunk   = null;
                         r({ audioData: allPcm, sampleRate: this._sampleRate });
                     }
+                    // else: thinking-only turn — continue waiting for the audio turn
                 }
             }
 
@@ -3344,11 +3349,11 @@
         }
         promptText += text;
 
-        // Dedicated TTS models support speechConfig for voice selection.
-        // General native-audio models (e.g. gemini-1.5-flash-8b) only accept
-        // responseModalities and reject speechConfig.
-        // The user can override auto-detection via the Model Type selector.
-        const supportsSpeechConfig = getModelRequestType(model) === 'tts';
+        // All REST-based models (both dedicated 'tts' models and native-audio
+        // 'audio' models like gemini-2.0-flash-exp) require speechConfig for
+        // voice selection to produce PCM audio output.  Only Live WebSocket
+        // models configure the voice in their setup message instead.
+        const supportsSpeechConfig = getModelRequestType(model) !== 'live';
         const generationConfig = { responseModalities: ['AUDIO'] };
         if (supportsSpeechConfig) {
             generationConfig.speechConfig = {
