@@ -545,7 +545,7 @@
         if (explicit && explicit !== 'auto') return explicit;
         // Auto-detection heuristics
         if (typeof model !== 'string') return 'tts';
-        if (model.includes('live') || model.includes('dialog')) return 'live';
+        if (model.includes('live')) return 'live';
         if (/(?:^|-)tts(?:-|$)/.test(model)) return 'tts';
         return 'audio';
     }
