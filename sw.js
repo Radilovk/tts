@@ -1,6 +1,6 @@
 /* Service Worker for Gemini TTS PWA */
 
-const CACHE_NAME = 'gemini-tts-v1';
+const CACHE_NAME = 'gemini-tts-v2';
 const STATIC_ASSETS = [
     './',
     './index.html',
