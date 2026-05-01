@@ -3311,10 +3311,10 @@
         }
         promptText += text;
 
-        // Dedicated TTS models (model name contains "tts") and Live models support
-        // speechConfig for voice selection.  General native-audio models (e.g.
-        // gemini-1.5-flash-8b) only accept responseModalities and reject speechConfig.
-        const supportsSpeechConfig = model.includes('tts') || model.includes('live');
+        // Dedicated TTS models and Live models support speechConfig for voice
+        // selection.  General native-audio models (e.g. gemini-1.5-flash-8b)
+        // only accept responseModalities and reject speechConfig.
+        const supportsSpeechConfig = /(?:^|-)tts(?:-|$)/.test(model) || isLiveModel(model);
         const generationConfig = { responseModalities: ['AUDIO'] };
         if (supportsSpeechConfig) {
             generationConfig.speechConfig = {
