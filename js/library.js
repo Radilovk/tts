@@ -237,7 +237,9 @@ export async function fetchCatalogBook(item, onProgress) {
     }
     if (item.source === 'arxiv' || item.source === 'oapen') {
         onProgress?.(0.1);
-        const blob = await viaServer(item.pdf);
+        const blob = item.source === 'oapen'
+            ? await fetch(item.pdf).then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status))))).catch(() => viaServer(item.pdf))
+            : await viaServer(item.pdf);
         const book = await parseBook(new File([blob], `${item.title}.pdf`), (p) => onProgress?.(0.4 + p * 0.6));
         book.title = item.title;
         book.author = item.author;

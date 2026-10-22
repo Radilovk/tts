@@ -102,8 +102,9 @@ async function searchArxiv(q) {
 }
 
 async function searchOapen(q) {
-    const text = await viaServerText(`https://library.oapen.org/rest/search?${new URLSearchParams({ query: q, expand: 'metadata,bitstreams', limit: '12' })}`);
-    const list = JSON.parse(text);
+    const url = `https://library.oapen.org/rest/search?${new URLSearchParams({ query: q, expand: 'metadata,bitstreams', limit: '12' })}`;
+    // OAPEN refuses data-centre addresses, so the listener's own connection goes first
+    const list = await json(url).catch(async () => JSON.parse(await viaServerText(url)));
     return (Array.isArray(list) ? list : []).map((it) => {
         const md = (k) => (it.metadata || []).filter((m) => m.key === k).map((m) => m.value);
         const pdf = (it.bitstreams || []).find((b) => /pdf/i.test(b.mimeType || b.name || ''));
