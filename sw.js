@@ -1,7 +1,7 @@
 /* Service worker: app shell offline + runtime cache for fonts and parser libraries.
    Voice API calls are never cached here — audio is cached in IndexedDB by the app. */
 
-const CACHE = 'razkazvach-v6';
+const CACHE = 'razkazvach-v7';
 const SHELL = [
     './', './index.html', './css/app.css', './manifest.json',
     './js/main.js', './js/player.js', './js/engines.js', './js/parsers.js', './js/text.js', './js/db.js', './js/usage.js', './js/translate.js', './js/native.js', './js/config.js',
@@ -41,9 +41,10 @@ self.addEventListener('fetch', (event) => {
     }
     if (url.origin !== self.location.origin) return;
 
-    // App shell: network-first so updates arrive, cache when offline
+    // App shell: network-first and always revalidated (cache: 'no-cache' asks the
+    // server whether the file changed), so a new version shows up on the next load
     event.respondWith(
-        fetch(req).then((res) => {
+        fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' }).then((res) => {
             if (res.ok) {
                 const copy = res.clone();
                 caches.open(CACHE).then((c) => c.put(req, copy));

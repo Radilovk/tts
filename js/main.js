@@ -17,6 +17,9 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 
 // ==================== Settings ====================
 
+// Shown in the settings footer; bump with every release
+export const APP_VERSION = '1.7';
+
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
     engine: null, apiKey: '', cloudVoice: '', geminiVoice: 'Charon', geminiModel: GEMINI_DEFAULT_MODEL,
@@ -920,7 +923,7 @@ function renderSettings(body) {
                 </div>
             </div>
         </section>
-        <p class="hint" style="text-align:center;margin-top:26px">Разказвач · всичко се пази на вашето устройство</p>`;
+        <p class="hint" style="text-align:center;margin-top:26px">Разказвач ${APP_VERSION}${isNative ? ' · Android' : ''} · всичко се пази на вашето устройство</p>`;
 
     renderVoiceGroup($('#voiceGroup', body), lang);
     renderUsage($('#usageBox', body));
@@ -1638,7 +1641,14 @@ async function init() {
     await renderLibrary();
     if (isNative) initNative();
     else if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-        navigator.serviceWorker.register('sw.js').catch(() => {});
+        navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
+        // A new version took over: reload now if nothing is playing, otherwise offer it
+        const hadController = !!navigator.serviceWorker.controller;
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+            if (!hadController) return;
+            if (!player.playing) location.reload();
+            else toast('Има нова версия на приложението.', { duration: 15000, action: { label: 'Обнови', run: () => location.reload() } });
+        });
     }
     // Reopen the last book after a reload while listening
     if (location.hash === '#play') {
