@@ -101,11 +101,16 @@ jobs:
           # Update the existing release in place (safe when two builds finish close together)
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             gh release upload "$TAG" release/Razkazvach.apk --clobber --repo "$REPO"
-            gh release edit "$TAG" --repo "$REPO" --title "$TITLE" --notes "$NOTES" --prerelease
+            # --draft=false also publishes a release left as a draft by an interrupted run
+            # (and recreates the tag at this commit if it went missing)
+            gh release edit "$TAG" --repo "$REPO" --title "$TITLE" --notes "$NOTES" --prerelease --draft=false --target "${{ github.sha }}"
           else
             gh release create "$TAG" release/Razkazvach.apk --repo "$REPO" --target "${{ github.sha }}" \
               --prerelease --title "$TITLE" --notes "$NOTES" \
             || gh release upload "$TAG" release/Razkazvach.apk --clobber --repo "$REPO"
           fi
+          # Fail loudly if the public download link does not work
+          gh release view "$TAG" --repo "$REPO" --json isDraft,assets --jq '.isDraft, (.assets[].name)'
+          test "$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft)" = "false"
           echo "### APK ${V_NAME}" >> "$GITHUB_STEP_SUMMARY"
           echo "https://github.com/${REPO}/releases/download/${TAG}/Razkazvach.apk" >> "$GITHUB_STEP_SUMMARY"
