@@ -162,10 +162,8 @@ function base64ToBytes(b64) {
 
 const CLOUD_BASE = 'https://texttospeech.googleapis.com/v1';
 
-export const cloudAudioFormat = (() => {
-    const a = document.createElement('audio');
-    return a.canPlayType('audio/ogg; codecs="opus"') ? { enc: 'OGG_OPUS', mime: 'audio/ogg' } : { enc: 'MP3', mime: 'audio/mpeg' };
-})();
+// MP3 plays everywhere (Opera, Huawei WebView, Safari); size is about the same as Opus here.
+export const cloudAudioFormat = { enc: 'MP3', mime: 'audio/mpeg' };
 
 export async function cloudVoices(apiKey, lang) {
     const locale = LOCALES[lang] || lang;

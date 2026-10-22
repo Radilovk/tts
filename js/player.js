@@ -522,7 +522,7 @@ export class Player extends EventTarget {
             this._emit('time');
         });
         a.addEventListener('ended', async () => {
-            if (!this.playing || !this.current) return;
+            if (unlockClip() || !this.playing || !this.current) return;
             const done = this.current;
             this.history.push(done);
             if (this.history.length > 30) this.history.shift();
@@ -547,7 +547,10 @@ export class Player extends EventTarget {
             this._emit('save');
             this._playSpec(next, session);
         });
+        // The silent clip used to unlock audio on the first tap is not playback
+        const unlockClip = () => (a.currentSrc || a.src || '').startsWith('data:');
         a.addEventListener('pause', () => {
+            if (unlockClip()) return;
             // Paused externally (headphones unplugged, lock screen)
             if (this.playing && !a.ended && this.engine !== 'device' && !this.loading) {
                 this.playing = false;
@@ -556,6 +559,7 @@ export class Player extends EventTarget {
             }
         });
         a.addEventListener('play', () => {
+            if (unlockClip()) return;
             if (!this.playing) { this.playing = true; this._emit('state'); }
         });
     }

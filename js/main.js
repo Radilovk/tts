@@ -467,6 +467,7 @@ function updateMini() {
 
 async function startPlayback() {
     if (!currentBook) return;
+    if (!player.current) unlockAudio(player.audio);
     const st = effectiveSettings();
     if (st.engine === 'cloud' && (!st.apiKey || !settings.cloudReady)) {
         openCloudSetup({ thenPlay: true });
@@ -1140,12 +1141,36 @@ const SAMPLES = {
 };
 
 let previewAudio = null;
+
+// Some browsers (Opera, Huawei) only allow sound that starts inside the tap itself.
+// Starting a silent clip during the tap unlocks the element for the real audio
+// that arrives a few seconds later from the voice service.
+const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+function unlockAudio(el) {
+    if (el.dataset.unlocked) return;
+    el.dataset.unlocked = '1';
+    const had = el.src;
+    if (had) return;
+    el.src = SILENT_WAV;
+    el.play().then(() => el.pause()).catch(() => {});
+}
+
+function playOrReport(el) {
+    return el.play().catch((e) => {
+        toast(e.name === 'NotAllowedError'
+            ? 'Браузърът спря звука. Натиснете „Чуй“ още веднъж.'
+            : 'Аудиото не може да се възпроизведе: ' + e.message, { error: true });
+    });
+}
 async function previewVoice(btn) {
     const lang = currentLang();
     const text = SAMPLES[lang] || SAMPLES.en;
     const st = effectiveSettings();
     if (player.playing) player.pause();
     previewAudio?.pause();
+    // Created and unlocked inside the tap, filled when the audio arrives
+    const audioEl = new Audio();
+    if (st.engine !== 'device') unlockAudio(audioEl);
     if (st.engine === 'device' && isNative) {
         const v = deviceVoices(lang).find((x) => x.voiceURI === st.deviceVoice) || deviceVoices(lang)[0];
         Native.speak({ id: 'preview', text, voice: v?.voiceURI || '', lang: LOCALES[lang] || lang, rate: player.rate, pitch: 1, flush: true }).catch((e) => toast(e.message, { error: true }));
@@ -1180,9 +1205,10 @@ async function previewVoice(btn) {
             rec = { key, blob, dur: 0, chars: text.length, bookId: '_preview' };
             await db.audioPut(rec);
         }
-        previewAudio = new Audio(URL.createObjectURL(rec.blob));
+        previewAudio = audioEl;
+        previewAudio.src = URL.createObjectURL(rec.blob);
         previewAudio.playbackRate = player.rate;
-        previewAudio.play();
+        await playOrReport(previewAudio);
     } catch (e) {
         toast(e.message, { error: true, duration: 7000 });
     } finally {
@@ -1286,7 +1312,7 @@ function openCloudSetup(opts = {}) {
         previewAudio?.pause();
         if (!sampleUrl) sampleUrl = URL.createObjectURL(diag.sample);
         previewAudio = new Audio(sampleUrl);
-        previewAudio.play().catch(() => {});
+        playOrReport(previewAudio);
     };
 
     const check = async () => {
