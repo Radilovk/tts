@@ -5,7 +5,8 @@
 
 import * as db from './db.js';
 import { buildChapterModel, chunkBoundaries, nextBoundary, chunkText, charLen, LOCALES } from './text.js';
-import { cloudSynthesize, geminiSynthesize, cloudTier, deviceVoices, PRICES } from './engines.js';
+import { cloudSynthesize, geminiSynthesize, geminiCost, cloudTier, deviceVoices, PRICES } from './engines.js';
+import { pendingKeys } from './batch.js';
 import { recordUsage, monthlyCloudChars, monthlyGeminiUsd } from './usage.js';
 import { Native } from './native.js';
 
@@ -265,6 +266,20 @@ export class Player extends EventTarget {
         if (wasPlaying) this.play();
     }
 
+    // All fixed chunks of chapter c for the current voice settings.
+    async chapterSpecs(c) {
+        await this.ensureChapter(c);
+        const m = this.model(c);
+        const starts = chunkBoundaries(m, CHUNK_CHARS[this.engine] || CHUNK_CHARS.gemini);
+        const out = [];
+        for (let i = 0; i < starts.length; i++) {
+            const s1 = i + 1 < starts.length ? starts[i + 1] : m.sentences.length;
+            const spec = await this._spec(c, starts[i], s1);
+            if (spec) out.push(spec);
+        }
+        return out;
+    }
+
     // Synthesize a whole chapter ahead of time (for offline listening).
     async prepareChapter(c, onProgress) {
         await this.ensureChapter(c);
@@ -327,7 +342,9 @@ export class Player extends EventTarget {
                 let s1 = nextBoundary(starts, s, m.sentences.length);
                 let spec = await this._spec(c, s, s1);
                 if (!spec) { s = s1; continue; }
-                if (fastStart && spec.chars > FAST_START_CHARS * 1.5 && !(await db.audioHas(spec.key))) {
+                // No fast-start split for a chunk that is being prepared at half price:
+                // waiting for it is the whole point of economy mode
+                if (fastStart && spec.chars > FAST_START_CHARS * 1.5 && !pendingKeys().has(spec.key) && !(await db.audioHas(spec.key))) {
                     // Start quickly with a short piece; the rest follows while it plays
                     spec = await this._spec(c, s, this._fastSplit(m, s, s1));
                 }
@@ -380,9 +397,14 @@ export class Player extends EventTarget {
 
     async _synthesize(spec) {
         const st = this.getSettings();
-        if (!st.apiKey) throw new Error('Добавете Google API ключ в настройките или изберете гласа на устройството.');
+        const freeKey = st.engine === 'gemini' ? usableFreeKey(st) : '';
+        if (!st.apiKey && !freeKey) throw new Error('Добавете Google API ключ в настройките или изберете гласа на устройството.');
         const lang = this._lang();
-        this._checkSpendingCap(st, spec);
+        // Economy mode: this part is already being prepared at half price
+        if (st.engine === 'gemini' && st.geminiEconomy && !this.allowFullPrice && pendingKeys().has(spec.key)) {
+            throw Object.assign(new Error('Тази част се подготвя на половин цена — обикновено до няколко минути.'), { reason: 'BATCH_PENDING' });
+        }
+        if (!freeKey) this._checkSpendingCap(st, spec);
         const t0 = performance.now();
         let result;
         if (st.engine === 'cloud') {
@@ -390,16 +412,32 @@ export class Player extends EventTarget {
             result = await cloudSynthesize({ apiKey: st.apiKey, text: spec.text, voice: st.cloudVoice, locale });
             recordUsage({ engine: 'cloud', tier: cloudTier(st.cloudVoice), chars: spec.text.length });
         } else {
-            result = await geminiSynthesize({
-                apiKey: st.apiKey, model: st.geminiModel, text: spec.text, voice: st.geminiVoice,
-                style: st.style, customStyle: st.customStyle, lang,
+            const req = { model: st.geminiModel, text: spec.text, voice: st.geminiVoice, style: st.style, customStyle: st.customStyle, lang };
+            let free = false;
+            if (freeKey) {
+                // Free daily quota first (key from a project without billing)
+                try {
+                    result = await geminiSynthesize({ ...req, apiKey: freeKey, retry429: false });
+                    free = true;
+                } catch (e) {
+                    if (e.status !== 429 && e.status !== 403) throw e;
+                    markFreeKeyExhausted();
+                    if (!st.apiKey) throw new Error('Безплатният дневен лимит на Gemini е изчерпан. Утре продължава безплатно.');
+                }
+            }
+            if (!result) {
+                this._checkSpendingCap(st, spec);
+                result = await geminiSynthesize({ ...req, apiKey: st.apiKey });
+            }
+            recordUsage({
+                engine: 'gemini', inTokens: result.inTokens, outTokens: result.outTokens,
+                usd: free ? 0 : geminiCost(st.geminiModel, result.inTokens, result.outTokens), mode: free ? 'free' : '',
             });
-            recordUsage({ engine: 'gemini', inTokens: result.inTokens, outTokens: result.outTokens });
         }
         const took = (performance.now() - t0) / 1000;
         const prev = this.synthSeconds[st.engine];
         this.synthSeconds[st.engine] = prev ? prev * 0.6 + took * 0.4 : took;
-        const dur = await blobDuration(result.blob);
+        const dur = result.dur || await blobDuration(result.blob);
         return { key: spec.key, blob: result.blob, dur, chars: spec.chars, bookId: this.book.id };
     }
 
@@ -766,6 +804,24 @@ export class Player extends EventTarget {
             artwork,
         });
     }
+}
+
+// ---------- free Gemini key (project without billing) ----------
+
+const FREE_KEY_STATE = 'rz_free_key_exhausted';
+
+function todayPacific() {
+    // Gemini free quotas reset at midnight Pacific time
+    return new Date(Date.now() - 8 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+export function usableFreeKey(st) {
+    if (!st.geminiFreeKey) return '';
+    return localStorage.getItem(FREE_KEY_STATE) === todayPacific() ? '' : st.geminiFreeKey;
+}
+
+function markFreeKeyExhausted() {
+    localStorage.setItem(FREE_KEY_STATE, todayPacific());
 }
 
 function blobDuration(blob) {

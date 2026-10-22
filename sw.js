@@ -1,10 +1,10 @@
 /* Service worker: app shell offline + runtime cache for fonts and parser libraries.
    Voice API calls are never cached here — audio is cached in IndexedDB by the app. */
 
-const CACHE = 'razkazvach-v7';
+const CACHE = 'razkazvach-v8';
 const SHELL = [
     './', './index.html', './css/app.css', './manifest.json',
-    './js/main.js', './js/player.js', './js/engines.js', './js/parsers.js', './js/text.js', './js/db.js', './js/usage.js', './js/translate.js', './js/native.js', './js/config.js',
+    './js/main.js', './js/player.js', './js/engines.js', './js/parsers.js', './js/text.js', './js/db.js', './js/usage.js', './js/translate.js', './js/native.js', './js/batch.js', './js/config.js',
     './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png',
 ];
 const RUNTIME_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com', 'cdn.jsdelivr.net'];

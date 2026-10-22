@@ -7,9 +7,12 @@ import { LANG_NAMES, LOCALES, charLen } from './text.js';
 import {
     GEMINI_VOICES, GEMINI_DEFAULT_MODEL, NARRATION_STYLES, PRICES,
     cloudVoices, cloudSynthesize, cloudDiagnose, CLOUD_LINKS, geminiSynthesize, geminiModels, deviceVoices, onDeviceVoicesChanged, cloudTier,
+    cheapestGeminiModel, geminiCost,
 } from './engines.js';
 import { translateChapter, translationCost, deviceTranslationAvailable, TRANSLATE_DEFAULT_MODEL } from './translate.js';
 import { isNative, Native, nativeFileUrl, loadNativeVoices, nativeEngines } from './native.js';
+import { submitChapter, pollBatches, hasJobs, pendingChapters, batchEstimate } from './batch.js';
+import { usableFreeKey } from './player.js';
 import { usageSummary, resetUsage, hourlyCost, freeHoursPerMonth, recordUsage } from './usage.js';
 
 const $ = (s, root = document) => root.querySelector(s);
@@ -18,11 +21,11 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '1.7';
+export const APP_VERSION = '1.8';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
-    engine: null, apiKey: '', cloudVoice: '', geminiVoice: 'Charon', geminiModel: GEMINI_DEFAULT_MODEL,
+    engine: null, apiKey: '', cloudVoice: '', geminiVoice: 'Charon', geminiModel: '', geminiEconomy: true, geminiFreeKey: '',
     style: 'intriguing', customStyle: '', deviceVoice: '', lang: 'auto', rate: 1, lookahead: 2,
     cacheMB: 500, theme: 'system', readerSize: 19, view: 'cover', cloudReady: false, autoTranslate: 'bg',
     freeOnly: true, geminiCapUsd: 2,
@@ -40,6 +43,8 @@ function loadSettings() {
     try { s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}'); } catch {}
     // Migrate the key from the previous version of the app
     if (!s.apiKey) s.apiKey = localStorage.getItem('gemini_tts_api_key') || '';
+    // Earlier versions stored the default model explicitly: switch them to "cheapest"
+    if (s.geminiModel === GEMINI_DEFAULT_MODEL && !s.geminiModelChosen) s.geminiModel = '';
     s = { ...DEFAULTS, ...s };
     if (!s.engine) s.engine = (s.apiKey || preconfiguredKey()) ? 'cloud' : 'device';
     return s;
@@ -49,8 +54,28 @@ function saveSettings() {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 }
 
+// Gemini models available to the key (cached so the cheapest is known at startup)
+function knownGeminiModels() {
+    try { return JSON.parse(localStorage.getItem('rz_gemini_models') || '[]'); } catch { return []; }
+}
+
+function rememberGeminiModels(list) {
+    localStorage.setItem('rz_gemini_models', JSON.stringify(list || []));
+}
+
+function activeGeminiModel() {
+    return settings.geminiModel || cheapestGeminiModel(knownGeminiModels());
+}
+
+function geminiCardPrice() {
+    const m = activeGeminiModel();
+    return settings.geminiEconomy
+        ? `от ~${hourlyCost('gemini', m, true).toFixed(2)} $/ч`
+        : `~${hourlyCost('gemini', m, false).toFixed(2)} $/ч`;
+}
+
 function effectiveSettings() {
-    return { ...settings, apiKey: settings.apiKey || preconfiguredKey() };
+    return { ...settings, apiKey: settings.apiKey || preconfiguredKey(), geminiModel: activeGeminiModel() };
 }
 
 function applyTheme() {
@@ -771,7 +796,7 @@ function openBookMenu() {
                 ${costRow('Език', LANG_NAMES[currentBook.lang] || currentBook.lang)}
                 ${costRow('Цена с гласа на устройството', '0 $')}
                 ${costRow('Цена с Google HD', hours <= freeHrs ? 'безплатно (в месечния лимит)' : '~' + fmtUsd(Math.max(0, hours - freeHrs) * hourlyCost('cloud')))}
-                ${costRow('Цена с Gemini разказвач', '~' + fmtUsd(hours * hourlyCost('gemini')))}
+                ${costRow('Цена с Gemini разказвач', '~' + fmtUsd(hours * hourlyCost('gemini', activeGeminiModel(), settings.geminiEconomy)) + (settings.geminiEconomy ? ' (−50%)' : ''))}
             </div>
             ${currentBook.lang !== 'bg' ? `<div class="group">
                 <div class="group-title">Превод</div>
@@ -782,6 +807,7 @@ function openBookMenu() {
                 <p class="hint" id="transHint">Превежда се само главата, която слушате, и преводът се пази — всяка глава се плаща веднъж. Цялата книга: ${approxUsd(translationCost(currentBook.totalChars))} (Gemini Flash-Lite).</p>
             </div>` : ''}
             <div class="group list">
+                ${settings.engine === 'gemini' ? `<button class="list-item" data-a="batch"><span class="grow">Подготви следващите 3 глави на ½ цена<small>Gemini Batch: ~${approxUsd(batchEstimate(activeGeminiModel(), nextChaptersChars(3)))} · готово обикновено до няколко часа${pendingChapters(currentBook.id).length ? ` · в момента се подготвят ${pendingChapters(currentBook.id).length}` : ''}</small></span></button>` : ''}
                 <button class="list-item" data-a="prepare"><span class="grow">Подготви текущата глава за офлайн<small>Генерира цялата глава предварително (същата цена като слушане)</small></span></button>
                 <button class="list-item" data-a="restart"><span class="grow">Започни отначало</span></button>
                 <button class="list-item danger" data-a="delete"><span class="grow">Премахни книгата</span></button>
@@ -803,6 +829,9 @@ function openBookMenu() {
             if (!a) return;
             if (a === 'delete') {
                 if (confirm(`Да премахна ли „${currentBook.title}“ и запазеното аудио?`)) { closeSheet(); deleteBook(currentBook.id); }
+            } else if (a === 'batch') {
+                closeSheet();
+                prepareAhead(3, true);
             } else if (a === 'restart') {
                 closeSheet();
                 player.seekTo(0, 0);
@@ -842,7 +871,7 @@ function renderSettings(body) {
     const engines = [
         ['device', 'Гласът на телефона', 'Безплатно и офлайн. Качеството зависи от устройството.', '0 $', 'завинаги'],
         ['cloud', 'Google HD гласове', `Chirp 3 HD — много естествени гласове. ~${freeHrs} ч слушане месечно безплатно.`, 'безплатно', `после ~${hourlyCost('cloud').toFixed(2)} $/ч`],
-        ['gemini', 'Gemini разказвач', 'Най-жива интонация: разказвачът „играе“ текста според избран стил.', `~${hourlyCost('gemini').toFixed(2)} $/ч`, 'плаща се само чутото'],
+        ['gemini', 'Gemini разказвач', 'Най-жива интонация: разказвачът „играе“ текста според избран стил.', geminiCardPrice(), settings.geminiEconomy ? 'до −50% с пестелив режим' : 'плаща се само чутото'],
     ];
     body.innerHTML = `
         <section class="group">
@@ -994,7 +1023,7 @@ function renderUsage(box) {
     box.innerHTML = u.rows.map((r) => `
         <div class="usage-item">
             <div class="top"><span>${r.label}</span><span>${fmtUsd(r.cost)}</span></div>
-            <div class="sub">${r.translated ? `${fmtNum(r.used)} ${r.unit}` : r.minutes != null ? (r.minutes < 1 ? '< 1 мин аудио' : `~${Math.round(r.minutes)} мин аудио`) : `${fmtNum(r.used)} от ${fmtNum(r.free)} безплатни ${r.unit}`}</div>
+            <div class="sub">${r.translated ? `${fmtNum(r.used)} ${r.unit}` : r.minutes != null ? (r.minutes < 1 ? '< 1 мин аудио' : `~${Math.round(r.minutes)} мин аудио`) + (r.note ? ` (${r.note})` : '') : `${fmtNum(r.used)} от ${fmtNum(r.free)} безплатни ${r.unit}`}</div>
             ${r.free ? `<div class="progress-track"><i style="width:${Math.min(100, r.used / r.free * 100).toFixed(1)}%"></i></div>` : ''}
         </div>`).join('') + `
         <div class="usage-total"><span>Общо (ориентировъчно)</span><span>${fmtUsd(u.total)}</span></div>
@@ -1102,9 +1131,22 @@ function renderVoiceGroup(box, lang) {
                 <button class="pill ${settings.style === 'custom' ? 'on' : ''}" data-style="custom">Свой</button>
             </div>
             ${settings.style === 'custom' ? `<textarea class="input" id="setCustomStyle" style="margin-top:10px" placeholder="Напр.: Чети като стар моряк, който разказва край огъня — бавно, с дрезгав глас и загадъчни паузи">${esc(settings.customStyle)}</textarea>` : ''}
+            <div class="group-title" style="margin-top:18px">Пестене</div>
+            <div class="row">
+                <span class="row-label">Пестелив режим (−50%)<small>Следващата глава се подготвя предварително през Batch на Google на половин цена. Плаща се най-много една глава напред.</small></span>
+                <select class="select" id="setEconomy">
+                    <option value="1" ${settings.geminiEconomy ? 'selected' : ''}>Вкл.</option>
+                    <option value="0" ${!settings.geminiEconomy ? 'selected' : ''}>Изкл.</option>
+                </select>
+            </div>
+            <div class="group-title" style="margin-top:14px">Безплатен ключ (по избор)</div>
+            <input class="input" id="setFreeKey" type="password" autocomplete="off" spellcheck="false" placeholder="AIza… от проект без плащане" value="${esc(settings.geminiFreeKey)}">
+            <p class="hint">Ключ от <b>нов проект без свързано плащане</b> използва безплатния дневен лимит на Google. Разказвачът първо чете с него, а когато лимитът свърши за деня, минава на основния ключ. Създава се в <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">AI Studio</a> → Create API key → „Create in new project“.${settings.geminiFreeKey && !usableFreeKey(settings) ? ' <b>Днешният безплатен лимит е изчерпан.</b>' : ''}</p>
             <div class="group-title" style="margin-top:18px">Модел</div>
-            <select class="select" id="setGeminiModel"><option value="${esc(settings.geminiModel)}">${esc(settings.geminiModel)}</option></select>
-            <p class="hint">Flash моделите са 2× по-евтини от Pro и звучат почти толкова добре. В безплатния план на AI Studio има дневен лимит на заявките.</p>`;
+            <select class="select" id="setGeminiModel"></select>
+            <p class="hint">„Автоматично“ избира най-евтиния модел, достъпен за ключа. Цените са по ценоразписа на Google и може да се променят.</p>`;
+        $('#setEconomy', box).onchange = (e) => { settings.geminiEconomy = e.target.value === '1'; saveSettings(); rerenderSheet(renderSettings); };
+        $('#setFreeKey', box).onchange = (e) => { settings.geminiFreeKey = e.target.value.trim(); localStorage.removeItem('rz_free_key_exhausted'); saveSettings(); };
         $('#setGeminiVoice', box).onchange = (e) => { settings.geminiVoice = e.target.value; saveSettings(); player.voiceChanged(); };
         $('#setStyle', box).onclick = (e) => {
             const p = e.target.closest('[data-style]');
@@ -1117,14 +1159,29 @@ function renderVoiceGroup(box, lang) {
         const custom = $('#setCustomStyle', box);
         if (custom) custom.onchange = () => { settings.customStyle = custom.value.trim(); saveSettings(); player.voiceChanged(); };
         const modelSel = $('#setGeminiModel', box);
-        modelSel.onchange = () => { settings.geminiModel = modelSel.value; saveSettings(); player.voiceChanged(); };
-        const fillModels = (list) => {
-            const all = [...new Set([settings.geminiModel, GEMINI_DEFAULT_MODEL, ...list])];
-            modelSel.innerHTML = all.map((m) => `<option value="${esc(m)}" ${m === settings.geminiModel ? 'selected' : ''}>${esc(m)}</option>`).join('');
+        modelSel.onchange = () => {
+            settings.geminiModel = modelSel.value;
+            settings.geminiModelChosen = !!modelSel.value;
+            saveSettings();
+            player.voiceChanged();
+            rerenderSheet(renderSettings);
         };
-        if (geminiModelList) fillModels(geminiModelList);
-        else if (effectiveSettings().apiKey) {
-            geminiModels(effectiveSettings().apiKey).then((l) => { geminiModelList = l; fillModels(l); }).catch(() => {});
+        const perHour = (m) => `${hourlyCost('gemini', m, settings.geminiEconomy).toFixed(2)} $/ч`;
+        const fillModels = (list) => {
+            const all = [...new Set([...(settings.geminiModel ? [settings.geminiModel] : []), ...list.filter((m) => !/native|live|dialog/.test(m)), GEMINI_DEFAULT_MODEL])];
+            const cheapest = cheapestGeminiModel(list.length ? list : [GEMINI_DEFAULT_MODEL]);
+            modelSel.innerHTML = `<option value="" ${!settings.geminiModel ? 'selected' : ''}>Автоматично: ${esc(cheapest)} · ${perHour(cheapest)}</option>` +
+                all.map((m) => `<option value="${esc(m)}" ${m === settings.geminiModel ? 'selected' : ''}>${esc(m)} · ${perHour(m)}</option>`).join('');
+        };
+        fillModels(geminiModelList || knownGeminiModels());
+        if (!geminiModelList && effectiveSettings().apiKey) {
+            geminiModels(effectiveSettings().apiKey).then((l) => {
+                geminiModelList = l;
+                rememberGeminiModels(l);
+                fillModels(l);
+                const price = document.querySelector('[data-engine="gemini"] .engine-price');
+                if (price) price.firstChild.textContent = geminiCardPrice();
+            }).catch(() => {});
         }
     }
     const prev = $('[data-preview]', box);
@@ -1376,7 +1433,7 @@ async function testKey(body) {
     const c = res[1].status === 'fulfilled';
     status.innerHTML = `${g ? '✓' : '✕'} Gemini разказвач ${g ? 'работи' : '— ' + esc(res[0].reason?.message || '')}<br>
         ${c ? '✓' : '✕'} Google HD гласове ${c ? 'работят' : '— ' + esc(res[1].reason?.message || '')}`;
-    if (g) geminiModelList = res[0].value;
+    if (g) { geminiModelList = res[0].value; rememberGeminiModels(geminiModelList); }
     if (c) cloudVoiceCache = { bg: res[1].value };
     if (!c && res[1].reason?.reason) status.innerHTML += ' <a href="#" id="keyFix">Поправи</a>';
     const fixLink = $('#keyFix', body);
@@ -1434,7 +1491,12 @@ function bindEvents() {
     $('#btnBack').onclick = hidePlayer;
     $('#btnBookMenu').onclick = openBookMenu;
     $('#btnChapter').onclick = openChapters;
-    $('#btnPlay').onclick = () => (player.playing ? player.pause() : startPlayback());
+    $('#btnPlay').onclick = () => {
+        if (player.playing) {
+            player.allowFullPrice = false;
+            player.pause();
+        } else startPlayback();
+    };
     $('#btnBack15').onclick = () => player.skip(-15);
     $('#btnFwd30').onclick = () => player.skip(30);
     $('#btnPrevCh').onclick = () => goChapter(-1);
@@ -1536,6 +1598,7 @@ function bindEvents() {
     player.addEventListener('state', updatePlayState);
     player.addEventListener('position', updatePlayerUI);
     player.addEventListener('save', scheduleSave);
+    player.addEventListener('position', maybePrepareNext);
     player.addEventListener('translating', (e) => { $('#pStatus').textContent = `Превеждам главата… ${Math.round(e.detail * 100)}%`; });
     player.addEventListener('translated', () => {
         renderedChapter = -1;
@@ -1547,6 +1610,15 @@ function bindEvents() {
     player.addEventListener('error', (e) => {
         const err = e.detail;
         console.error(err);
+        if (err.reason === 'BATCH_PENDING') {
+            waitingForBatch = true;
+            startBatchPolling();
+            toast(err.message, {
+                duration: 12000,
+                action: { label: 'Чети сега (пълна цена)', run: () => { player.allowFullPrice = true; player.play(); } },
+            });
+            return;
+        }
         if (err.reason === 'APP_CAP') {
             settings.engine = 'device';
             saveSettings();
@@ -1588,6 +1660,67 @@ function persistNow() {
 }
 
 // ==================== Boot ====================
+
+// ==================== Gemini economy (Batch, half price) ====================
+
+function nextChaptersChars(n) {
+    if (!currentBook) return 0;
+    let sum = 0;
+    for (let c = player.pos.c + 1; c <= player.pos.c + n && c < currentBook.chapterChars.length; c++) sum += currentBook.chapterChars[c];
+    return sum;
+}
+
+const submitted = new Set();
+let waitingForBatch = false;
+
+async function prepareAhead(n, manual) {
+    const st = effectiveSettings();
+    if (!currentBook || st.engine !== 'gemini' || !st.apiKey) {
+        if (manual) toast('Пестеливият режим работи с Gemini разказвача и основния API ключ.', { error: true });
+        return;
+    }
+    let queued = 0;
+    try {
+        for (let c = player.pos.c + 1; c <= player.pos.c + n && c < player.chapters.length; c++) {
+            const id = `${currentBook.id}|${c}|${st.geminiModel}|${st.geminiVoice}|${st.style}`;
+            if (submitted.has(id) && !manual) continue;
+            submitted.add(id);
+            queued += await submitChapter(player, c, st);
+        }
+    } catch (e) {
+        if (manual) toast('Партидата не беше приета: ' + e.message, { error: true });
+        return;
+    }
+    if (manual) toast(queued ? `Подготвям ${queued} откъса на половин цена. Ще ви кажа, когато са готови.` : 'Следващите глави вече са готови или се подготвят.');
+    if (queued) startBatchPolling();
+}
+
+// While listening with the Gemini narrator, prepare the next chapter in time
+function maybePrepareNext() {
+    if (!settings.geminiEconomy || settings.engine !== 'gemini' || !player.playing || !currentBook) return;
+    const m = player.model(player.pos.c);
+    if (player.pos.s >= m.sentences.length * 0.4) prepareAhead(1, false);
+}
+
+let batchTimer = null;
+function startBatchPolling() {
+    if (batchTimer || !hasJobs()) return;
+    const tick = () => pollBatches(effectiveSettings().apiKey, (job, stored, error) => {
+        if (error) return toast(`Подготовката на глава ${job.c + 1} не успя (${error}). Ще се чете нормално.`, { error: true });
+        if (!stored) return;
+        const title = currentBook?.id === job.bookId ? currentBook.chapterTitles[job.c] : '';
+        if (waitingForBatch && !player.playing) {
+            waitingForBatch = false;
+            toast(`Готово на половин цена: ${title || 'глава ' + (job.c + 1)}.`, { duration: 12000, action: { label: 'Слушай', run: () => startPlayback() } });
+        } else {
+            toast(`Подготвена на половин цена: ${title || 'глава ' + (job.c + 1)}.`);
+        }
+    }).finally(() => {
+        if (!hasJobs()) { clearInterval(batchTimer); batchTimer = null; }
+    });
+    batchTimer = setInterval(() => { if (!document.hidden) tick(); }, 60000);
+    setTimeout(tick, 15000);
+}
 
 // ==================== Android app ====================
 
@@ -1639,6 +1772,8 @@ async function init() {
     bindEvents();
     updateSleepChip();
     await renderLibrary();
+    startBatchPolling();
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) startBatchPolling(); });
     if (isNative) initNative();
     else if ('serviceWorker' in navigator && location.protocol !== 'file:') {
         navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
