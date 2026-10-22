@@ -5,8 +5,8 @@
 
 import * as db from './db.js';
 import { buildChapterModel, chunkBoundaries, nextBoundary, chunkText, charLen, LOCALES } from './text.js';
-import { cloudSynthesize, geminiSynthesize, cloudTier, deviceVoices } from './engines.js';
-import { recordUsage } from './usage.js';
+import { cloudSynthesize, geminiSynthesize, cloudTier, deviceVoices, PRICES } from './engines.js';
+import { recordUsage, monthlyCloudChars, monthlyGeminiUsd } from './usage.js';
 
 const CHUNK_CHARS = { cloud: 1400, gemini: 1500 };
 const FAST_START_CHARS = 320;
@@ -265,10 +265,27 @@ export class Player extends EventTarget {
         return p;
     }
 
+    // Hard monthly cap enforced in the app: Google itself only offers per-minute
+    // quotas, so this is what keeps a month of listening inside the budget.
+    _checkSpendingCap(st, spec) {
+        const capError = (msg) => Object.assign(new Error(msg), { reason: 'APP_CAP' });
+        if (st.engine === 'cloud' && st.freeOnly) {
+            const tier = cloudTier(st.cloudVoice);
+            const free = (PRICES.cloud[tier] || PRICES.cloud.Other).free;
+            if (monthlyCloudChars(tier) + spec.text.length > free * 0.95) {
+                throw capError('Безплатният месечен лимит на Google HD е почти изчерпан — спирам, за да не се таксува.');
+            }
+        }
+        if (st.engine === 'gemini' && st.geminiCapUsd > 0 && monthlyGeminiUsd() >= st.geminiCapUsd) {
+            throw capError(`Достигнат месечен лимит за Gemini (${st.geminiCapUsd} $).`);
+        }
+    }
+
     async _synthesize(spec) {
         const st = this.getSettings();
         if (!st.apiKey) throw new Error('Добавете Google API ключ в настройките или изберете гласа на устройството.');
         const lang = this._lang();
+        this._checkSpendingCap(st, spec);
         let result;
         if (st.engine === 'cloud') {
             const locale = st.cloudVoice.split('-').slice(0, 2).join('-') || LOCALES[lang];
