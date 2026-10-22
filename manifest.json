@@ -1,23 +1,31 @@
 {
-    "name": "Gemini TTS",
-    "short_name": "TTS",
-    "description": "Уеб приложение за синтез на реч чрез Gemini TTS",
+    "name": "Разказвач — аудиокниги от вашите файлове",
+    "short_name": "Разказвач",
+    "description": "Заредете EPUB, PDF, FB2, DOCX или TXT и слушайте книгата с естествен глас.",
     "start_url": "./index.html",
+    "scope": "./",
     "display": "standalone",
-    "background_color": "#f1f5f9",
-    "theme_color": "#6366f1",
+    "background_color": "#F4EFE7",
+    "theme_color": "#F4EFE7",
     "orientation": "portrait",
     "lang": "bg",
+    "categories": ["books", "education", "entertainment"],
     "icons": [
+        { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+        { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+        { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+        { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+    ],
+    "file_handlers": [
         {
-            "src": "icons/icon-192.png",
-            "sizes": "192x192",
-            "type": "image/png"
-        },
-        {
-            "src": "icons/icon-512.png",
-            "sizes": "512x512",
-            "type": "image/png"
+            "action": "./index.html",
+            "accept": {
+                "application/epub+zip": [".epub"],
+                "application/pdf": [".pdf"],
+                "application/x-fictionbook+xml": [".fb2"],
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
+                "text/plain": [".txt", ".md"]
+            }
         }
     ]
 }

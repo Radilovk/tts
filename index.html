@@ -2,492 +2,175 @@
 <html lang="bg">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
-    <meta name="theme-color" content="#6366f1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#F4EFE7" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#141210" media="(prefers-color-scheme: dark)">
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="description" content="Четец на глас с Google AI Studio TTS (Gemini 2.5) — директно в браузъра, без бекенд">
-    <title>Google AI Studio TTS — Четец на глас</title>
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="description" content="Разказвач — заредете книга (EPUB, PDF, FB2, DOCX, TXT) и я слушайте с естествен глас. Изключително евтино: безплатен глас на устройството, 1M безплатни знака месечно с Google HD, кеш на аудиото.">
+    <title>Разказвач</title>
     <link rel="manifest" href="manifest.json">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔊</text></svg>">
+    <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="icons/icon-192.png">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Literata:opsz,wght@7..72,400;7..72,500;7..72,600&family=Inter:wght@400;500;600&display=swap&subset=cyrillic" rel="stylesheet">
+    <link rel="stylesheet" href="css/app.css">
+    <script src="js/config.js"></script>
 </head>
 <body>
-    <!-- Header -->
-    <header class="app-header">
-        <div class="header-left">
-            <span class="app-icon">🔊</span>
-            <h1 class="app-title">AI Studio TTS</h1>
-        </div>
-        <div class="header-right">
-            <button id="btnLibrary" class="icon-btn" title="Библиотека" aria-label="Библиотека">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+    <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+        <defs>
+            <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.14v13.72a1 1 0 0 0 1.52.85l10.6-6.86a1 1 0 0 0 0-1.7L9.52 4.29A1 1 0 0 0 8 5.14Z" fill="currentColor"/></symbol>
+            <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6" y="4.5" width="4" height="15" rx="1.2" fill="currentColor"/><rect x="14" y="4.5" width="4" height="15" rx="1.2" fill="currentColor"/></symbol>
+            <symbol id="i-back15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1"/><path d="M3.5 3.5v4h4"/><text x="12" y="15.6" text-anchor="middle" font-size="7.5" font-family="Inter, sans-serif" font-weight="600" fill="currentColor" stroke="none">15</text></symbol>
+            <symbol id="i-fwd30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1"/><path d="M20.5 3.5v4h-4"/><text x="12" y="15.6" text-anchor="middle" font-size="7.5" font-family="Inter, sans-serif" font-weight="600" fill="currentColor" stroke="none">30</text></symbol>
+            <symbol id="i-prev" viewBox="0 0 24 24"><path d="M6 5v14M18.5 5.6v12.8a.8.8 0 0 1-1.25.66L8.6 12.66a.8.8 0 0 1 0-1.32l8.65-6.4a.8.8 0 0 1 1.25.66Z" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+            <symbol id="i-next" viewBox="0 0 24 24"><path d="M18 5v14M5.5 5.6v12.8a.8.8 0 0 0 1.25.66l8.65-6.4a.8.8 0 0 0 0-1.32L6.75 4.94A.8.8 0 0 0 5.5 5.6Z" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+            <symbol id="i-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></symbol>
+            <symbol id="i-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1" fill="currentColor"/><circle cx="4.5" cy="12" r="1" fill="currentColor"/><circle cx="4.5" cy="18" r="1" fill="currentColor"/></symbol>
+            <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></symbol>
+            <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></symbol>
+            <symbol id="i-text" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 6h16M4 10h16M4 14h10M4 18h13"/></symbol>
+            <symbol id="i-cover" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 3v18"/></symbol>
+            <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z"/></symbol>
+            <symbol id="i-voice" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2"/></symbol>
+            <symbol id="i-more" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></symbol>
+            <symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+            <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+            <symbol id="i-book" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 6.5C10 5 7.2 4.5 3.5 4.8v13.4c3.7-.3 6.5.2 8.5 1.8 2-1.6 4.8-2.1 8.5-1.8V4.8C16.8 4.5 14 5 12 6.5Z"/><path d="M12 6.5V20"/></symbol>
+        </defs>
+    </svg>
+
+    <!-- ============ Library ============ -->
+    <main id="viewLibrary" class="view view-library">
+        <header class="lib-header">
+            <div>
+                <p class="eyebrow">Аудиокниги от вашите файлове</p>
+                <h1 class="brand">Разказвач</h1>
+            </div>
+            <button id="btnSettings" class="icon-btn" aria-label="Настройки"><svg class="ic"><use href="#i-settings"/></svg></button>
+        </header>
+
+        <section id="continueCard" class="continue hidden" aria-label="Продължи слушането"></section>
+
+        <section id="librarySection" class="library hidden">
+            <div class="section-head">
+                <h2>Библиотека</h2>
+                <span id="libCount" class="muted"></span>
+            </div>
+            <div id="bookGrid" class="book-grid"></div>
+        </section>
+
+        <section id="emptyState" class="empty hidden">
+            <div class="empty-art" aria-hidden="true">
+                <svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="56" fill="var(--accent-soft)"/><path d="M60 42c-7-5-16-6.5-28-5.5v40c12-1 21 .5 28 5.5 7-5 16-6.5 28-5.5v-40c-12-1-21 .5-28 5.5Z" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linejoin="round"/><path d="M60 42v40" stroke="var(--accent)" stroke-width="2.5"/><path d="M92 50c3 3 4.5 6.5 4.5 10s-1.5 7-4.5 10M98 44c5 4.5 7.5 10 7.5 16s-2.5 11.5-7.5 16" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round" opacity=".6"/></svg>
+            </div>
+            <h2>Първата ви аудиокнига е на един файл разстояние</h2>
+            <p class="muted">Заредете EPUB, PDF, FB2, DOCX или TXT. Разказвачът ще я прочете с естествена интонация и ще запомни докъде сте стигнали.</p>
+            <button class="btn btn-primary" data-action="add">
+                <svg class="ic"><use href="#i-plus"/></svg> Добави книга
             </button>
-            <button id="btnHistory" class="icon-btn" title="История" aria-label="История">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-            </button>
-            <button id="btnTheme" class="icon-btn" title="Тема" aria-label="Смяна на тема">
-                <svg class="icon-sun" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-                <svg class="icon-moon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-            </button>
-            <button id="btnSettings" class="icon-btn" title="Настройки" aria-label="Настройки">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-            </button>
-        </div>
-    </header>
+            <ul class="empty-points">
+                <li><b>Безплатно</b> с гласа на телефона</li>
+                <li><b>~20 часа/месец без пари</b> с Google HD гласове</li>
+                <li><b>Всяко изречение се плаща само веднъж</b> — аудиото се пази</li>
+            </ul>
+        </section>
 
-    <!-- Settings Panel (Slide-in) -->
-    <div id="settingsOverlay" class="overlay hidden"></div>
-    <aside id="settingsPanel" class="settings-panel hidden" role="dialog" aria-label="Настройки">
-        <div class="panel-header">
-            <h2>⚙️ Настройки</h2>
-            <button id="btnCloseSettings" class="icon-btn" aria-label="Затвори настройки">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-            </button>
-        </div>
-        <div class="panel-body">
-            <!-- API Key -->
-            <div class="setting-group" id="apiKeyGroup">
-                <label for="apiKey">🔑 API Ключ</label>
-                <div class="input-with-btn">
-                <input type="password" id="apiKey" placeholder="Въведете вашия Google AI Studio API ключ" autocomplete="off" spellcheck="false">
-                    <button id="btnToggleKey" class="icon-btn-sm" title="Покажи/Скрий" aria-label="Покажи или скрий ключа">
-                        <svg class="eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                        <svg class="eye-closed" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-                    </button>
-                </div>
-                <div class="api-key-actions">
-                    <button id="btnTestKey" class="btn btn-outline btn-sm" type="button">🧪 Тествай ключа</button>
-                    <span id="keyStatus" class="key-status"></span>
-                </div>
-                <small class="hint">Ключът се запазва локално в браузъра. <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Вземи безплатен API ключ от Google AI Studio →</a></small>
-            </div>
-
-            <!-- Model -->
-            <div class="setting-group">
-                <label for="modelSelect">🤖 Модел</label>
-                <select id="modelSelect">
-                    <optgroup label="TTS Модели">
-                        <option value="gemini-2.5-flash-preview-tts" selected>Gemini 2.5 Flash TTS (препоръчан)</option>
-                        <option value="gemini-2.5-pro-preview-tts">Gemini 2.5 Pro TTS (по-качествен)</option>
-                    </optgroup>
-                    <optgroup label="⚡ Live модели (WebSocket, ниска латентност)">
-                        <option value="gemini-2.5-flash-exp-native-audio-thinking-dialog">Gemini 2.5 Flash Live (⚡ ~150 ms)</option>
-                    </optgroup>
-                    <optgroup label="🚀 Бързи модели (нативно аудио)">
-                        <option value="gemini-2.0-flash-exp">Gemini 2.0 Flash Exp (🚀 нативно аудио)</option>
-                    </optgroup>
-                </select>
-                <div class="input-with-btn custom-model-row">
-                    <input type="text" id="customModel" placeholder="напр. gemini-2.5-pro-preview-tts" autocomplete="off" spellcheck="false">
-                    <button id="btnClearCustomModel" class="btn btn-outline btn-sm" type="button" title="Изчисти собствения модел">✕</button>
-                </div>
-                <small class="hint">✏️ <strong>Собствен модел</strong> — въведете ID на модел ако не е в списъка. Когато е попълнено, се използва вместо избора по-горе. <a href="https://ai.google.dev/gemini-api/docs/models" target="_blank" rel="noopener noreferrer">Виж наличните модели →</a></small>
-            </div>
-            <div class="setting-group">
-                <label for="modelType">⚙️ Тип на заявката</label>
-                <select id="modelType">
-                    <option value="auto">Автоматично (по името на модела)</option>
-                    <option value="tts">TTS — с гласова конфигурация (speechConfig)</option>
-                    <option value="audio">Нативно аудио — само responseModalities</option>
-                    <option value="live">Live WebSocket (ниска латентност)</option>
-                </select>
-                <small class="hint">Изберете ръчно при собствен модел, чието име не съдържа "tts" или "live".</small>
-            </div>
-
-            <!-- Voice -->
-            <div class="setting-group">
-                <label for="voiceSelect">🎙️ Глас</label>
-                <select id="voiceSelect">
-                    <optgroup label="⭐ Популярни">
-                        <option value="Kore" selected>Kore — Уверен, ясен</option>
-                        <option value="Puck">Puck — Весел, приятен</option>
-                        <option value="Aoede">Aoede — Мелодичен, топъл</option>
-                        <option value="Charon">Charon — Сериозен, информативен</option>
-                        <option value="Fenrir">Fenrir — Дълбок, изразителен</option>
-                        <option value="Zephyr">Zephyr — Ярък, жизнерадостен</option>
-                    </optgroup>
-                    <optgroup label="♀ Женски гласове">
-                        <option value="Zephyr">Zephyr — Ярък</option>
-                        <option value="Kore">Kore — Уверен</option>
-                        <option value="Aoede">Aoede — Мелодичен</option>
-                        <option value="Leda">Leda — Младежки</option>
-                        <option value="Callirrhoe">Callirrhoe — Мек</option>
-                        <option value="Autonoe">Autonoe — Спокоен</option>
-                        <option value="Despina">Despina — Нежен</option>
-                        <option value="Erinome">Erinome — Топъл</option>
-                        <option value="Laomedeia">Laomedeia — Ясен</option>
-                        <option value="Achernar">Achernar — Звучен</option>
-                        <option value="Gacrux">Gacrux — Зрял</option>
-                        <option value="Pulcherrima">Pulcherrima — Красив</option>
-                        <option value="Vindemiatrix">Vindemiatrix — Характерен</option>
-                        <option value="Sadachbia">Sadachbia — Приятен</option>
-                    </optgroup>
-                    <optgroup label="♂ Мъжки гласове">
-                        <option value="Puck">Puck — Весел</option>
-                        <option value="Charon">Charon — Информативен</option>
-                        <option value="Fenrir">Fenrir — Изразителен</option>
-                        <option value="Orus">Orus — Стабилен</option>
-                        <option value="Iapetus">Iapetus — Уверен</option>
-                        <option value="Umbriel">Umbriel — Спокоен</option>
-                        <option value="Algieba">Algieba — Богат</option>
-                        <option value="Algenib">Algenib — Ясен</option>
-                        <option value="Rasalgethi">Rasalgethi — Топъл</option>
-                        <option value="Alnilam">Alnilam — Неутрален</option>
-                        <option value="Schedar">Schedar — Звучен</option>
-                        <option value="Achird">Achird — Приятен</option>
-                        <option value="Zubenelgenubi">Zubenelgenubi — Характерен</option>
-                        <option value="Sadaltager">Sadaltager — Дълбок</option>
-                        <option value="Sulafat">Sulafat — Мек</option>
-                        <option value="Enceladus">Enceladus — Силен</option>
-                    </optgroup>
-                </select>
-                <button id="btnPreviewVoice" class="btn btn-outline btn-sm" type="button">🔊 Чуй примерен глас</button>
-            </div>
-
-            <!-- Speed -->
-            <div class="setting-group">
-                <label for="speedSlider">⚡ Скорост: <span id="speedValue">1.0x</span></label>
-                <input type="range" id="speedSlider" min="0.5" max="2.0" step="0.1" value="1.0">
-                <div class="range-labels">
-                    <span>0.5x</span>
-                    <span>1.0x</span>
-                    <span>2.0x</span>
-                </div>
-            </div>
-
-            <!-- Auto-play -->
-            <div class="setting-group">
-                <label class="toggle-label">
-                    <span>▶️ Автоматично пускане</span>
-                    <input type="checkbox" id="autoPlay" checked>
-                    <span class="toggle-slider"></span>
-                </label>
-            </div>
-
-            <!-- Max chunk size -->
-            <div class="setting-group">
-                <label for="chunkSize">📏 Макс. блок текст</label>
-                <select id="chunkSize">
-                    <option value="300">300 символа (кратко)</option>
-                    <option value="500">500 символа</option>
-                    <option value="1000">1000 символа</option>
-                    <option value="2000">2000 символа</option>
-                    <option value="3000" selected>3000 символа (препоръчан)</option>
-                    <option value="5000">5000 символа (по-плавно)</option>
-                    <option value="8000">8000 символа (минимум прекъсвания)</option>
-                </select>
-                <small class="hint">По-голям блок = по-малко API заявки, по-малко прекъсвания и по-стабилна интонация. Стрийминг стартира звука веднага щом пристигнат първите данни.</small>
-            </div>
-
-            <!-- Voice Prompt -->
-            <div class="setting-group">
-                <label for="voicePrompt">🎭 Инструкции за гласа</label>
-                <textarea id="voicePrompt" rows="3" placeholder="Напр.: Чети плавно и естествено с постоянна интонация, сякаш разказваш история." spellcheck="true" class="voice-prompt-input" aria-describedby="voicePromptHint"></textarea>
-                <small class="hint" id="voicePromptHint">Допълнителни инструкции за стила, тоналността и темпото на четене</small>
-            </div>
-
-            <!-- Translation Toggle -->
-            <div class="setting-group">
-                <label class="toggle-label">
-                    <span>🌐 Превод EN → BG</span>
-                    <input type="checkbox" id="translateToggle">
-                    <span class="toggle-slider"></span>
-                </label>
-            </div>
-
-            <!-- Translation Model -->
-            <div class="setting-group" id="translationModelGroup">
-                <label for="translationModel">🌍 Модел за превод</label>
-                <select id="translationModel">
-                    <option value="gemini-2.5-flash-lite" selected>Gemini 2.5 Flash Lite (бърз)</option>
-                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                    <option value="gemini-2.5-pro">Gemini 2.5 Pro (точен)</option>
-                </select>
-            </div>
-
-            <!-- Language for TTS -->
-            <div class="setting-group">
-                <label for="ttsLanguage">🗣️ Език за четене</label>
-                <select id="ttsLanguage">
-                    <option value="bg" selected>🇧🇬 Български</option>
-                    <option value="en">🇬🇧 English</option>
-                    <option value="de">🇩🇪 Deutsch</option>
-                    <option value="fr">🇫🇷 Français</option>
-                    <option value="es">🇪🇸 Español</option>
-                    <option value="it">🇮🇹 Italiano</option>
-                    <option value="ru">🇷🇺 Русский</option>
-                    <option value="pl">🇵🇱 Polski</option>
-                    <option value="nl">🇳🇱 Nederlands</option>
-                    <option value="pt">🇵🇹 Português</option>
-                    <option value="zh">🇨🇳 中文</option>
-                    <option value="ja">🇯🇵 日本語</option>
-                    <option value="ar">🇸🇦 العربية</option>
-                    <option value="tr">🇹🇷 Türkçe</option>
-                    <option value="auto">🌐 Автоматично (според текста)</option>
-                </select>
-                <small class="hint">Указва на модела на какъв език да произнесе текста</small>
-            </div>
-
-            <!-- PWA Install -->
-            <div class="setting-group" id="pwaInstallGroup" style="display:none">
-                <label>📲 Инсталиране</label>
-                <button id="btnInstallPwa" class="btn btn-primary btn-sm pwa-install-btn" type="button">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                    Инсталирай на телефона
-                </button>
-                <small class="hint">Инсталирайте приложението за бърз достъп от началния екран</small>
-            </div>
-
-            <!-- Clear data -->
-            <div class="setting-group setting-group-buttons">
-                <button id="btnClearHistory" class="btn btn-outline btn-danger" type="button">🗑️ Изчисти историята</button>
-                <button id="btnClearAll" class="btn btn-outline btn-danger" type="button">⚠️ Изчисти всички данни</button>
-            </div>
-
-            <!-- About -->
-            <div class="setting-group about-section">
-                <small class="hint">Google AI Studio TTS — Работи изцяло в браузъра.<br>Powered by Gemini 2.5 TTS. API заявките се изпращат директно от вашето устройство до Google AI.<br>Не се изисква бекенд сървър.</small>
-            </div>
-        </div>
-    </aside>
-
-    <!-- History Panel (Slide-in) -->
-    <div id="historyOverlay" class="overlay hidden"></div>
-    <aside id="historyPanel" class="history-panel hidden" role="dialog" aria-label="История">
-        <div class="panel-header">
-            <h2>📜 История</h2>
-            <button id="btnCloseHistory" class="icon-btn" aria-label="Затвори история">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-            </button>
-        </div>
-        <div class="panel-body">
-            <small class="hint history-hint">💡 Аудио файловете са достъпни само през текущата сесия. Текстът се запазва постоянно.</small>
-            <div id="historyList" class="history-list">
-                <p class="empty-state">Все още няма генерирани записи.</p>
-            </div>
-        </div>
-    </aside>
-
-    <!-- Library Panel (Slide-in) -->
-    <div id="libraryOverlay" class="overlay hidden"></div>
-    <aside id="libraryPanel" class="library-panel hidden" role="dialog" aria-label="Библиотека">
-        <div class="panel-header">
-            <h2>📚 Библиотека</h2>
-            <button id="btnCloseLibrary" class="icon-btn" aria-label="Затвори библиотека">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-            </button>
-        </div>
-        <div class="panel-body">
-            <div class="library-actions-bar">
-                <button id="btnAddBook" class="btn btn-outline btn-sm" type="button">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                    Добави книга
-                </button>
-                <input type="file" id="libraryFileInput" accept=".txt,.md,.html,.htm,.srt,.pdf,.epub" hidden>
-            </div>
-            <div id="libraryList" class="library-list">
-                <p class="empty-state">Все още няма добавени книги.<br><small>Добавете книга чрез бутона по-горе.</small></p>
-            </div>
-        </div>
-    </aside>
-
-    <!-- Main Content -->
-    <main class="app-main">
-        <!-- Welcome / No API Key Banner -->
-        <div id="welcomeBanner" class="welcome-banner hidden">
-            <div class="welcome-icon">👋</div>
-            <h2>Добре дошли в Google AI Studio TTS!</h2>
-            <p>За да започнете, въведете вашия Google AI Studio API ключ в настройките.</p>
-            <div class="welcome-actions">
-                <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" class="btn btn-outline">🔑 Вземи API ключ</a>
-                <button id="btnOpenSettingsWelcome" class="btn btn-primary btn-welcome" type="button">⚙️ Отвори настройки</button>
-            </div>
-        </div>
-
-        <!-- Text Input Area -->
-        <div class="text-section">
-            <div class="text-header">
-                <span id="charCount" class="char-count">0 символа</span>
-                <div class="text-actions">
-                    <button id="btnPaste" class="icon-btn-sm" title="Постави от клипборда" aria-label="Постави текст" type="button">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
-                    </button>
-                    <button id="btnTranslateMain" class="icon-btn-sm" title="Преведи текста" aria-label="Преведи текста" type="button">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-                    </button>
-                    <button id="btnClear" class="icon-btn-sm" title="Изчисти текста" aria-label="Изчисти текста" type="button">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                    </button>
-                </div>
-            </div>
-            <textarea id="textInput" aria-label="Текст за четене на глас" placeholder="Въведете текст за четене на глас...&#10;&#10;Поддържа български и английски текст.&#10;Включете превод EN → BG за автоматичен превод.&#10;Качете файл: txt, pdf, epub, html, srt" rows="6" spellcheck="true"></textarea>
-
-            <!-- File Upload -->
-            <div class="file-upload-area" id="dropZone">
-                <input type="file" id="fileInput" accept=".txt,.md,.html,.htm,.srt,.pdf,.epub" hidden>
-                <button id="btnUpload" class="btn btn-outline" type="button">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                    Качи файл с текст
-                </button>
-                <small>Поддържа: .txt, .md, .html, .srt, .pdf, .epub</small>
-            </div>
-        </div>
-
-        <!-- Translation Preview -->
-        <div id="translationPreview" class="translation-preview hidden">
-            <div class="preview-header">
-                <h3>🇧🇬 Преведен текст</h3>
-                <div class="preview-actions">
-                    <button id="btnCopyTranslation" class="icon-btn-sm" title="Копирай превода" aria-label="Копирай превода" type="button">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-                    </button>
-                    <button id="btnUseTranslation" class="icon-btn-sm" title="Използвай превода като основен текст" aria-label="Използвай превода" type="button">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
-                    </button>
-                </div>
-            </div>
-            <div id="translatedText" class="translated-text"></div>
-        </div>
-
-        <!-- Controls -->
-        <div class="controls-section">
-            <!-- Quick Settings: Voice & Language directly on main page -->
-            <div class="quick-settings">
-                <div class="quick-setting">
-                    <label for="quickVoice">🎙️</label>
-                    <select id="quickVoice" aria-label="Глас">
-                        <option value="Zephyr">Zephyr — Ярък</option>
-                        <option value="Kore" selected>Kore — Ясен</option>
-                        <option value="Aoede">Aoede — Мелодичен</option>
-                        <option value="Leda">Leda — Младежки</option>
-                        <option value="Puck">Puck — Весел</option>
-                        <option value="Charon">Charon — Сериозен</option>
-                        <option value="Fenrir">Fenrir — Дълбок</option>
-                        <option value="Orus">Orus — Стабилен</option>
-                        <option value="Perseus">Perseus — Неутрален</option>
-                    </select>
-                </div>
-                <div class="quick-setting">
-                    <label for="quickLang">🗣️</label>
-                    <select id="quickLang" aria-label="Език">
-                        <option value="bg" selected>Български</option>
-                        <option value="en">English</option>
-                        <option value="auto">Авт.</option>
-                    </select>
-                </div>
-            </div>
-            <div class="main-controls">
-                <button id="btnGenerate" class="btn btn-primary" disabled type="button">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                    <span class="btn-text">Генерирай реч</span>
-                </button>
-                <button id="btnStop" class="btn btn-danger-solid hidden" type="button">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
-                    Спри
-                </button>
-            </div>
-
-            <!-- Progress -->
-            <div id="progressSection" class="progress-section hidden">
-                <div class="progress-bar">
-                    <div id="progressFill" class="progress-fill"></div>
-                </div>
-                <span id="progressText" class="progress-text">Генериране...</span>
-            </div>
-        </div>
-
-        <!-- Audio Player -->
-        <div id="playerSection" class="player-section hidden">
-            <div class="player-card">
-                <div class="player-info">
-                    <span class="player-title" id="playerTitle">Аудио</span>
-                    <span class="player-meta" id="playerMeta"></span>
-                </div>
-
-                <!-- Waveform visualization -->
-                <canvas id="waveformCanvas" class="waveform-canvas" width="300" height="40" aria-hidden="true"></canvas>
-
-                <!-- Seek Slider (global across all chunks) -->
-                <div class="seek-bar" id="seekBar">
-                    <input type="range" id="seekSlider" min="0" max="100" step="0.1" value="0" class="seek-slider" aria-label="Позиция на четене">
-                    <div class="seek-labels">
-                        <span id="seekPosition">0:00</span>
-                        <span id="seekChunkInfo"></span>
-                        <span id="seekDuration">0:00</span>
-                    </div>
-                </div>
-
-                <audio id="audioPlayer" preload="auto"></audio>
-                <audio id="audioPlayerNext" preload="auto" style="display:none"></audio>
-
-                <!-- Player Controls: skip back, play/pause, skip forward, speed, extra -->
-                <div class="player-controls-row">
-                    <button id="btnSkipBack" class="icon-btn player-skip-btn" type="button" title="Назад 10 секунди" aria-label="Назад 10 секунди">
-                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/><text x="12" y="16" text-anchor="middle" font-size="8" fill="currentColor" stroke="none" font-weight="700">10</text></svg>
-                    </button>
-                    <button id="btnPlayPause" class="btn btn-primary player-play-btn" type="button" title="Пусни / Пауза" aria-label="Пусни или пауза">
-                        <svg class="icon-play" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                        <svg class="icon-pause" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
-                    </button>
-                    <button id="btnSkipForward" class="icon-btn player-skip-btn" type="button" title="Напред 10 секунди" aria-label="Напред 10 секунди">
-                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.13-9.36L23 10"/><text x="12" y="16" text-anchor="middle" font-size="8" fill="currentColor" stroke="none" font-weight="700">10</text></svg>
-                    </button>
-                    <button id="btnSpeedToggle" class="btn btn-outline btn-sm speed-toggle-btn" type="button" title="Скорост на четене">
-                        ⚡ <span id="speedToggleLabel">1.0x</span>
-                    </button>
-                    <button id="btnReaderView" class="icon-btn player-extra-btn" type="button" title="Режим четец — маркира текста" aria-label="Режим четец">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                    </button>
-                    <button id="btnSleepTimer" class="icon-btn player-extra-btn" type="button" title="Таймер за сън" aria-label="Таймер за сън">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-                        <span id="sleepTimerLabel" class="sleep-timer-badge hidden"></span>
-                    </button>
-                    <button id="btnDownloadPlayer" class="icon-btn player-extra-btn" type="button" title="Изтегли аудио файл" aria-label="Изтегли">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                    </button>
-                </div>
-
-                <!-- Sleep Timer Dropdown -->
-                <div id="sleepTimerDropdown" class="sleep-timer-dropdown hidden" role="menu">
-                    <div class="sleep-timer-title">🌙 Таймер за сън</div>
-                    <div class="sleep-timer-options">
-                        <button class="sleep-option" data-minutes="15" type="button">15 мин</button>
-                        <button class="sleep-option" data-minutes="30" type="button">30 мин</button>
-                        <button class="sleep-option" data-minutes="45" type="button">45 мин</button>
-                        <button class="sleep-option" data-minutes="60" type="button">60 мин</button>
-                        <button class="sleep-option" data-minutes="90" type="button">90 мин</button>
-                        <button class="sleep-option sleep-option-off" data-minutes="0" type="button">❌ Изкл.</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Reader View (text with highlighted current chunk) -->
-        <div id="readerView" class="reader-view hidden" aria-live="polite">
-            <div class="reader-view-header">
-                <span class="reader-view-title">📖 Режим четец</span>
-                <button id="btnCloseReaderView" class="icon-btn-sm" type="button" aria-label="Затвори четец">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                </button>
-            </div>
-            <div id="readerContent" class="reader-content"></div>
-        </div>
+        <button id="btnAdd" class="fab hidden" data-action="add" aria-label="Добави книга">
+            <svg class="ic"><use href="#i-plus"/></svg><span>Книга</span>
+        </button>
+        <input type="file" id="fileInput" hidden>
+        <div id="dropHint" class="drop-hint hidden">Пуснете файла тук</div>
     </main>
 
-    <!-- Toast Notifications -->
-    <div id="toastContainer" class="toast-container" role="alert" aria-live="polite"></div>
+    <!-- ============ Player ============ -->
+    <section id="viewPlayer" class="view view-player hidden" aria-label="Плейър">
+        <header class="player-top">
+            <button id="btnBack" class="icon-btn" aria-label="Към библиотеката"><svg class="ic"><use href="#i-chevron-down"/></svg></button>
+            <div class="player-top-title">
+                <span class="eyebrow">Слушате</span>
+                <span id="pTopTitle" class="truncate"></span>
+            </div>
+            <button id="btnBookMenu" class="icon-btn" aria-label="Още"><svg class="ic"><use href="#i-more"/></svg></button>
+        </header>
 
-    <!-- Offline Banner -->
-    <div id="offlineBanner" class="offline-banner hidden">
-        ⚠️ Няма интернет връзка. Проверете мрежата си.
+        <div class="stage">
+            <div id="coverStage" class="cover-stage">
+                <div id="pCover" class="cover cover-xl"></div>
+                <div class="cover-meta">
+                    <h2 id="pTitle" class="serif"></h2>
+                    <p id="pAuthor" class="muted"></p>
+                </div>
+            </div>
+            <article id="textStage" class="reader hidden" lang="bg"></article>
+        </div>
+
+        <div class="console">
+            <button id="btnChapter" class="chapter-btn">
+                <span id="pChapter" class="truncate"></span>
+                <svg class="ic ic-sm"><use href="#i-list"/></svg>
+            </button>
+            <input id="chapterSlider" class="slider" type="range" min="0" max="100" value="0" step="1" aria-label="Позиция в главата">
+            <div class="time-row">
+                <span id="pPos"></span>
+                <span id="pRemain"></span>
+            </div>
+
+            <div class="transport">
+                <button id="btnPrevCh" class="t-btn t-sm" aria-label="Предишна глава"><svg class="ic"><use href="#i-prev"/></svg></button>
+                <button id="btnBack15" class="t-btn" aria-label="Назад 15 секунди"><svg class="ic ic-lg"><use href="#i-back15"/></svg></button>
+                <button id="btnPlay" class="play-btn" aria-label="Пусни">
+                    <svg class="ic ic-play"><use href="#i-play"/></svg>
+                    <span class="spinner" aria-hidden="true"></span>
+                </button>
+                <button id="btnFwd30" class="t-btn" aria-label="Напред 30 секунди"><svg class="ic ic-lg"><use href="#i-fwd30"/></svg></button>
+                <button id="btnNextCh" class="t-btn t-sm" aria-label="Следваща глава"><svg class="ic"><use href="#i-next"/></svg></button>
+            </div>
+
+            <div class="chips">
+                <button id="chipSpeed" class="chip"><span id="speedLabel">1.0×</span></button>
+                <button id="chipVoice" class="chip"><svg class="ic ic-sm"><use href="#i-voice"/></svg><span id="voiceLabel" class="truncate"></span></button>
+                <button id="chipSleep" class="chip"><svg class="ic ic-sm"><use href="#i-moon"/></svg><span id="sleepLabel"></span></button>
+                <button id="chipText" class="chip" aria-label="Текст"><svg class="ic ic-sm"><use href="#i-text"/></svg></button>
+            </div>
+            <p id="pStatus" class="status muted" aria-live="polite"></p>
+        </div>
+    </section>
+
+    <!-- ============ Mini player ============ -->
+    <div id="miniPlayer" class="mini hidden" role="button" tabindex="0" aria-label="Отвори плейъра">
+        <div id="miniCover" class="cover cover-mini"></div>
+        <div class="mini-text">
+            <span id="miniTitle" class="truncate"></span>
+            <span id="miniChapter" class="truncate muted"></span>
+        </div>
+        <button id="miniPlay" class="mini-play" aria-label="Пусни/Пауза"><svg class="ic"><use href="#i-play"/></svg><span class="spinner"></span></button>
+        <div id="miniProgress" class="mini-progress"></div>
     </div>
 
-    <script src="js/config.js"></script>
-    <script src="js/app.js"></script>
+    <!-- ============ Sheet ============ -->
+    <div id="sheetBackdrop" class="backdrop hidden"></div>
+    <div id="sheet" class="sheet hidden" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+        <div class="sheet-grip" aria-hidden="true"></div>
+        <header class="sheet-head">
+            <h3 id="sheetTitle"></h3>
+            <button id="sheetClose" class="icon-btn" aria-label="Затвори"><svg class="ic"><use href="#i-close"/></svg></button>
+        </header>
+        <div id="sheetBody" class="sheet-body"></div>
+    </div>
+
+    <div id="importOverlay" class="import hidden">
+        <div class="import-card">
+            <div class="import-ring"><svg viewBox="0 0 48 48"><circle cx="24" cy="24" r="20"/><circle id="importArc" cx="24" cy="24" r="20"/></svg></div>
+            <p id="importText">Подготвям книгата…</p>
+        </div>
+    </div>
+
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+
+    <script type="module" src="js/main.js"></script>
 </body>
 </html>

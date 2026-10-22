@@ -1,80 +1,54 @@
-/* Service Worker for Gemini TTS PWA */
+/* Service worker: app shell offline + runtime cache for fonts and parser libraries.
+   Voice API calls are never cached here — audio is cached in IndexedDB by the app. */
 
-const CACHE_NAME = 'gemini-tts-v2';
-const STATIC_ASSETS = [
-    './',
-    './index.html',
-    './css/style.css',
-    './js/app.js',
-    './manifest.json',
-    './icons/icon-192.png',
-    './icons/icon-512.png',
+const CACHE = 'razkazvach-v2';
+const SHELL = [
+    './', './index.html', './css/app.css', './manifest.json',
+    './js/main.js', './js/player.js', './js/engines.js', './js/parsers.js', './js/text.js', './js/db.js', './js/usage.js', './js/config.js',
+    './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png',
 ];
+const RUNTIME_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com', 'cdn.jsdelivr.net'];
 
-// Install: cache static assets
 self.addEventListener('install', (event) => {
-    event.waitUntil(
-        caches.open(CACHE_NAME).then((cache) => {
-            return cache.addAll(STATIC_ASSETS);
-        })
-    );
+    event.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
     self.skipWaiting();
 });
 
-// Activate: clean old caches
 self.addEventListener('activate', (event) => {
     event.waitUntil(
-        caches.keys().then((keys) => {
-            return Promise.all(
-                keys
-                    .filter((key) => key !== CACHE_NAME)
-                    .map((key) => caches.delete(key))
-            );
-        })
+        caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
     );
     self.clients.claim();
 });
 
-// Fetch: cache-first for static assets, network-first for API calls
 self.addEventListener('fetch', (event) => {
-    const url = new URL(event.request.url);
+    const req = event.request;
+    if (req.method !== 'GET') return;
+    const url = new URL(req.url);
 
-    // Never cache API calls — check exact hostnames to avoid substring matching
-    if (url.hostname === 'generativelanguage.googleapis.com' ||
-        url.hostname === 'aiplatform.googleapis.com') {
-        return;
-    }
-
-    // Never cache non-GET requests
-    if (event.request.method !== 'GET') {
-        return;
-    }
-
-    // Cache-first for static assets
-    event.respondWith(
-        caches.match(event.request).then((cached) => {
-            if (cached) {
-                // Return cached, but also update cache in background
-                fetch(event.request).then((response) => {
-                    if (response && response.status === 200) {
-                        const responseClone = response.clone();
-                        caches.open(CACHE_NAME).then((cache) => {
-                            cache.put(event.request, responseClone);
-                        });
-                    }
-                }).catch(() => {});
-                return cached;
-            }
-
-            return fetch(event.request).then((response) => {
-                if (response && response.status === 200) {
-                    const clone = response.clone();
-                    caches.open(CACHE_NAME).then((cache) => {
-                        cache.put(event.request, clone);
-                    });
+    // Third-party libraries and fonts: cache-first (versioned URLs)
+    if (RUNTIME_HOSTS.includes(url.hostname)) {
+        event.respondWith(
+            caches.match(req).then((hit) => hit || fetch(req).then((res) => {
+                if (res.ok || res.type === 'opaque') {
+                    const copy = res.clone();
+                    caches.open(CACHE).then((c) => c.put(req, copy));
                 }
-                return response;
-            });
-        })
+                return res;
+            }))
+        );
+        return;
+    }
+    if (url.origin !== self.location.origin) return;
+
+    // App shell: network-first so updates arrive, cache when offline
+    event.respondWith(
+        fetch(req).then((res) => {
+            if (res.ok) {
+                const copy = res.clone();
+                caches.open(CACHE).then((c) => c.put(req, copy));
+            }
+            return res;
+        }).catch(() => caches.match(req).then((hit) => hit || caches.match('./index.html')))
     );
 });
