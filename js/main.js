@@ -15,7 +15,7 @@ import { submitChapter, pollBatches, hasJobs, pendingChapters, batchEstimate } f
 import { usableFreeKey } from './player.js';
 import { exportPlan, exportChapters, packageFiles, safeFileName } from './export.js';
 import { searchBooks, localizeTitles, SOURCES } from './search.js';
-import { SHELVES, loadShelf, wikisourceWorks, fetchCatalogBook, sourceKey } from './library.js';
+import { SHELVES, loadShelf, wikisourceWorks, fetchCatalogBook, sourceKey, RIGHTS_LABELS, shareCommunityBook, reportCommunityBook } from './library.js';
 import { usageSummary, resetUsage, hourlyCost, freeHoursPerMonth, recordUsage } from './usage.js';
 
 const $ = (s, root = document) => root.querySelector(s);
@@ -24,7 +24,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.4';
+export const APP_VERSION = '2.5';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
@@ -421,7 +421,8 @@ async function openCatalogItem(it) {
                 <div>
                     <p class="catalog-author">${esc(it.authorT || it.author || '')}</p>
                     ${it.titleT && it.titleT !== it.title ? `<p class="hint" style="margin-top:4px">Оригинал: ${esc(it.title)}</p>` : ''}
-                    <p class="hint" style="margin-top:6px">${esc(src.rights)} · ${esc(src.label)} · ${esc(LANG_NAMES[it.lang] || it.lang || '')}${it.year ? ' · ' + it.year : ''}</p>
+                    <p class="hint" style="margin-top:6px">${esc(it.source === 'community' ? RIGHTS_LABELS[it.rights] || src.rights : src.rights)} · ${esc(src.label)} · ${esc(LANG_NAMES[it.lang] || it.lang || '')}${it.year ? ' · ' + it.year : ''}</p>
+                    ${it.source === 'community' ? `<p class="hint">Източник: ${esc(it.origin || '—')}${it.by ? ` · качена от ${esc(it.by)}` : ''}</p>` : ''}
                     <p class="hint">${it.shareable === false
                         ? 'Озвучаването остава само за вас.'
                         : 'Веднъж прочетена от разказвача, книгата се пази и следващите слушатели не плащат за нея.'}</p>
@@ -432,12 +433,109 @@ async function openCatalogItem(it) {
                     <button class="btn btn-ghost" data-act="orig">Оригинал (${esc(LANG_NAMES[it.lang] || it.lang)})</button>`
                 : '<button class="btn btn-primary" data-act="orig">Добави и слушай</button>'}
             </div>
-            <p class="hint">След добавяне: меню на книгата (⋯) → изтегляне като аудиокнига или като текст.</p>`;
+            <p class="hint">След добавяне: меню на книгата (⋯) → изтегляне като аудиокнига или като текст.</p>
+            ${it.source === 'community' ? '<button class="btn btn-ghost btn-sm" data-act="report" style="margin-top:4px">Сигнализирай за нарушение на авторски права</button>' : ''}`;
         body.onclick = (e) => {
             const act = e.target.closest('[data-act]')?.dataset.act;
             if (!act) return;
+            if (act === 'report') return openReport(it);
             closeSheet();
             importCatalog(it, { translateTo: act === 'tr' ? target : null });
+        };
+    });
+}
+
+// Notice and takedown: a reported book is hidden from everyone at once
+function openReport(it) {
+    openSheet('Сигнал за нарушение', (body) => {
+        body.innerHTML = `
+            <p class="hint">„${esc(it.title)}“ ще бъде скрита от общата библиотека веднага и ще бъде прегледана.</p>
+            <textarea class="input" id="repReason" rows="4" placeholder="Кое право е нарушено? Напр.: аз съм издателят, преводът е от 1998 г."></textarea>
+            <input class="input" id="repContact" style="margin-top:10px" placeholder="Имейл за връзка (по желание)">
+            <div class="catalog-actions"><button class="btn btn-primary" id="repSend">Изпрати сигнала</button></div>`;
+        $('#repSend', body).onclick = async () => {
+            try {
+                await reportCommunityBook(it.id, $('#repReason', body).value.trim(), $('#repContact', body).value.trim());
+                closeSheet();
+                toast('Благодарим. Книгата е скрита до преглед.');
+                delete $('#shelves').dataset.ready;
+                renderDiscover();
+            } catch (e) {
+                toast(e.message, { error: true });
+            }
+        };
+    });
+}
+
+// A reader shares a book from their own library: where it comes from + legal basis
+function openShareCommunity() {
+    const book = currentBook;
+    const minYear = new Date().getFullYear() - 71;
+    openSheet('Сподели в общата библиотека', (body) => {
+        body.innerHTML = `
+            <p class="hint">Книгата става достъпна за всички слушатели. Качвате я вие и отговаряте, че имате право да я споделите. Без посочен източник и основание книга не се приема.</p>
+            <div class="group-title" style="margin-top:12px">Откъде е книгата</div>
+            <input class="input" id="cmSource" placeholder="Линк или описание: напр. издание от 1912 г., сканирано от мен">
+            <div class="group-title" style="margin-top:14px">Основание</div>
+            <div class="list" id="cmRights">
+                <label class="list-item"><input type="radio" name="cmR" value="pd" checked> <span class="grow">Обществено достояние<small>Авторът (и преводачът, ако е превод) е починал до ${minYear} г.</small></span></label>
+                <label class="list-item"><input type="radio" name="cmR" value="own"> <span class="grow">Мое произведение<small>Аз съм авторът и разрешавам свободното му четене</small></span></label>
+                <label class="list-item"><input type="radio" name="cmR" value="cc-by"> <span class="grow">Свободен лиценз<small>Creative Commons CC0, BY или BY-SA</small></span></label>
+            </div>
+            <div id="cmPd">
+                <div class="field" style="margin-top:12px"><input class="input" id="cmDeath" inputmode="numeric" placeholder="Година на смърт на автора"></div>
+                <div class="field" style="margin-top:8px"><input class="input" id="cmTr" inputmode="numeric" placeholder="Година на смърт на преводача (ако е превод)"></div>
+            </div>
+            <div id="cmCc" class="hidden" style="margin-top:12px">
+                <div class="seg" id="cmLic"><button data-l="cc0">CC0</button><button data-l="cc-by" class="on">CC BY</button><button data-l="cc-by-sa">CC BY-SA</button></div>
+            </div>
+            <input class="input" id="cmBy" style="margin-top:12px" placeholder="Вашето име или псевдоним (по желание)">
+            <label class="list-item" style="margin-top:10px"><input type="checkbox" id="cmDeclare"> <span class="grow"><small style="margin:0">Декларирам, че посоченият източник и основание са верни и че споделянето не нарушава чужди права. Знам, че книгата се сваля при сигнал за нарушение.</small></span></label>
+            <div class="catalog-actions"><button class="btn btn-primary" id="cmSend">Сподели</button></div>`;
+        let lic = 'cc-by';
+        const sync = () => {
+            const r = body.querySelector('input[name=cmR]:checked').value;
+            $('#cmPd', body).classList.toggle('hidden', r !== 'pd');
+            $('#cmCc', body).classList.toggle('hidden', r !== 'cc-by');
+        };
+        $('#cmRights', body).onchange = sync;
+        $('#cmLic', body).onclick = (e) => {
+            const b = e.target.closest('[data-l]');
+            if (!b) return;
+            lic = b.dataset.l;
+            $$('#cmLic button', body).forEach((x) => x.classList.toggle('on', x === b));
+        };
+        $('#cmSend', body).onclick = async () => {
+            const r = body.querySelector('input[name=cmR]:checked').value;
+            const form = {
+                source: $('#cmSource', body).value.trim(),
+                rights: r === 'cc-by' ? lic : r,
+                authorDeath: Number($('#cmDeath', body).value) || null,
+                translatorDeath: $('#cmTr', body).value.trim() ? Number($('#cmTr', body).value) || 0 : null,
+                by: $('#cmBy', body).value.trim(),
+                declare: $('#cmDeclare', body).checked,
+            };
+            if (form.source.length < 4) return toast('Посочете откъде е книгата.', { error: true });
+            if (r === 'pd' && !(form.authorDeath && form.authorDeath <= minYear)) return toast(`За обществено достояние авторът трябва да е починал до ${minYear} г.`, { error: true });
+            if (r === 'pd' && form.translatorDeath !== null && !(form.translatorDeath && form.translatorDeath <= minYear)) return toast(`Преводът е защитен, ако преводачът е починал след ${minYear} г.`, { error: true });
+            if (!form.declare) return toast('Потвърдете декларацията.', { error: true });
+            const btn = $('#cmSend', body);
+            btn.disabled = true;
+            try {
+                const content = await db.get('contents', book.id);
+                const res = await shareCommunityBook(book, content.chapters, form);
+                // From now on this book shares narration and translations with everyone
+                book.source = { type: 'community', id: res.id };
+                book.sourceKey = `cm-${res.id}`;
+                book.shared = true;
+                persistBook(book);
+                closeSheet();
+                toast(res.existed ? 'Тази книга вече е в общата библиотека — свързах я.' : 'Споделена. Благодарим! Книгата е в „Добавени от читатели“.');
+                delete $('#shelves').dataset.ready;
+            } catch (e) {
+                btn.disabled = false;
+                toast(e.message, { error: true });
+            }
         };
     });
 }
@@ -481,15 +579,23 @@ async function deleteBook(id) {
 
 // ==================== Player view ====================
 
+let openSeq = 0;
 async function openBook(id, autoplay) {
     if (player.book?.id === id) {
         showPlayer();
         if (autoplay) startPlayback();
         return;
     }
+    const seq = ++openSeq;
     const meta = await db.get('books', id);
     const content = await db.get('contents', id);
+    if (seq !== openSeq) return; // a later tap opened another book
     if (!meta || !content) return toast('Книгата не е намерена.', { error: true });
+    // Keep the exact place in the book being left
+    if (currentBook) {
+        player.pause();
+        persistNow();
+    }
     meta.lastOpened = Date.now();
     if (meta.cover && !coverUrls.has(id)) coverUrls.set(id, URL.createObjectURL(meta.cover));
     meta.coverUrl = coverUrls.get(id) || '';
@@ -522,22 +628,31 @@ function setBookTranslation(to) {
     toast(to ? `Ще чета на ${LANG_NAMES[to]}.` : 'Ще чета оригинала.');
 }
 
-function persistBook() {
-    if (!currentBook) return;
-    const { coverUrl, ...rec } = currentBook;
+function persistBook(book = currentBook) {
+    if (!book) return;
+    const { coverUrl, ...rec } = book;
     db.put('books', rec).catch(() => {});
 }
 
 let saveTimer = null;
+let lastSaved = 0;
 function scheduleSave() {
-    if (!currentBook) return;
-    currentBook.position = { ...player.pos };
-    currentBook.lastOpened = Date.now();
+    if (!currentBook || player.book !== currentBook) return;
+    const book = currentBook;
+    book.position = { ...player.pos };
+    book.lastOpened = Date.now();
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
-        persistBook();
+        lastSaved = Date.now();
+        persistBook(book);
         localStorage.setItem('rz_cps', String(player.charsPerSecond.toFixed(2)));
     }, 1200);
+}
+
+// While listening, the place is stored every few seconds, so an interrupted or
+// killed app resumes at the sentence that was being read
+function savePositionSoon() {
+    if (player.playing && Date.now() - lastSaved > 8000) scheduleSave();
 }
 
 function showPlayer() {
@@ -987,6 +1102,7 @@ function openBookMenu() {
             <div class="group list">
                 ${settings.engine === 'gemini' ? `<button class="list-item" data-a="batch"><span class="grow">Подготви следващите 3 глави на ½ цена<small>Gemini Batch: ~${approxUsd(batchEstimate(activeGeminiModel(), nextChaptersChars(3)))} · готово обикновено до няколко часа${pendingChapters(currentBook.id).length ? ` · в момента се подготвят ${pendingChapters(currentBook.id).length}` : ''}</small></span></button>` : ''}
                 <button class="list-item" data-a="export"><span class="grow">Изтегли като аудиокнига<small>Аудиофайл (.ogg) за всеки плейър · вече чутото е безплатно</small></span></button>
+                ${!currentBook.source ? '<button class="list-item" data-a="share"><span class="grow">Сподели в общата библиотека<small>Само свободни книги · посочвате източник и основание</small></span></button>' : ''}
                 <button class="list-item" data-a="text"><span class="grow">Изтегли като текст<small>Файл за четене (.txt)${currentBook.translateTo ? ' · в превод' : ''} · с посочен източник</small></span></button>
                 <button class="list-item" data-a="prepare"><span class="grow">Подготви текущата глава за офлайн<small>Генерира цялата глава предварително (същата цена като слушане)</small></span></button>
                 <button class="list-item" data-a="restart"><span class="grow">Започни отначало</span></button>
@@ -1012,6 +1128,8 @@ function openBookMenu() {
             } else if (a === 'export') {
                 closeSheet();
                 openExport();
+            } else if (a === 'share') {
+                openShareCommunity();
             } else if (a === 'text') {
                 closeSheet();
                 exportText();
@@ -1817,6 +1935,7 @@ function bindEvents() {
     player.addEventListener('state', updatePlayState);
     player.addEventListener('position', updatePlayerUI);
     player.addEventListener('save', scheduleSave);
+    player.addEventListener('position', savePositionSoon);
     player.addEventListener('position', maybePrepareNext);
     player.addEventListener('translating', (e) => { $('#pStatus').textContent = `Превеждам главата… ${Math.round(e.detail * 100)}%`; });
     player.addEventListener('translated', () => {
@@ -1873,7 +1992,8 @@ function bindEvents() {
 }
 
 function persistNow() {
-    if (!currentBook) return;
+    if (!currentBook || player.book !== currentBook) return;
+    clearTimeout(saveTimer);
     currentBook.position = { ...player.pos };
     persistBook();
 }

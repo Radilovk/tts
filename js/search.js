@@ -2,7 +2,7 @@
 // parallel; results come back as catalog items that can be downloaded, translated,
 // read, listened to and exported. Only books that may be freely copied are offered.
 
-import { euPublicDomain, gutenbergItem } from './library.js';
+import { euPublicDomain, gutenbergItem, communityBooks } from './library.js';
 import { libraryApi } from './shared.js';
 import { recordUsage } from './usage.js';
 
@@ -10,6 +10,7 @@ const YEAR = new Date().getFullYear();
 const LANG3 = { eng: 'en', rus: 'ru', ger: 'de', fre: 'fr', spa: 'es', ita: 'it', bul: 'bg', ukr: 'uk', srp: 'sr', lat: 'la', gre: 'el', pol: 'pl', por: 'pt', dut: 'nl' };
 
 export const SOURCES = {
+    community: { label: 'Добавени от читатели', rights: 'Свободни права · посочен източник' },
     gutenberg: { label: 'Project Gutenberg', rights: 'Обществено достояние' },
     ia: { label: 'Internet Archive', rights: 'Обществено достояние (скан)' },
     wikisource: { label: 'Wikisource', rights: 'Обществено достояние' },
@@ -121,6 +122,7 @@ async function searchOapen(q) {
 // Search everything; onResults(source, items, error) is called as each source answers.
 export async function searchBooks(q, readerLang, onResults) {
     const tasks = {
+        community: () => communityBooks(q),
         gutenberg: () => searchGutenberg(q),
         ia: () => searchOpenLibrary(q),
         wikisource: async () => {
