@@ -1,7 +1,7 @@
 /* Service worker: app shell offline + runtime cache for fonts and parser libraries.
    Voice API calls are never cached here — audio is cached in IndexedDB by the app. */
 
-const CACHE = 'razkazvach-v1';
+const CACHE = 'razkazvach-v2';
 const SHELL = [
     './', './index.html', './css/app.css', './manifest.json',
     './js/main.js', './js/player.js', './js/engines.js', './js/parsers.js', './js/text.js', './js/db.js', './js/usage.js', './js/config.js',

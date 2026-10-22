@@ -6,7 +6,7 @@ import { Player } from './player.js';
 import { LANG_NAMES, LOCALES, charLen } from './text.js';
 import {
     GEMINI_VOICES, GEMINI_DEFAULT_MODEL, NARRATION_STYLES, PRICES,
-    cloudVoices, cloudSynthesize, geminiSynthesize, geminiModels, deviceVoices, onDeviceVoicesChanged, cloudTier,
+    cloudVoices, cloudSynthesize, cloudDiagnose, CLOUD_LINKS, geminiSynthesize, geminiModels, deviceVoices, onDeviceVoicesChanged, cloudTier,
 } from './engines.js';
 import { usageSummary, resetUsage, hourlyCost, freeHoursPerMonth, recordUsage } from './usage.js';
 
@@ -19,7 +19,7 @@ const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
     engine: null, apiKey: '', cloudVoice: '', geminiVoice: 'Charon', geminiModel: GEMINI_DEFAULT_MODEL,
     style: 'intriguing', customStyle: '', deviceVoice: '', lang: 'auto', rate: 1, lookahead: 2,
-    cacheMB: 500, theme: 'system', readerSize: 19, view: 'cover',
+    cacheMB: 500, theme: 'system', readerSize: 19, view: 'cover', cloudReady: false,
 };
 
 let settings = loadSettings();
@@ -228,6 +228,15 @@ async function importFile(file) {
         const n = parsed.chapters.length;
         toast(`Добавена: ${n} ${n === 1 ? 'глава' : 'глави'} · ${fmtDuration(hours * 3600) || '< 1 мин'} слушане`);
         openBook(id, false);
+        if (settings.engine === 'device' && !settings.cloudReady && !localStorage.getItem('rz_hd_hint')) {
+            localStorage.setItem('rz_hd_hint', '1');
+            setTimeout(() => {
+                if (setupOpen || settings.cloudReady) return;
+                toast('Искате по-естествен глас? Google HD е ~20 ч месечно безплатно.', {
+                    duration: 9000, action: { label: 'Свържи', run: () => openCloudSetup({}) },
+                });
+            }, 3800);
+        }
     } catch (e) {
         overlay.classList.add('hidden');
         console.error(e);
@@ -430,6 +439,10 @@ function updateMini() {
 async function startPlayback() {
     if (!currentBook) return;
     const st = effectiveSettings();
+    if (st.engine === 'cloud' && (!st.apiKey || !settings.cloudReady)) {
+        openCloudSetup({ thenPlay: true });
+        return;
+    }
     if (st.engine !== 'device' && !st.apiKey) {
         toast('За естествените гласове е нужен Google API ключ. Засега чета с гласа на устройството.', {
             action: { label: 'Настройки', run: openSettings },
@@ -726,8 +739,7 @@ function renderSettings(body) {
                 <button class="btn btn-ghost btn-sm" id="btnTestKey">Провери</button>
             </div>
             <p class="hint" id="keyStatus"></p>
-            <p class="hint">Един ключ работи и за двата AI гласа. Създайте го в <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>. За Google HD гласовете включете
-            <a href="https://console.cloud.google.com/apis/library/texttospeech.googleapis.com" target="_blank" rel="noopener">Cloud Text-to-Speech API</a> в същия проект (изисква профил за плащане, но първият милион знака всеки месец е безплатен). Ключът остава само на това устройство.</p>
+            <p class="hint">Един ключ за всички AI гласове — създава се безплатно в <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>. За Google HD използвайте <a href="#" data-setup-link>съветника за свързване</a> — той сам открива какво липсва. Ключът остава само на това устройство.</p>
         </section>
 
         <section class="group">
@@ -779,6 +791,10 @@ function renderSettings(body) {
     body.onclick = async (e) => {
         const eng = e.target.closest('[data-engine]');
         if (eng) {
+            if (eng.dataset.engine === 'cloud' && !settings.cloudReady) {
+                openCloudSetup({ backToSettings: true });
+                return;
+            }
             if (eng.dataset.engine !== settings.engine) {
                 settings.engine = eng.dataset.engine;
                 saveSettings();
@@ -792,6 +808,7 @@ function renderSettings(body) {
         const size = e.target.closest('#setSize [data-v]');
         if (size) { settings.readerSize = Number(size.dataset.v); saveSettings(); applyTheme(); rerenderSheet(renderSettings); return; }
         if (e.target.id === 'btnTestKey') return testKey(body);
+        if (e.target.closest('[data-setup-link]')) { e.preventDefault(); return openCloudSetup({ backToSettings: true }); }
         if (e.target.id === 'btnClearCache') {
             await db.audioClear();
             player.queue.clear();
@@ -802,6 +819,7 @@ function renderSettings(body) {
     };
     $('#setKey', body).onchange = (e) => {
         settings.apiKey = e.target.value.trim();
+        settings.cloudReady = false;
         saveSettings();
         cloudVoiceCache = {};
         geminiModelList = null;
@@ -855,8 +873,13 @@ function renderVoiceGroup(box, lang) {
         if (sel) sel.onchange = () => { settings.deviceVoice = sel.value; saveSettings(); player.voiceChanged(); };
     } else if (engine === 'cloud') {
         box.innerHTML = `<div class="group-title">Глас</div><p class="hint" id="cloudVoiceMsg">Зареждам гласовете…</p>`;
-        if (!effectiveSettings().apiKey) {
-            $('#cloudVoiceMsg', box).textContent = 'Въведете API ключ отдолу, за да заредите гласовете.';
+        if (!effectiveSettings().apiKey || !settings.cloudReady) {
+            box.innerHTML = `<div class="group-title">Глас</div>
+                <button class="setup-cta" data-setup>
+                    <span><b>Свържете Google HD</b><small>3 кратки стъпки · ~20 ч слушане месечно безплатно</small></span>
+                    <span class="setup-cta-go">Започни</span>
+                </button>`;
+            $('[data-setup]', box).onclick = () => openCloudSetup({ backToSettings: true });
         } else {
             loadCloudVoices(lang).then((voices) => {
                 if (!voices.length) {
@@ -881,12 +904,21 @@ function renderVoiceGroup(box, lang) {
                         </select>
                         <button class="btn btn-ghost btn-sm" data-preview>Чуй</button>
                     </div>
-                    <p class="hint">Chirp 3 HD звучи най-естествено. WaveNet и Standard са по-прости, но с ~${Math.round(freeHoursPerMonth('Wavenet'))} ч безплатно месечно.</p>`;
+                    <p class="hint">Chirp 3 HD звучи най-естествено. WaveNet и Standard са по-прости, но с ~${Math.round(freeHoursPerMonth('Wavenet'))} ч безплатно месечно.
+                    <a href="#" data-setup>Проверка на връзката</a></p>`;
+                $('[data-setup]', box).onclick = (ev) => { ev.preventDefault(); openCloudSetup({ backToSettings: true }); };
                 const sel = $('#setCloudVoice', box);
                 sel.onchange = () => { settings.cloudVoice = sel.value; saveSettings(); player.voiceChanged(); };
             }).catch((e) => {
                 const m = $('#cloudVoiceMsg', box);
-                if (m) m.textContent = e.message;
+                if (!m) return;
+                m.textContent = e.message;
+                const b = document.createElement('button');
+                b.className = 'btn btn-accent btn-sm';
+                b.style.marginTop = '10px';
+                b.textContent = 'Свържи Google HD';
+                b.onclick = () => openCloudSetup({ backToSettings: true });
+                m.after(b);
             });
         }
     } else {
@@ -993,6 +1025,146 @@ async function previewVoice(btn) {
     }
 }
 
+// ---------- Google HD setup wizard ----------
+
+let setupOpen = false;
+let setupRecheck = null;
+
+function openCloudSetup(opts = {}) {
+    let diag = null;
+    let checking = false;
+
+    const stepState = (id) => {
+        if (!diag) return 'wait';
+        return diag[id];
+    };
+
+    const render = (body) => {
+        const k = effectiveSettings().apiKey;
+        const ok = diag && !diag.failed;
+        const step = (id, n, title, sub, extra) => {
+            const st = stepState(id);
+            const active = diag?.failed === id || (!diag && id === 'key' && !k);
+            return `<li class="step ${st} ${active ? 'active' : ''}">
+                <span class="step-dot">${st === 'ok' ? '<svg class="ic ic-sm"><use href="#i-check"/></svg>' : n}</span>
+                <div class="step-body">
+                    <b>${title}</b><small>${sub}</small>
+                    ${active ? extra : ''}
+                    ${active && diag?.message ? `<p class="step-msg">${esc(diag.message)}</p>` : ''}
+                </div>
+            </li>`;
+        };
+        const fix = (label) => diag?.fixUrl
+            ? `<a class="btn btn-accent btn-sm step-btn" href="${esc(diag.fixUrl)}" target="_blank" rel="noopener">${label} ↗</a>` : '';
+        body.innerHTML = `
+            <p class="setup-lead">Еднократна настройка за най-естествените гласове. Първият <b>1 милион знака всеки месец</b> (~20 ч слушане) е безплатен.</p>
+            <ol class="steps">
+                ${step('key', 1, 'API ключ', 'Същият ключ от Google AI Studio — един за всички AI гласове.', `
+                    <div class="field step-field">
+                        <input class="input" id="setupKey" type="password" autocomplete="off" spellcheck="false" placeholder="Поставете ключа (AIza…)" value="${esc(settings.apiKey)}">
+                        <button class="btn btn-ghost btn-sm" id="setupPaste">Постави</button>
+                    </div>
+                    <a class="btn btn-accent btn-sm step-btn" href="${CLOUD_LINKS.aiStudioKey}" target="_blank" rel="noopener">Създай ключ ↗</a>`)}
+                ${step('api', 2, 'Включете Google HD гласовете', 'На страницата натиснете синия бутон „Enable / Активиране“.', fix('Отвори и включи'))}
+                ${step('billing', 3, 'Свържете профил за плащане', 'Google го изисква, но не таксува до 1M знака месечно.', `${fix('Свържи плащане')}
+                    <p class="hint">За спокойствие задайте <a href="${CLOUD_LINKS.budgets}" target="_blank" rel="noopener">бюджет-аларма</a> от 1 $ — ще получите имейл, ако някога наближите платения праг.</p>`)}
+            </ol>
+            ${ok ? `<div class="setup-done">
+                    <svg class="ic"><use href="#i-check"/></svg>
+                    <div><b>Свързано!</b><small>Глас: ${esc((settings.cloudVoice || diag.voice).split('-').slice(-1)[0])} · Chirp 3 HD</small></div>
+                    <button class="btn btn-ghost btn-sm" id="setupHear">Чуй</button>
+                </div>
+                <button class="btn btn-primary setup-main" id="setupDone">${opts.thenPlay ? 'Започни да слушаш' : 'Готово'}</button>`
+            : `<button class="btn btn-primary setup-main" id="setupCheck" ${checking ? 'disabled' : ''}>${checking ? 'Проверявам…' : diag ? 'Провери отново' : 'Провери'}</button>
+               ${diag && diag.failed !== 'key' ? '<p class="hint" style="text-align:center">Току-що включена услуга може да заработи след около минута.</p>' : ''}`}`;
+
+        const keyInput = $('#setupKey', body);
+        if (keyInput) {
+            keyInput.onchange = () => { saveKey(keyInput.value); check(); };
+            $('#setupPaste', body).onclick = async () => {
+                try {
+                    const t = (await navigator.clipboard.readText()).trim();
+                    if (t) { keyInput.value = t; saveKey(t); check(); }
+                } catch { keyInput.focus(); toast('Поставете ключа ръчно (задръжте в полето → Постави).'); }
+            };
+        }
+        const checkBtn = $('#setupCheck', body);
+        if (checkBtn) checkBtn.onclick = () => {
+            if (keyInput && keyInput.value.trim() !== settings.apiKey) saveKey(keyInput.value);
+            check();
+        };
+        const hear = $('#setupHear', body);
+        if (hear) hear.onclick = () => playSample();
+        const done = $('#setupDone', body);
+        if (done) done.onclick = () => {
+            closeSheet();
+            if (opts.thenPlay) startPlayback();
+            else if (opts.backToSettings) openSettings();
+        };
+    };
+
+    const saveKey = (v) => {
+        const key = v.trim();
+        if (key === settings.apiKey) return;
+        settings.apiKey = key;
+        settings.cloudReady = false;
+        saveSettings();
+        cloudVoiceCache = {};
+        geminiModelList = null;
+        player.queue.clear();
+    };
+
+    let sampleUrl = null;
+    const playSample = () => {
+        if (!diag?.sample) return;
+        previewAudio?.pause();
+        if (!sampleUrl) sampleUrl = URL.createObjectURL(diag.sample);
+        previewAudio = new Audio(sampleUrl);
+        previewAudio.play().catch(() => {});
+    };
+
+    const check = async () => {
+        if (checking || !setupOpen) return;
+        checking = true;
+        rerenderSheet(render);
+        try {
+            diag = await cloudDiagnose(effectiveSettings().apiKey, currentLang());
+        } catch (e) {
+            diag = { key: 'wait', api: 'wait', billing: 'wait', failed: 'key', message: e.message };
+        }
+        checking = false;
+        if (!setupOpen) return;
+        if (!diag.failed) {
+            if (diag.sampleChars) recordUsage({ engine: 'cloud', tier: cloudTier(diag.voice), chars: diag.sampleChars });
+            if (diag.voices?.length) cloudVoiceCache[currentLang()] = diag.voices;
+            const known = diag.voices?.some((v) => v.name === settings.cloudVoice);
+            if (!known) settings.cloudVoice = diag.voice;
+            const changed = settings.engine !== 'cloud';
+            settings.engine = 'cloud';
+            settings.cloudReady = true;
+            saveSettings();
+            if (changed) player.voiceChanged();
+            if (currentBook) updatePlayerUI();
+            playSample();
+        }
+        rerenderSheet(render);
+    };
+
+    // Re-check automatically when the user comes back from the Google console
+    setupRecheck = () => {
+        if (document.visibilityState === 'visible' && setupOpen && diag?.failed && diag.failed !== 'key') setTimeout(check, 700);
+    };
+    document.addEventListener('visibilitychange', setupRecheck);
+
+    setupOpen = true;
+    openSheet('Свържи Google HD', render, () => {
+        setupOpen = false;
+        document.removeEventListener('visibilitychange', setupRecheck);
+        if (sampleUrl) URL.revokeObjectURL(sampleUrl);
+    });
+    if (effectiveSettings().apiKey) check();
+}
+
 async function testKey(body) {
     const key = ($('#setKey', body).value || '').trim() || preconfiguredKey();
     settings.apiKey = ($('#setKey', body).value || '').trim();
@@ -1007,6 +1179,9 @@ async function testKey(body) {
         ${c ? '✓' : '✕'} Google HD гласове ${c ? 'работят' : '— ' + esc(res[1].reason?.message || '')}`;
     if (g) geminiModelList = res[0].value;
     if (c) cloudVoiceCache = { bg: res[1].value };
+    if (!c && res[1].reason?.reason) status.innerHTML += ' <a href="#" id="keyFix">Поправи</a>';
+    const fixLink = $('#keyFix', body);
+    if (fixLink) fixLink.onclick = (ev) => { ev.preventDefault(); openCloudSetup({ backToSettings: true }); };
 }
 
 // ==================== Events ====================
@@ -1154,9 +1329,14 @@ function bindEvents() {
         const err = e.detail;
         console.error(err);
         const offerDevice = settings.engine !== 'device';
+        const setupIssue = settings.engine === 'cloud' && /^(API_KEY|SERVICE_DISABLED|BILLING_DISABLED)/.test(err.reason || '');
+        if (setupIssue) {
+            settings.cloudReady = false;
+            saveSettings();
+        }
         toast(err.message || 'Грешка при четене.', {
             error: true, duration: 8000,
-            action: offerDevice ? { label: 'Чети с телефона', run: () => { settings.engine = 'device'; saveSettings(); updatePlayerUI(); player.play(); } } : null,
+            action: setupIssue ? { label: 'Поправи', run: () => openCloudSetup({ thenPlay: true }) } : offerDevice ? { label: 'Чети с телефона', run: () => { settings.engine = 'device'; saveSettings(); updatePlayerUI(); player.play(); } } : null,
         });
     });
 

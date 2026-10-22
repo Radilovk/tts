@@ -63,11 +63,36 @@ export function cloudTier(voiceName = '') {
 }
 
 class ApiError extends Error {
-    constructor(message, status, retryable) {
+    constructor(message, status, retryable, info = {}) {
         super(message);
         this.status = status;
         this.retryable = retryable;
+        this.reason = info.reason || '';
+        this.project = info.project || '';
+        this.fixUrl = info.fixUrl || '';
     }
+}
+
+// Pull the machine-readable cause out of a Google API error: the reason code,
+// the project number behind the key and the console link that fixes it.
+function errorInfo(data) {
+    const err = data?.error || {};
+    const msg = err.message || '';
+    const details = err.details || [];
+    const info = details.find((d) => /ErrorInfo/.test(d['@type'] || '')) || {};
+    let reason = info.reason || '';
+    if (!reason) {
+        if (/API key not valid/i.test(msg)) reason = 'API_KEY_INVALID';
+        else if (/billing/i.test(msg)) reason = 'BILLING_DISABLED';
+        else if (/has not been used|is disabled/i.test(msg)) reason = 'SERVICE_DISABLED';
+        else if (/are blocked/i.test(msg)) reason = 'API_KEY_SERVICE_BLOCKED';
+        else if (/referer|referrer/i.test(msg)) reason = 'API_KEY_HTTP_REFERRER_BLOCKED';
+    }
+    const project = String(info.metadata?.consumer || '').replace('projects/', '') ||
+        (msg.match(/project(?:\s*#|\s)\s*(\d+)/i) || [])[1] || '';
+    const help = details.find((d) => /Help/.test(d['@type'] || ''))?.links?.[0]?.url || '';
+    const inMsg = (msg.match(/https:\/\/console\.[^\s"]+/) || [])[0]?.replace(/[.,)]+$/, '') || '';
+    return { reason, project, fixUrl: info.metadata?.activationUrl || inMsg || help };
 }
 
 async function fetchJson(url, options, timeoutMs, signal) {
@@ -81,7 +106,8 @@ async function fetchJson(url, options, timeoutMs, signal) {
         try { data = await res.json(); } catch {}
         if (!res.ok) {
             const msg = data?.error?.message || `HTTP ${res.status}`;
-            throw new ApiError(friendlyError(res.status, msg), res.status, res.status === 429 || res.status >= 500);
+            const info = errorInfo(data);
+            throw new ApiError(friendlyError(res.status, msg, info.reason), res.status, res.status === 429 || res.status >= 500, info);
         }
         return data;
     } catch (e) {
@@ -95,12 +121,14 @@ async function fetchJson(url, options, timeoutMs, signal) {
     }
 }
 
-function friendlyError(status, msg) {
-    if (/API key not valid|API_KEY_INVALID/i.test(msg)) return 'Невалиден API ключ.';
-    if (/has not been used|is disabled|SERVICE_DISABLED/i.test(msg)) {
-        return 'Cloud Text-to-Speech API не е включен за този ключ. Включете го в Google Cloud Console.';
+function friendlyError(status, msg, reason) {
+    switch (reason) {
+        case 'API_KEY_INVALID': return 'Невалиден API ключ.';
+        case 'SERVICE_DISABLED': return 'Google HD гласовете не са включени за този ключ.';
+        case 'BILLING_DISABLED': return 'Google HD изисква свързан профил за плащане (първият 1M знака месечно остава безплатен).';
+        case 'API_KEY_SERVICE_BLOCKED': return 'Ключът е ограничен и не позволява Text-to-Speech.';
+        case 'API_KEY_HTTP_REFERRER_BLOCKED': return 'Ключът не е разрешен за този сайт.';
     }
-    if (/billing/i.test(msg)) return 'За Google Cloud TTS трябва да е активирано плащане (безплатните 1M знака остават безплатни).';
     if (status === 429) return 'Достигнат лимит на заявките. Опитвам отново…';
     if (status === 403) return 'Достъпът е отказан: ' + msg;
     return msg;
@@ -162,6 +190,68 @@ export async function cloudSynthesize({ apiKey, text, voice, locale, signal }) {
     }, 60000, signal), signal);
     if (!data?.audioContent) throw new ApiError('Не е получено аудио.', 0, true);
     return { blob: new Blob([base64ToBytes(data.audioContent)], { type: cloudAudioFormat.mime }), chars: text.length };
+}
+
+export const CLOUD_LINKS = {
+    aiStudioKey: 'https://aistudio.google.com/apikey',
+    enableApi: (p) => `https://console.cloud.google.com/apis/library/texttospeech.googleapis.com${p ? '?project=' + p : ''}`,
+    billing: (p) => `https://console.cloud.google.com/billing/linkedaccount${p ? '?project=' + p : ''}`,
+    credentials: (p) => `https://console.cloud.google.com/apis/credentials${p ? '?project=' + p : ''}`,
+    budgets: 'https://console.cloud.google.com/billing/budgets',
+};
+
+const DIAG_SAMPLE = {
+    bg: 'Готово. Така ще звучи вашата книга.',
+    en: 'All set. This is how your book will sound.',
+};
+
+// Walk through everything Google HD needs and report the first missing piece:
+//   key -> Text-to-Speech API enabled -> billing linked.
+// Each step: 'ok' | 'fail' | 'wait'. A failing step carries the console link
+// for *this key's* project, so the user lands on exactly the right page.
+export async function cloudDiagnose(apiKey, lang = 'bg') {
+    const r = { key: 'wait', api: 'wait', billing: 'wait', failed: null, message: '', fixUrl: '', project: '', voices: null, voice: '', sample: null };
+    if (!apiKey) {
+        Object.assign(r, { key: 'fail', failed: 'key', message: 'Добавете API ключ.', fixUrl: CLOUD_LINKS.aiStudioKey });
+        return r;
+    }
+    const fail = (e) => {
+        r.project = e.project || '';
+        const p = r.project;
+        switch (e.reason) {
+            case 'API_KEY_INVALID':
+                return Object.assign(r, { key: 'fail', failed: 'key', message: 'Ключът е невалиден — копирайте го отново.', fixUrl: CLOUD_LINKS.aiStudioKey });
+            case 'API_KEY_HTTP_REFERRER_BLOCKED':
+                return Object.assign(r, { key: 'fail', failed: 'key', message: `Ключът не позволява сайта ${location.host}. Добавете го към разрешените адреси на ключа.`, fixUrl: CLOUD_LINKS.credentials(p) });
+            case 'SERVICE_DISABLED':
+                return Object.assign(r, { key: 'ok', api: 'fail', failed: 'api', message: 'Натиснете „Включи“ на страницата, която ще се отвори, после се върнете тук.', fixUrl: e.fixUrl || CLOUD_LINKS.enableApi(p) });
+            case 'API_KEY_SERVICE_BLOCKED':
+                return Object.assign(r, { key: 'ok', api: 'fail', failed: 'api', message: 'Ключът е ограничен само за някои услуги. Отворете ключа и добавете „Cloud Text-to-Speech API“ към разрешените (или махнете ограничението за API).', fixUrl: CLOUD_LINKS.credentials(p) });
+            case 'BILLING_DISABLED':
+                return Object.assign(r, { key: 'ok', api: 'ok', billing: 'fail', failed: 'billing', message: 'Свържете профил за плащане към проекта. Google не таксува до 1M знака месечно (~20 ч слушане).', fixUrl: (e.fixUrl && /billing/.test(e.fixUrl)) ? e.fixUrl : CLOUD_LINKS.billing(p) });
+            default:
+                return Object.assign(r, { failed: r.key === 'ok' ? (r.api === 'ok' ? 'billing' : 'api') : 'key', message: e.message || 'Неизвестна грешка.' });
+        }
+    };
+    try {
+        let voices = await cloudVoices(apiKey, lang);
+        r.key = 'ok';
+        r.api = 'ok';
+        r.voices = voices;
+        if (!voices.length) voices = await cloudVoices(apiKey, 'en');
+        const v = voices.find((x) => x.tier === 'Chirp3-HD' && /Charon|Kore|Aoede/.test(x.name)) || voices.find((x) => x.tier === 'Chirp3-HD') || voices[0];
+        if (!v) return Object.assign(r, { failed: 'api', api: 'fail', message: 'Google не върна гласове.' });
+        const text = DIAG_SAMPLE[v.locale.slice(0, 2)] || DIAG_SAMPLE.en;
+        const { blob } = await cloudSynthesize({ apiKey, text, voice: v.name, locale: v.locale });
+        r.billing = 'ok';
+        r.voice = v.name;
+        r.sample = blob;
+        r.sampleChars = text.length;
+        return r;
+    } catch (e) {
+        if (e.name === 'AbortError') throw e;
+        return fail(e);
+    }
 }
 
 // ---------- Gemini TTS ----------
