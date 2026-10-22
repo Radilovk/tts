@@ -423,3 +423,18 @@ textarea.input { height: auto; min-height: 86px; padding: 12px 14px; resize: ver
 .setup-cta b { display: block; font-size: 15px; }
 .setup-cta small { display: block; font-size: 13px; color: var(--muted); }
 .setup-cta-go { flex: none; height: 36px; padding: 0 16px; border-radius: 999px; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-weight: 600; font-size: 14px; }
+
+/* ===== Navigation ===== */
+.scrub { position: relative; }
+.seek-bubble {
+    position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+    width: min(78vw, 340px); padding: 10px 14px; border-radius: 14px; background: var(--ink); color: var(--bg);
+    font-family: var(--serif); font-size: 14px; line-height: 1.4; box-shadow: var(--shadow-lg); pointer-events: none; z-index: 5;
+}
+.nav-book { padding: 4px 0 6px; }
+.nav-book-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; font-variant-numeric: tabular-nums; }
+.nav-preview { font-size: 13px; color: var(--ink-2); min-height: 20px; margin-top: 2px; }
+.nav-search { margin-top: 14px; }
+.snippet { display: block; font-size: 13px; line-height: 1.45; color: var(--ink-2); }
+.snippet mark { background: var(--highlight); color: var(--ink); border-radius: 3px; padding: 0 2px; }
+.list-item.done .grow > .truncate { color: var(--muted); }

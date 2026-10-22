@@ -3,7 +3,7 @@
 // paid for twice, no matter how many times it is replayed.
 
 const DB_NAME = 'razkazvach';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise = null;
 
@@ -20,6 +20,8 @@ function open() {
                 audio.createIndex('at', 'at');
                 audio.createIndex('bookId', 'bookId');
             }
+            // Translated chapters: key = `${bookId}|${lang}|${chapter}`
+            if (!db.objectStoreNames.contains('trans')) db.createObjectStore('trans', { keyPath: 'key' });
         };
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
@@ -142,4 +144,9 @@ export async function requestPersistence() {
     try {
         if (navigator.storage && navigator.storage.persist) await navigator.storage.persist();
     } catch {}
+}
+
+export async function transDeleteBook(bookId) {
+    const s = await store('trans', 'readwrite');
+    return wrap(s.delete(IDBKeyRange.bound(bookId + '|', bookId + '|\uffff')));
 }

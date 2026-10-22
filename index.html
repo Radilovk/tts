@@ -113,7 +113,10 @@
                 <span id="pChapter" class="truncate"></span>
                 <svg class="ic ic-sm"><use href="#i-list"/></svg>
             </button>
-            <input id="chapterSlider" class="slider" type="range" min="0" max="100" value="0" step="1" aria-label="Позиция в главата">
+            <div class="scrub">
+                <div id="seekBubble" class="seek-bubble hidden" aria-hidden="true"></div>
+                <input id="chapterSlider" class="slider" type="range" min="0" max="100" value="0" step="1" aria-label="Позиция в главата">
+            </div>
             <div class="time-row">
                 <span id="pPos"></span>
                 <span id="pRemain"></span>
