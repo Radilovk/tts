@@ -464,3 +464,5 @@ textarea.input { height: auto; min-height: 86px; padding: 12px 14px; resize: ver
 .shelf-card .cover-gen b { font-size: 1.2em; }
 .world-search { margin: 0 0 22px; }
 .world-search .input { height: 50px; border-radius: 999px; padding: 0 20px; background: var(--surface); }
+.list-item input[type=radio], .list-item input[type=checkbox] { accent-color: var(--accent); width: 20px; height: 20px; margin: 0 12px 0 0; flex: none; }
+label.list-item { cursor: pointer; }

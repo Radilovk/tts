@@ -57,6 +57,9 @@ export class Player extends EventTarget {
 
     async load(book, chapters) {
         this.stop();
+        clearTimeout(this._seekTimer);
+        this._seekTimer = null;
+        this.gen = (this.gen || 0) + 1; // work started for an earlier book is dropped
         this.book = book;
         this.chapters = chapters;
         this.models.clear();
@@ -90,10 +93,14 @@ export class Player extends EventTarget {
     ensureChapter(c) {
         if (!this.needsTranslation(c) || !this.translator) return Promise.resolve();
         if (this.translating.has(c)) return this.translating.get(c);
+        const gen = this.gen;
+        const book = this.book;
         const p = (async () => {
             const tr = await this.translator(c, this.chapters[c], (f) => {
-                if (c === this.pos.c) this.dispatchEvent(new CustomEvent('translating', { detail: f }));
+                if (gen === this.gen && c === this.pos.c) this.dispatchEvent(new CustomEvent('translating', { detail: f }));
             });
+            // Another book was opened (or translation switched off) meanwhile
+            if (gen !== this.gen || book !== this.book || !this.book.translateTo) throw Object.assign(new Error('stale'), { name: 'AbortError' });
             const old = this.models.get(c);
             this.translated.set(c, tr);
             this.models.delete(c);
@@ -109,7 +116,7 @@ export class Player extends EventTarget {
             this._emit('save');
         })();
         this.translating.set(c, p);
-        p.catch(() => this.translating.delete(c));
+        p.catch(() => { if (this.translating.get(c) === p) this.translating.delete(c); });
         return p;
     }
 
@@ -119,6 +126,7 @@ export class Player extends EventTarget {
         this.stop();
         const para = this.model(this.pos.c).sentences[this.pos.s]?.p ?? 0;
         this.book.translateTo = to || null;
+        this.gen = (this.gen || 0) + 1;
         this.translated.clear();
         this.translating.clear();
         this.models.clear();
@@ -329,8 +337,9 @@ export class Player extends EventTarget {
         const text = chunkText(m, s0, s1);
         if (!text) return null;
         const vk = this._settingsKey();
-        const key = await hash(`${vk}|${this._lang()}|${text}`);
-        return { c, s0, s1, text, key, vk, chars: charLen(m, s0, s1) };
+        const lang = this._lang();
+        const key = await hash(`${vk}|${lang}|${text}`);
+        return { c, s0, s1, text, key, vk, lang, chars: charLen(m, s0, s1) };
     }
 
     // Spec for a chunk starting at sentence s (partial up to the next fixed boundary).
@@ -365,22 +374,23 @@ export class Player extends EventTarget {
     // Get (from cache or by synthesis) the audio record for a chunk.
     _ensure(spec) {
         if (this.queue.has(spec.key)) return this.queue.get(spec.key);
+        const book = this.book;
         const p = (async () => {
             const cached = await db.audioGet(spec.key);
             if (cached) return cached;
-            const shared = !!this.book.shared;
+            const shared = !!book.shared;
             // Public-domain book: someone may already have had this part narrated
             if (shared) {
                 const remote = await sharedGetAudio(spec.key);
                 if (remote) {
-                    const rec = { key: spec.key, blob: remote.blob, dur: remote.dur || await blobDuration(remote.blob), chars: spec.chars, bookId: this.book.id };
+                    const rec = { key: spec.key, blob: remote.blob, dur: remote.dur || await blobDuration(remote.blob), chars: spec.chars, bookId: book.id };
                     await db.audioPut(rec);
                     return rec;
                 }
             }
-            const rec = await this._synthesize(spec);
+            const rec = await this._synthesize(spec, book);
             await db.audioPut(rec);
-            if (shared) sharedPutAudio(spec.key, spec.vk, this._lang(), spec.text, rec.blob, rec.dur);
+            if (shared) sharedPutAudio(spec.key, spec.vk, spec.lang, spec.text, rec.blob, rec.dur);
             db.audioEvict(this.getSettings().cacheMB * 1024 * 1024).catch(() => {});
             return rec;
         })();
@@ -407,11 +417,11 @@ export class Player extends EventTarget {
         }
     }
 
-    async _synthesize(spec) {
+    async _synthesize(spec, book = this.book) {
         const st = this.getSettings();
         const freeKey = st.engine === 'gemini' ? usableFreeKey(st) : '';
         if (!st.apiKey && !freeKey) throw new Error('Добавете Google API ключ в настройките или изберете гласа на устройството.');
-        const lang = this._lang();
+        const lang = spec.lang || this._lang();
         // Economy mode: this part is already being prepared at half price
         if (st.engine === 'gemini' && st.geminiEconomy && !this.allowFullPrice && pendingKeys().has(spec.key)) {
             throw Object.assign(new Error('Тази част се подготвя на половин цена — обикновено до няколко минути.'), { reason: 'BATCH_PENDING' });
@@ -450,7 +460,7 @@ export class Player extends EventTarget {
         const prev = this.synthSeconds[st.engine];
         this.synthSeconds[st.engine] = prev ? prev * 0.6 + took * 0.4 : took;
         const dur = result.dur || await blobDuration(result.blob);
-        return { key: spec.key, blob: result.blob, dur, chars: spec.chars, bookId: this.book.id };
+        return { key: spec.key, blob: result.blob, dur, chars: spec.chars, bookId: book.id };
     }
 
     // ---------- remote playback ----------
@@ -578,7 +588,9 @@ export class Player extends EventTarget {
             if (this.history.length > 30) this.history.shift();
             const session = ++this.session;
             let next;
-            try { next = await this._specAfter(done); } catch (e) { if (session === this.session) this._fail(e); return; }
+            const slow = setTimeout(() => { if (session === this.session) { this.loading = true; this._emit('state'); } }, 400);
+            try { next = await this._specAfter(done); } catch (e) { clearTimeout(slow); if (session === this.session) this._fail(e); return; }
+            clearTimeout(slow);
             if (session !== this.session) return;
             if (!next) return this._finished();
             if (next.c !== done.c) {
@@ -673,6 +685,8 @@ export class Player extends EventTarget {
                     id, text: sent.speak, voice: st.deviceVoice || '', lang: LOCALES[lang] || lang,
                     rate: this.rate, pitch: 1, flush: this._nFlush, pauseAfter: Math.round(pause / this.rate),
                 });
+                // Stopped or another book opened while the sentence was being handed over
+                if (session !== this.session) { if (!this.playing) Native.stopSpeaking().catch(() => {}); return; }
                 this._nFlush = false;
             }
         } catch (e) {
@@ -810,7 +824,7 @@ export class Player extends EventTarget {
         if (!('mediaSession' in navigator) || !this.book) return;
         const artwork = this.book.coverUrl ? [{ src: this.book.coverUrl, sizes: '400x600', type: 'image/jpeg' }] : [];
         navigator.mediaSession.metadata = new MediaMetadata({
-            title: this.chapters[this.pos.c]?.title || this.book.title,
+            title: this.book.chapterTitles?.[this.pos.c] || this.chapters[this.pos.c]?.title || this.book.title,
             artist: this.book.author || '',
             album: this.book.title,
             artwork,

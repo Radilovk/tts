@@ -22,6 +22,7 @@ const BG_AUTHORS = [
 export const SHELVES = [
     { id: 'bg', title: 'Българска класика', note: 'Wikisource', kind: 'wikisource-authors', lang: 'bg' },
     // Foreign shelves are shown and read in the reader's language (titles and text translated)
+    { id: 'community', title: 'Добавени от читатели', note: 'с посочен източник', kind: 'community' },
     { id: 'world', title: 'Световна класика', note: 'превод на български', kind: 'gutendex', params: { languages: 'en' }, translateTo: 'bg' },
     { id: 'ru', title: 'Руска класика', note: 'превод на български', kind: 'gutendex', params: { languages: 'ru' }, translateTo: 'bg' },
     { id: 'de', title: 'Немска класика', note: 'превод на български', kind: 'gutendex', params: { languages: 'de' }, translateTo: 'bg' },
@@ -76,6 +77,7 @@ export async function loadShelf(shelf, page = 1) {
     if (shelf.kind === 'wikisource-authors') {
         return { items: BG_AUTHORS.map(([name, died]) => ({ source: 'wikisource-author', title: name, author: `† ${died}`, lang: shelf.lang, died })), next: null };
     }
+    if (shelf.kind === 'community') return { items: await communityBooks(''), next: null };
     const cacheKey = `${shelf.id}_${page}`;
     const hit = cacheGet(cacheKey);
     if (hit) return hit;
@@ -89,6 +91,52 @@ export async function loadShelf(shelf, page = 1) {
     const out = { items, next: data.next ? page + 1 : null };
     cacheSet(cacheKey, out);
     return out;
+}
+
+// ---------- books shared by readers ----------
+
+export const RIGHTS_LABELS = {
+    pd: 'Обществено достояние',
+    own: 'Собствено произведение на качилия',
+    cc0: 'CC0 (без запазени права)',
+    'cc-by': 'Creative Commons BY',
+    'cc-by-sa': 'Creative Commons BY-SA',
+};
+
+export function communityItem(b) {
+    return {
+        source: 'community', id: b.id, title: b.title, author: b.author || '', lang: b.lang || 'bg',
+        rights: b.rights, origin: b.source, by: b.by || '', year: b.year, shareable: true,
+    };
+}
+
+export async function communityBooks(q) {
+    const api = libraryApi();
+    if (!api) return [];
+    const r = await fetch(`${api}/community?${new URLSearchParams({ q })}`, { cache: 'no-store' });
+    if (!r.ok) throw new Error('Общата библиотека не отговаря.');
+    return (await r.json()).items.map(communityItem);
+}
+
+async function serverJson(path, body) {
+    const api = libraryApi();
+    if (!api) throw new Error('Сървърът на библиотеката не е наличен.');
+    const r = await fetch(`${api}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || 'Сървърът отказа заявката.');
+    return d;
+}
+
+// Share a book in the common library: text, where it comes from and the legal basis.
+export function shareCommunityBook(book, chapters, form) {
+    return serverJson('/community', {
+        title: book.originalTitle || book.title, author: book.author || '', lang: book.lang,
+        chapters: chapters.map((c) => ({ title: c.title, paras: c.paras })), ...form,
+    });
+}
+
+export function reportCommunityBook(id, reason, contact) {
+    return serverJson(`/community/${id}/report`, { reason, contact });
 }
 
 // Book files go through our server: it has CORS and a trusted certificate on every
@@ -228,6 +276,14 @@ export async function fetchCatalogBook(item, onProgress) {
         return book;
     }
     if (item.source === 'wikisource') return downloadWikisource(item, onProgress);
+    if (item.source === 'community') {
+        onProgress?.(0.2);
+        const r = await fetch(`${libraryApi()}/community/${item.id}`);
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Книгата не е налична.');
+        const b = await r.json();
+        onProgress?.(1);
+        return { title: b.title, author: b.author, lang: b.lang, cover: null, chapters: b.chapters };
+    }
     if (item.source === 'ia') {
         const { file } = await downloadArchive(item, onProgress);
         const book = await parseBook(file, (p) => onProgress?.(0.5 + p / 2));
@@ -251,6 +307,7 @@ export async function fetchCatalogBook(item, onProgress) {
 export async function sourceKey(item) {
     if (item.source === 'gutenberg') return `pg-${item.id}`;
     if (item.source === 'ia') return `ia-${String(item.id).replace(/[^\w.-]/g, '').slice(0, 60)}`;
+    if (item.source === 'community') return `cm-${item.id}`;
     if (item.source === 'arxiv') return `arxiv-${String(item.id).replace(/[^\w.-]/g, '').slice(0, 60)}`;
     const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(`${item.lang}:${item.id}`));
     return 'ws-' + [...new Uint8Array(buf)].slice(0, 8).map((b) => b.toString(16).padStart(2, '0')).join('');

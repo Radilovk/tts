@@ -8,6 +8,11 @@
 //   GET  /trans/:key   PUT /trans/:key    → shared chapter translation (JSON)
 //   GET  /proxy?url=…                    → open libraries without browser CORS (arXiv, OAPEN,
 //                                          Internet Archive, Gutenberg); allow-listed hosts only
+//   GET  /community?q=…                  → books shared by readers (title, author, source, rights)
+//   GET  /community/:id                  → one shared book (parsed text, JSON)
+//   POST /community                      → share a book: text + source + rights declaration
+//   POST /community/:id/report           → notice of infringement: the book is hidden at once
+//   POST /community/:id/restore          → (admin, ADMIN_TOKEN) show a reported book again
 //
 // Only public-domain books use the shared store (the app decides; see js/library.js).
 // Every chunk is synthesized once and then served to every listener.
@@ -21,6 +26,8 @@ const ALLOWED_ORIGINS = [
 const MAX_AUDIO_BYTES = 12 * 1024 * 1024;
 const MAX_TRANS_BYTES = 2 * 1024 * 1024;
 const MAX_PROXY_BYTES = 80 * 1024 * 1024;
+const MAX_BOOK_BYTES = 6 * 1024 * 1024;
+const RIGHTS = ['pd', 'own', 'cc0', 'cc-by', 'cc-by-sa'];
 const PROXY_HOSTS = [/^(export\.)?arxiv\.org$/, /^library\.oapen\.org$/, /^([\w-]+\.)*archive\.org$/, /^(www\.)?gutenberg\.org$/];
 
 function cors(req) {
@@ -28,8 +35,8 @@ function cors(req) {
     const ok = ALLOWED_ORIGINS.includes(origin) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
     return {
         'Access-Control-Allow-Origin': ok ? origin : ALLOWED_ORIGINS[0],
-        'Access-Control-Allow-Methods': 'GET, HEAD, PUT, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, X-Rz-Voice, X-Rz-Lang, X-Rz-Text',
+        'Access-Control-Allow-Methods': 'GET, HEAD, PUT, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, X-Rz-Voice, X-Rz-Lang, X-Rz-Text, Authorization',
         'Access-Control-Max-Age': '86400',
         Vary: 'Origin',
     };
@@ -166,6 +173,110 @@ async function trans(req, env, key) {
     return json(req, { error: 'method' }, 405);
 }
 
+// ---------- books shared by readers ----------
+// The reader who uploads a book names where it comes from and declares the legal
+// basis (public domain, own work or a free licence). Anyone can report a book; a
+// reported book disappears from the library until it is reviewed.
+
+const cleanStr = (v, n) => String(v ?? '').replace(/[\u0000-\u001f]+/g, ' ').trim().slice(0, n);
+
+async function communityList(req, env) {
+    const q = cleanStr(new URL(req.url).searchParams.get('q'), 100).toLowerCase();
+    const out = [];
+    let cursor;
+    do {
+        const page = await env.AUDIO.list({ prefix: 'c/m/', cursor, include: ['customMetadata'], limit: 1000 });
+        for (const o of page.objects) {
+            const m = o.customMetadata || {};
+            if (m.hidden === '1') continue;
+            if (q && !`${m.title} ${m.author}`.toLowerCase().includes(q)) continue;
+            out.push({ id: o.key.slice(4), title: m.title, author: m.author, lang: m.lang, rights: m.rights,
+                source: m.source, by: m.by, year: Number(m.year) || null, uploaded: Number(m.uploaded) || 0 });
+        }
+        cursor = page.truncated ? page.cursor : null;
+    } while (cursor && out.length < 2000);
+    out.sort((a, b) => b.uploaded - a.uploaded);
+    return json(req, { items: out.slice(0, q ? 40 : 30) });
+}
+
+async function communityGet(req, env, id) {
+    const meta = await env.AUDIO.head(`c/m/${id}`);
+    if (!meta || meta.customMetadata?.hidden === '1') return json(req, { error: 'Книгата не е налична.' }, 404);
+    const obj = await env.AUDIO.get(`c/b/${id}`);
+    if (!obj) return json(req, { error: 'Книгата не е налична.' }, 404);
+    return new Response(obj.body, { headers: { ...cors(req), 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300' } });
+}
+
+async function communityPost(req, env) {
+    const body = await req.text();
+    if (body.length > MAX_BOOK_BYTES) return json(req, { error: 'Книгата е твърде голяма (до 6 MB текст).' }, 413);
+    let d;
+    try { d = JSON.parse(body); } catch { return json(req, { error: 'bad json' }, 400); }
+    const title = cleanStr(d.title, 200);
+    const author = cleanStr(d.author, 200);
+    const lang = cleanStr(d.lang, 5).toLowerCase();
+    const source = cleanStr(d.source, 300);
+    const rights = String(d.rights || '');
+    const by = cleanStr(d.by, 60);
+    const year = new Date().getFullYear();
+    const death = Number(d.authorDeath) || 0;
+    const trDeath = d.translatorDeath === null || d.translatorDeath === undefined || d.translatorDeath === '' ? null : Number(d.translatorDeath);
+    if (!title || !source || source.length < 4) return json(req, { error: 'Нужни са заглавие и източник.' }, 400);
+    if (!RIGHTS.includes(rights) || d.declare !== true) return json(req, { error: 'Нужна е декларация за правата.' }, 400);
+    if (rights === 'pd') {
+        // EU: free 70 years after the death of the author (and of the translator)
+        if (!death || death > year - 71) return json(req, { error: `Обществено достояние е само ако авторът е починал до ${year - 71} г.` }, 400);
+        if (trDeath !== null && (!trDeath || trDeath > year - 71)) return json(req, { error: `Преводът също трябва да е свободен: преводачът да е починал до ${year - 71} г.` }, 400);
+    }
+    if (!Array.isArray(d.chapters) || !d.chapters.length || d.chapters.length > 2000) return json(req, { error: 'Няма текст.' }, 400);
+    const chapters = d.chapters.map((c) => ({
+        title: cleanStr(c?.title, 300),
+        paras: (Array.isArray(c?.paras) ? c.paras : []).map((p) => String(p ?? '').slice(0, 20000)).filter(Boolean),
+    })).filter((c) => c.paras.length);
+    if (!chapters.length) return json(req, { error: 'Няма текст.' }, 400);
+    // The same text always gets the same id, so a book is stored once
+    const id = (await sha1Hex(chapters.map((c) => c.paras.join('\n')).join('\n\n'))).slice(0, 20);
+    const existing = await env.AUDIO.head(`c/m/${id}`);
+    if (existing) {
+        if (existing.customMetadata?.hidden === '1') return json(req, { error: 'Тази книга е премахната след сигнал.' }, 409);
+        return json(req, { ok: true, id, existed: true });
+    }
+    const book = { title, author, lang, chapters, source, rights, by };
+    await env.AUDIO.put(`c/b/${id}`, JSON.stringify(book), { httpMetadata: { contentType: 'application/json' } });
+    await env.AUDIO.put(`c/m/${id}`, '', {
+        customMetadata: {
+            title, author, lang, source, rights, by, year: String(Number(d.year) || ''), uploaded: String(Date.now()),
+            authorDeath: String(death || ''), translatorDeath: trDeath === null ? '' : String(trDeath),
+            ip: req.headers.get('CF-Connecting-IP') || '', hidden: '0',
+        },
+    });
+    return json(req, { ok: true, id });
+}
+
+async function setHidden(env, id, hidden) {
+    const meta = await env.AUDIO.head(`c/m/${id}`);
+    if (!meta) return false;
+    await env.AUDIO.put(`c/m/${id}`, '', { customMetadata: { ...meta.customMetadata, hidden: hidden ? '1' : '0' } });
+    return true;
+}
+
+async function communityReport(req, env, id) {
+    let d = {};
+    try { d = await req.json(); } catch {}
+    const reason = cleanStr(d.reason, 2000);
+    if (reason.length < 5) return json(req, { error: 'Опишете накратко нарушението.' }, 400);
+    if (!(await setHidden(env, id, true))) return json(req, { error: 'not found' }, 404);
+    await env.AUDIO.put(`c/r/${id}/${Date.now()}`, JSON.stringify({
+        reason, contact: cleanStr(d.contact, 200), at: new Date().toISOString(), ip: req.headers.get('CF-Connecting-IP') || '',
+    }), { httpMetadata: { contentType: 'application/json' } });
+    return json(req, { ok: true });
+}
+
+async function communityRestore(req, env, id) {
+    if (!env.ADMIN_TOKEN || req.headers.get('Authorization') !== `Bearer ${env.ADMIN_TOKEN}`) return json(req, { error: 'forbidden' }, 403);
+    return (await setHidden(env, id, false)) ? json(req, { ok: true }) : json(req, { error: 'not found' }, 404);
+}
+
 export default {
     async fetch(req, env, ctx) {
         if (req.method === 'OPTIONS') return new Response(null, { headers: cors(req) });
@@ -178,6 +289,13 @@ export default {
             if (path === '/proxy' && req.method === 'GET') return proxy(req, ctx);
             m = path.match(/^\/audio\/([0-9a-f]{40})$/);
             if (m) return audio(req, env, m[1]);
+            if (path.startsWith('/community') && !env.AUDIO) return json(req, { error: 'Общата библиотека не е включена.' }, 503);
+            if (path === '/community' && req.method === 'GET') return communityList(req, env);
+            if (path === '/community' && req.method === 'POST') return communityPost(req, env);
+            m = path.match(/^\/community\/([0-9a-f]{20})(\/report|\/restore)?$/);
+            if (m && !m[2] && req.method === 'GET') return communityGet(req, env, m[1]);
+            if (m && m[2] === '/report' && req.method === 'POST') return communityReport(req, env, m[1]);
+            if (m && m[2] === '/restore' && req.method === 'POST') return communityRestore(req, env, m[1]);
             m = path.match(/^\/trans\/(.+)$/);
             if (m) return trans(req, env, m[1]);
             return json(req, { error: 'not found' }, 404);
