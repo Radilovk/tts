@@ -4,8 +4,17 @@
 import { normalizeSpace, detectLang } from './text.js';
 
 const JSZIP_URL = 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js';
-const PDFJS_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.2.67/build/pdf.min.mjs';
-const PDFJS_WORKER = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.2.67/build/pdf.worker.min.mjs';
+// Legacy build: works in older Chromium-based browsers (Opera, Huawei WebView)
+const PDFJS_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.2.67/legacy/build/pdf.min.mjs';
+const PDFJS_WORKER = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.2.67/legacy/build/pdf.worker.min.mjs';
+
+if (typeof Promise.withResolvers !== 'function') {
+    Promise.withResolvers = function () {
+        let resolve, reject;
+        const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+        return { promise, resolve, reject };
+    };
+}
 
 export const ACCEPT = '.epub,.pdf,.fb2,.docx,.txt,.md,.markdown,.html,.htm,.xhtml';
 
