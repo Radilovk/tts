@@ -21,8 +21,9 @@ permissions:
   contents: write
 
 concurrency:
-  group: apk-${{ github.ref }}
-  cancel-in-progress: true
+  # One APK build at a time: they all publish to the same download link
+  group: apk-build
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -94,12 +95,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="apk-latest"
-          gh release delete "$TAG" -y --cleanup-tag --repo "${{ github.repository }}" 2>/dev/null || true
-          gh release create "$TAG" release/Razkazvach.apk \
-            --repo "${{ github.repository }}" \
-            --target "${{ github.sha }}" \
-            --prerelease \
-            --title "Разказвач ${V_NAME}" \
-            --notes "Най-новият APK (${{ github.ref_name }}, ${GITHUB_SHA::7}). Изтеглете Razkazvach.apk и го отворете на телефона."
+          REPO="${{ github.repository }}"
+          TITLE="Разказвач ${V_NAME}"
+          NOTES="Най-новият APK (${{ github.ref_name }}, ${GITHUB_SHA::7}). Изтеглете Razkazvach.apk и го отворете на телефона."
+          # Update the existing release in place (safe when two builds finish close together)
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/Razkazvach.apk --clobber --repo "$REPO"
+            gh release edit "$TAG" --repo "$REPO" --title "$TITLE" --notes "$NOTES" --prerelease
+          else
+            gh release create "$TAG" release/Razkazvach.apk --repo "$REPO" --target "${{ github.sha }}" \
+              --prerelease --title "$TITLE" --notes "$NOTES" \
+            || gh release upload "$TAG" release/Razkazvach.apk --clobber --repo "$REPO"
+          fi
           echo "### APK ${V_NAME}" >> "$GITHUB_STEP_SUMMARY"
-          echo "https://github.com/${{ github.repository }}/releases/download/${TAG}/Razkazvach.apk" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://github.com/${REPO}/releases/download/${TAG}/Razkazvach.apk" >> "$GITHUB_STEP_SUMMARY"
