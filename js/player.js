@@ -40,6 +40,11 @@ export class Player extends EventTarget {
         this.rate = 1;
         this.sleepAtChapterEnd = false;
         this.charsPerSecond = 14;
+        this.translated = new Map();  // c -> translated chapter
+        this.translating = new Map(); // c -> Promise
+        this.translator = null;       // async (c, chapter, onProgress) => translated chapter
+        this.synthSeconds = {};       // engine -> average synthesis time
+        this._seekTimer = null;
         this._bindAudio();
     }
 
@@ -51,18 +56,82 @@ export class Player extends EventTarget {
         this.chapters = chapters;
         this.models.clear();
         this.queue.clear();
+        this.translated.clear();
+        this.translating.clear();
         this.history = [];
         this.pos = { ...(book.position || { c: 0, s: 0 }) };
         if (this.pos.c >= chapters.length) this.pos = { c: 0, s: 0 };
         this._emit('position');
     }
 
+    chapter(c) {
+        return this.translated.get(c) || this.chapters[c];
+    }
+
     model(c) {
         if (!this.models.has(c)) {
-            const m = buildChapterModel(this.chapters[c], this.book.lang);
+            const m = buildChapterModel(this.chapter(c), this.translated.has(c) ? this._lang() : this.book.lang);
+            m.pending = this.needsTranslation(c);
             this.models.set(c, m);
         }
         return this.models.get(c);
+    }
+
+    needsTranslation(c) {
+        return !!this.book?.translateTo && !this.translated.has(c) && c < this.chapters.length;
+    }
+
+    // Make sure chapter c is translated (when the book is set to be translated).
+    ensureChapter(c) {
+        if (!this.needsTranslation(c) || !this.translator) return Promise.resolve();
+        if (this.translating.has(c)) return this.translating.get(c);
+        const p = (async () => {
+            const tr = await this.translator(c, this.chapters[c], (f) => {
+                if (c === this.pos.c) this.dispatchEvent(new CustomEvent('translating', { detail: f }));
+            });
+            const old = this.models.get(c);
+            this.translated.set(c, tr);
+            this.models.delete(c);
+            if (!tr.auto && tr.title) this.book.chapterTitles[c] = tr.title;
+            if (this.pos.c === c && old) {
+                // Keep the place: same paragraph in the translated text
+                const para = old.sentences[this.pos.s]?.p ?? 0;
+                const m = this.model(c);
+                this.pos = { c, s: m.paras[Math.min(para, m.paras.length - 1)]?.first ?? 0 };
+            }
+            this._emit('translated');
+            this._emit('position');
+            this._emit('save');
+        })();
+        this.translating.set(c, p);
+        p.catch(() => this.translating.delete(c));
+        return p;
+    }
+
+    // Turn translation on/off for the open book, keeping the listener's paragraph.
+    setTranslation(to) {
+        const wasPlaying = this.playing;
+        this.stop();
+        const para = this.model(this.pos.c).sentences[this.pos.s]?.p ?? 0;
+        this.book.translateTo = to || null;
+        this.translated.clear();
+        this.translating.clear();
+        this.models.clear();
+        this.queue.clear();
+        this.history = [];
+        this.book.chapterTitles = this.chapters.map((ch) => ch.title);
+        const m = this.model(this.pos.c);
+        this.pos = { c: this.pos.c, s: m.paras[Math.min(para, m.paras.length - 1)]?.first ?? 0 };
+        this._emit('translated');
+        this._emit('position');
+        this._emit('save');
+        if (wasPlaying) this.play();
+    }
+
+    // Translate the next chapter in the background once the listener is well into this one.
+    _prefetchTranslation(c, s) {
+        const m = this.models.get(c);
+        if (m && s > m.sentences.length * 0.85 && this.needsTranslation(c + 1)) this.ensureChapter(c + 1).catch(() => {});
     }
 
     get engine() { return this.getSettings().engine; }
@@ -72,6 +141,15 @@ export class Player extends EventTarget {
         if (this.playing) return;
         this.playing = true;
         this._emit('state');
+        if (this.needsTranslation(this.pos.c)) {
+            const session = ++this.session;
+            this.loading = true;
+            this._emit('state');
+            try { await this.ensureChapter(this.pos.c); } catch (e) { if (session === this.session) this._fail(e); return; }
+            if (session !== this.session || !this.playing) return;
+            this.loading = false;
+            this._emit('state');
+        }
         if (this.engine === 'device') return this._deviceSpeak(++this.session);
         if (this.current && this.audio.src && this.audio.currentTime > 0 && !this.audio.ended) {
             try { await this.audio.play(); } catch (e) { this._fail(e); }
@@ -105,13 +183,28 @@ export class Player extends EventTarget {
     }
 
     // Jump to a sentence (from the text view, the chapter list or the slider).
+    // While playing, the new position starts after a short pause so that rapid
+    // taps or scrubbing only synthesize the place where the listener settles.
     seekTo(c, s) {
-        const wasPlaying = this.playing;
+        const wasPlaying = this.playing || !!this._seekTimer;
+        clearTimeout(this._seekTimer);
+        this._seekTimer = null;
         this.stop();
         this.pos = { c, s: Math.max(0, s) };
         this._emit('position');
         this._emit('save');
-        if (wasPlaying) this.play();
+        if (!wasPlaying) return;
+        this.playing = true;
+        this.loading = true;
+        this._emit('state');
+        const session = this.session;
+        this._seekTimer = setTimeout(() => {
+            this._seekTimer = null;
+            if (session !== this.session) return;
+            this.playing = false;
+            this.loading = false;
+            this.play();
+        }, 450);
     }
 
     // Relative skip in seconds; works on sentence units for the device voice.
@@ -134,10 +227,10 @@ export class Player extends EventTarget {
             return this._skipSentences(-3);
         }
         // Past the end of the chunk: continue into the next one
-        const next = this._specAfter(this.current);
+        const next = await this._specAfter(this.current);
         if (next) {
             this.history.push(this.current);
-            return this._playSpec(await next, ++this.session, { offset: t - dur });
+            return this._playSpec(next, ++this.session, { offset: t - dur });
         }
     }
 
@@ -171,6 +264,7 @@ export class Player extends EventTarget {
 
     // Synthesize a whole chapter ahead of time (for offline listening).
     async prepareChapter(c, onProgress) {
+        await this.ensureChapter(c);
         const m = this.model(c);
         const starts = chunkBoundaries(m, CHUNK_CHARS[this.engine]);
         for (let i = 0; i < starts.length; i++) {
@@ -207,6 +301,7 @@ export class Player extends EventTarget {
 
     _lang() {
         const st = this.getSettings();
+        if (this.book.translateTo) return this.book.translateTo;
         return st.lang && st.lang !== 'auto' ? st.lang : (this.book.lang || 'bg');
     }
 
@@ -222,6 +317,7 @@ export class Player extends EventTarget {
     // Spec for a chunk starting at sentence s (partial up to the next fixed boundary).
     async _specFrom(c, s, fastStart) {
         while (c < this.chapters.length) {
+            await this.ensureChapter(c);
             const m = this.model(c);
             if (s < m.sentences.length) {
                 const starts = chunkBoundaries(m, CHUNK_CHARS[this.engine]);
@@ -230,9 +326,7 @@ export class Player extends EventTarget {
                 if (!spec) { s = s1; continue; }
                 if (fastStart && spec.chars > FAST_START_CHARS * 1.5 && !(await db.audioHas(spec.key))) {
                     // Start quickly with a short piece; the rest follows while it plays
-                    let n = 0, k = s;
-                    while (k < s1 - 1 && n < FAST_START_CHARS) { n += m.sentences[k].speak.length + 1; k++; }
-                    spec = await this._spec(c, s, k);
+                    spec = await this._spec(c, s, this._fastSplit(m, s, s1));
                 }
                 return spec;
             }
@@ -286,6 +380,7 @@ export class Player extends EventTarget {
         if (!st.apiKey) throw new Error('Добавете Google API ключ в настройките или изберете гласа на устройството.');
         const lang = this._lang();
         this._checkSpendingCap(st, spec);
+        const t0 = performance.now();
         let result;
         if (st.engine === 'cloud') {
             const locale = st.cloudVoice.split('-').slice(0, 2).join('-') || LOCALES[lang];
@@ -298,14 +393,46 @@ export class Player extends EventTarget {
             });
             recordUsage({ engine: 'gemini', inTokens: result.inTokens, outTokens: result.outTokens });
         }
+        const took = (performance.now() - t0) / 1000;
+        const prev = this.synthSeconds[st.engine];
+        this.synthSeconds[st.engine] = prev ? prev * 0.6 + took * 0.4 : took;
         const dur = await blobDuration(result.blob);
         return { key: spec.key, blob: result.blob, dur, chars: spec.chars, bookId: this.book.id };
     }
 
     // ---------- remote playback ----------
 
+    // Short opening piece of a chunk, so playback starts within seconds. The split
+    // point depends only on the text, so the pieces get the same cache keys every time.
+    _fastSplit(m, s0, s1) {
+        let n = 0, k = s0;
+        while (k < s1 - 1 && n < FAST_START_CHARS) { n += m.sentences[k].speak.length + 1; k++; }
+        return k;
+    }
+
+    // Start playing at sentence s. Anything synthesized before (a whole chunk or its
+    // fast-start pieces) is replayed from the cache at no cost.
     async _startAt(c, s) {
         const session = ++this.session;
+        try { await this.ensureChapter(c); } catch (e) { if (session === this.session) this._fail(e); return; }
+        if (session !== this.session) return;
+        const m = this.model(c);
+        if (s < m.sentences.length) {
+            const starts = chunkBoundaries(m, CHUNK_CHARS[this.engine]);
+            let a = 0;
+            for (const b of starts) if (b <= s) a = b;
+            const end = nextBoundary(starts, a, m.sentences.length);
+            const k = this._fastSplit(m, a, end);
+            const ranges = [[a, end], [a, k], [k, end]].filter(([x, y]) => x < y && x <= s && s < y);
+            for (const [x, y] of ranges) {
+                const piece = await this._spec(c, x, y);
+                if (session !== this.session) return;
+                if (piece && (this.queue.has(piece.key) || await db.audioHas(piece.key))) {
+                    if (session !== this.session) return;
+                    return this._playSpec(piece, session, { offsetFrac: charLen(m, x, s) / piece.chars });
+                }
+            }
+        }
         const spec = await this._specFrom(c, s, true);
         if (session !== this.session) return;
         if (!spec) return this._finished();
@@ -330,6 +457,7 @@ export class Player extends EventTarget {
         this._url = URL.createObjectURL(rec.blob);
         this.audio.src = this._url;
         this.audio.playbackRate = this.rate;
+        if (opts.offsetFrac) opts.offset = opts.offsetFrac * rec.dur;
         const startAt = opts.offset ? Math.min(opts.offset, rec.dur - 0.5)
             : opts.offsetFromEnd ? Math.max(0, rec.dur - opts.offsetFromEnd) : 0;
         try {
@@ -345,17 +473,21 @@ export class Player extends EventTarget {
         this.loading = false;
         this._emit('state');
         this._updateMediaSession();
-        this._prefetch(spec, session);
+        this._prefetchedFor = null;
     }
 
+    // Just-in-time: synthesize the next chunk only when the current one is about
+    // to end (with a margin based on how long synthesis really takes), so pausing
+    // or stopping never leaves paid-for audio nobody asked for.
     async _prefetch(spec, session) {
-        const ahead = this.getSettings().lookahead;
-        let s = spec;
-        for (let i = 0; i < ahead; i++) {
-            s = await this._specAfter(s);
-            if (!s || session !== this.session) return;
-            try { await this._ensure(s); } catch { return; }
-        }
+        const next = await this._specAfter(spec);
+        if (!next || session !== this.session) return;
+        this._ensure(next).catch(() => {});
+    }
+
+    _prefetchMargin() {
+        const avg = this.synthSeconds[this.engine] || (this.engine === 'gemini' ? 20 : 4);
+        return avg * 2 + 8;
     }
 
     _bindAudio() {
@@ -377,6 +509,12 @@ export class Player extends EventTarget {
             if (s !== this.pos.s || this.current.c !== this.pos.c) {
                 this.pos = { c: this.current.c, s };
                 this._emit('position');
+                this._prefetchTranslation(this.current.c, s);
+            }
+            const left = (dur - a.currentTime) / (a.playbackRate || 1);
+            if (left < this._prefetchMargin() && this._prefetchedFor !== this.current.key) {
+                this._prefetchedFor = this.current.key;
+                this._prefetch(this.current, this.session);
             }
             this._emit('time');
         });
@@ -386,7 +524,8 @@ export class Player extends EventTarget {
             this.history.push(done);
             if (this.history.length > 30) this.history.shift();
             const session = ++this.session;
-            const next = await this._specAfter(done);
+            let next;
+            try { next = await this._specAfter(done); } catch (e) { if (session === this.session) this._fail(e); return; }
             if (session !== this.session) return;
             if (!next) return this._finished();
             if (next.c !== done.c) {
@@ -437,7 +576,7 @@ export class Player extends EventTarget {
         while (s >= m.sentences.length || !m.sentences[s]?.speak) {
             if (s >= m.sentences.length) {
                 if (c + 1 >= this.chapters.length) return this._finished();
-                c++; s = 0; m = this.model(c);
+                c++; s = 0;
                 this._emit('chapter');
                 if (this.sleepAtChapterEnd) {
                     this.sleepAtChapterEnd = false;
@@ -447,10 +586,23 @@ export class Player extends EventTarget {
                     this._emit('sleep');
                     return;
                 }
+                if (this.needsTranslation(c)) {
+                    this.pos = { c, s };
+                    this.loading = true;
+                    this._emit('state');
+                    this.ensureChapter(c).then(() => {
+                        this.loading = false;
+                        this._emit('state');
+                        if (session === this.session && this.playing) this._deviceSpeak(session);
+                    }, (e) => { if (session === this.session) this._fail(e); });
+                    return;
+                }
+                m = this.model(c);
             } else s++;
         }
         this.pos = { c, s };
         this._emit('position');
+        this._prefetchTranslation(c, s);
         const sentence = m.sentences[s];
         const u = new SpeechSynthesisUtterance(sentence.speak);
         const lang = this._lang();

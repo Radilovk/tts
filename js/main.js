@@ -8,6 +8,7 @@ import {
     GEMINI_VOICES, GEMINI_DEFAULT_MODEL, NARRATION_STYLES, PRICES,
     cloudVoices, cloudSynthesize, cloudDiagnose, CLOUD_LINKS, geminiSynthesize, geminiModels, deviceVoices, onDeviceVoicesChanged, cloudTier,
 } from './engines.js';
+import { translateChapter, translationCost, deviceTranslationAvailable, TRANSLATE_DEFAULT_MODEL } from './translate.js';
 import { usageSummary, resetUsage, hourlyCost, freeHoursPerMonth, recordUsage } from './usage.js';
 
 const $ = (s, root = document) => root.querySelector(s);
@@ -19,7 +20,7 @@ const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
     engine: null, apiKey: '', cloudVoice: '', geminiVoice: 'Charon', geminiModel: GEMINI_DEFAULT_MODEL,
     style: 'intriguing', customStyle: '', deviceVoice: '', lang: 'auto', rate: 1, lookahead: 2,
-    cacheMB: 500, theme: 'system', readerSize: 19, view: 'cover', cloudReady: false,
+    cacheMB: 500, theme: 'system', readerSize: 19, view: 'cover', cloudReady: false, autoTranslate: 'bg',
     freeOnly: true, geminiCapUsd: 2,
 };
 
@@ -103,6 +104,10 @@ function fmtUsd(v) {
     return v.toFixed(2) + ' $';
 }
 
+function approxUsd(v) {
+    return v < 0.01 ? 'под 0.01 $' : '~' + fmtUsd(v);
+}
+
 function fmtNum(n) {
     return Math.round(n).toLocaleString('bg-BG');
 }
@@ -151,6 +156,7 @@ function engineLabel(s = settings) {
 }
 
 function currentLang() {
+    if (currentBook?.translateTo) return currentBook.translateTo;
     return settings.lang !== 'auto' ? settings.lang : (currentBook?.lang || 'bg');
 }
 
@@ -219,6 +225,7 @@ async function importFile(file) {
             chapterTitles: parsed.chapters.map((c) => c.title), chapterChars,
             totalChars: chapterChars.reduce((a, b) => a + b, 0), sentenceCounts: [],
             addedAt: Date.now(), lastOpened: 0, position: { c: 0, s: 0 }, fileName: file.name,
+            translateTo: settings.autoTranslate && parsed.lang !== settings.autoTranslate ? settings.autoTranslate : null,
         };
         await db.put('contents', { id, chapters: parsed.chapters });
         await db.put('books', meta);
@@ -228,7 +235,12 @@ async function importFile(file) {
         const hours = meta.totalChars / (player.charsPerSecond * 3600);
         const n = parsed.chapters.length;
         toast(`Добавена: ${n} ${n === 1 ? 'глава' : 'глави'} · ${fmtDuration(hours * 3600) || '< 1 мин'} слушане`);
-        openBook(id, false);
+        await openBook(id, false);
+        if (meta.translateTo) {
+            setTimeout(() => toast(`Книгата е на ${LANG_NAMES[parsed.lang] || parsed.lang} — ще я чета на ${LANG_NAMES[meta.translateTo]}. Превежда се глава по глава при слушане (${approxUsd(translationCost(meta.totalChars))} за цялата книга).`, {
+                duration: 10000, action: { label: 'Чети оригинала', run: () => setBookTranslation(null) },
+            }), 600);
+        }
         if (settings.engine === 'device' && !settings.cloudReady && !localStorage.getItem('rz_hd_hint')) {
             localStorage.setItem('rz_hd_hint', '1');
             setTimeout(() => {
@@ -256,6 +268,7 @@ async function deleteBook(id) {
     await db.del('books', id);
     await db.del('contents', id);
     await db.audioDeleteBook(id);
+    await db.transDeleteBook(id).catch(() => {});
     if (coverUrls.has(id)) { URL.revokeObjectURL(coverUrls.get(id)); coverUrls.delete(id); }
     renderLibrary();
     toast('Книгата е премахната.');
@@ -276,6 +289,10 @@ async function openBook(id, autoplay) {
     if (meta.cover && !coverUrls.has(id)) coverUrls.set(id, URL.createObjectURL(meta.cover));
     meta.coverUrl = coverUrls.get(id) || '';
     currentBook = meta;
+    player.translator = (c, chapter, onProgress) => translateChapter({
+        bookId: player.book.id, c, chapter, from: player.book.lang, to: player.book.translateTo,
+        apiKey: effectiveSettings().apiKey, model: settings.translateModel || TRANSLATE_DEFAULT_MODEL, onProgress,
+    });
     await player.load(meta, content.chapters);
     // Store sentence counts once so library progress is accurate
     if (!meta.sentenceCounts?.length) {
@@ -286,6 +303,16 @@ async function openBook(id, autoplay) {
     showPlayer();
     renderLibrary();
     if (autoplay) startPlayback();
+}
+
+function setBookTranslation(to) {
+    if (!currentBook || (currentBook.translateTo || null) === (to || null)) return;
+    player.setTranslation(to);
+    currentBook.translateTo = to || null;
+    persistBook();
+    renderedChapter = -1;
+    updatePlayerUI();
+    toast(to ? `Ще чета на ${LANG_NAMES[to]}.` : 'Ще чета оригинала.');
 }
 
 function persistBook() {
@@ -527,25 +554,108 @@ function rerenderSheet(render) {
 
 function openChapters() {
     if (!currentBook) return;
-    openSheet('Съдържание', (body) => {
+    openSheet('Навигация', (body) => {
         const cur = player.pos.c;
-        body.innerHTML = `<div class="list">${currentBook.chapterTitles.map((t, i) => `
-            <button class="list-item ${i === cur ? 'on' : ''}" data-c="${i}">
-                <span class="num">${i + 1}</span>
-                <span class="grow"><span class="truncate" style="display:block">${esc(t)}</span>
-                <small>${fmtDuration((currentBook.chapterChars[i] || 0) / player.charsPerSecond / player.rate)}</small></span>
-                ${i === cur ? '<svg class="ic ic-sm"><use href="#i-voice"/></svg>' : ''}
-            </button>`).join('')}</div>`;
+        const total = currentBook.chapterChars.reduce((x, y) => x + y, 0) || 1;
+        const starts = [];
+        currentBook.chapterChars.reduce((acc, n, i) => { starts[i] = acc; return acc + n; }, 0);
+        const p = bookProgress({ ...currentBook, position: player.pos });
+        const listened = (i) => i < cur;
+        body.innerHTML = `
+            <div class="nav-book">
+                <div class="nav-book-head"><span class="group-title" style="margin:0">Цялата книга</span><span id="bookPct" class="muted">${Math.round(p * 100)}%</span></div>
+                <input id="bookRange" class="slider" type="range" min="0" max="1000" step="1" value="${Math.round(p * 1000)}" aria-label="Позиция в книгата">
+                <p id="bookPreview" class="nav-preview">${esc(currentBook.chapterTitles[cur] || '')}</p>
+            </div>
+            <div class="nav-search">
+                <input id="bookSearch" class="input" type="search" placeholder="Търси дума или израз в книгата" autocomplete="off">
+            </div>
+            <div id="searchResults" class="list"></div>
+            <div class="group-title" style="margin-top:18px" id="chaptersTitle">Глави</div>
+            <div class="list" id="chapterList">${currentBook.chapterTitles.map((t, i) => `
+                <button class="list-item ${i === cur ? 'on' : ''} ${listened(i) ? 'done' : ''}" data-c="${i}">
+                    <span class="num">${i + 1}</span>
+                    <span class="grow"><span class="truncate" style="display:block">${esc(t)}</span>
+                    <small>${fmtDuration((currentBook.chapterChars[i] || 0) / player.charsPerSecond / player.rate) || '< 1 мин'}</small></span>
+                    ${i === cur ? '<svg class="ic ic-sm"><use href="#i-voice"/></svg>' : listened(i) ? '<svg class="ic ic-sm" style="opacity:.5"><use href="#i-check"/></svg>' : ''}
+                </button>`).join('')}</div>`;
+
+        // Whole-book scrubber: preview while dragging, jump on release
+        const range = $('#bookRange', body);
+        const locate = (v) => {
+            const at = v / 1000 * total;
+            let c = 0;
+            while (c + 1 < starts.length && starts[c + 1] <= at) c++;
+            const frac = Math.min(1, Math.max(0, (at - starts[c]) / (currentBook.chapterChars[c] || 1)));
+            return { c, frac };
+        };
+        const paint = () => range.style.setProperty('--p', `${range.value / 10}%`);
+        paint();
+        range.oninput = () => {
+            paint();
+            const { c, frac } = locate(Number(range.value));
+            $('#bookPct', body).textContent = Math.round(range.value / 10) + '%';
+            $('#bookPreview', body).textContent = `${c + 1}. ${currentBook.chapterTitles[c] || ''} · ${Math.round(frac * 100)}% от главата`;
+        };
+        range.onchange = () => {
+            const { c, frac } = locate(Number(range.value));
+            const n = player.model(c).sentences.length;
+            player.seekTo(c, Math.min(n - 1, Math.round(frac * n)));
+            closeSheet();
+        };
+
+        // Full-text search across the book (local, no network)
+        let timer = null;
+        const search = $('#bookSearch', body);
+        search.oninput = () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => renderSearch(body, search.value.trim()), 220);
+        };
+
         body.onclick = (e) => {
+            const r = e.target.closest('[data-hit]');
+            if (r) {
+                const [c, pi, q] = [Number(r.dataset.c), Number(r.dataset.p), r.dataset.q];
+                const m = player.model(c);
+                const ch = player.chapter(c);
+                const offset = ch.title && !ch.auto ? 1 : 0;
+                const para = m.paras[pi + offset] || m.paras[0];
+                let target = para.first;
+                for (let i = para.first; i < para.last; i++) {
+                    if (m.sentences[i].t.toLowerCase().includes(q)) { target = i; break; }
+                }
+                player.seekTo(c, target);
+                closeSheet();
+                return;
+            }
             const item = e.target.closest('[data-c]');
             if (!item) return;
-            const wasPlaying = player.playing;
             player.seekTo(Number(item.dataset.c), 0);
             closeSheet();
-            if (!wasPlaying) startPlayback();
         };
-        setTimeout(() => body.querySelector('.on')?.scrollIntoView({ block: 'center' }), 50);
+        setTimeout(() => body.querySelector('#chapterList .on')?.scrollIntoView({ block: 'center' }), 50);
     });
+}
+
+function renderSearch(body, q) {
+    const box = $('#searchResults', body);
+    if (!box) return;
+    if (q.length < 3) { box.innerHTML = ''; return; }
+    const needle = q.toLowerCase();
+    const hits = [];
+    for (let c = 0; c < player.chapters.length && hits.length < 40; c++) {
+        const ch = player.chapter(c);
+        ch.paras.forEach((para, pi) => {
+            if (hits.length >= 40) return;
+            const i = para.toLowerCase().indexOf(needle);
+            if (i < 0) return;
+            const from = Math.max(0, i - 50);
+            const snip = (from ? '…' : '') + esc(para.slice(from, i)) + '<mark>' + esc(para.slice(i, i + q.length)) + '</mark>' + esc(para.slice(i + q.length, i + q.length + 70)) + '…';
+            hits.push(`<button class="list-item" data-hit data-c="${c}" data-p="${pi}" data-q="${esc(needle)}">
+                <span class="num">${c + 1}</span><span class="grow"><span class="snippet">${snip}</span><small>${esc(currentBook.chapterTitles[c] || '')}</small></span></button>`);
+        });
+    }
+    box.innerHTML = hits.length ? hits.join('') : '<p class="hint">Няма съвпадения.</p>';
 }
 
 // ---------- Speed ----------
@@ -658,12 +768,32 @@ function openBookMenu() {
                 ${costRow('Цена с Google HD', hours <= freeHrs ? 'безплатно (в месечния лимит)' : '~' + fmtUsd(Math.max(0, hours - freeHrs) * hourlyCost('cloud')))}
                 ${costRow('Цена с Gemini разказвач', '~' + fmtUsd(hours * hourlyCost('gemini')))}
             </div>
+            ${currentBook.lang !== 'bg' ? `<div class="group">
+                <div class="group-title">Превод</div>
+                <div class="seg" id="bookTranslate">
+                    <button data-t="" class="${!currentBook.translateTo ? 'on' : ''}">Оригинал (${esc(LANG_NAMES[currentBook.lang] || currentBook.lang)})</button>
+                    <button data-t="bg" class="${currentBook.translateTo === 'bg' ? 'on' : ''}">На български</button>
+                </div>
+                <p class="hint" id="transHint">Превежда се само главата, която слушате, и преводът се пази — всяка глава се плаща веднъж. Цялата книга: ${approxUsd(translationCost(currentBook.totalChars))} (Gemini Flash-Lite).</p>
+            </div>` : ''}
             <div class="group list">
                 <button class="list-item" data-a="prepare"><span class="grow">Подготви текущата глава за офлайн<small>Генерира цялата глава предварително (същата цена като слушане)</small></span></button>
                 <button class="list-item" data-a="restart"><span class="grow">Започни отначало</span></button>
                 <button class="list-item danger" data-a="delete"><span class="grow">Премахни книгата</span></button>
             </div>`;
+        if (currentBook.lang !== 'bg') {
+            deviceTranslationAvailable(currentBook.lang, 'bg').then((ok) => {
+                const h = $('#transHint', body);
+                if (ok && h) h.textContent = 'Браузърът има вграден преводач — преводът е безплатен и става на устройството.';
+            });
+        }
         body.onclick = async (e) => {
+            const t = e.target.closest('#bookTranslate [data-t]');
+            if (t) {
+                setBookTranslation(t.dataset.t || null);
+                $$('#bookTranslate button', body).forEach((b) => b.classList.toggle('on', b === t));
+                return;
+            }
             const a = e.target.closest('[data-a]')?.dataset.a;
             if (!a) return;
             if (a === 'delete') {
@@ -758,12 +888,7 @@ function renderSettings(body) {
                     ${[[0.5, '0.5 $'], [1, '1 $'], [2, '2 $'], [5, '5 $'], [10, '10 $'], [0, 'Без лимит']].map(([v, l]) => `<option value="${v}" ${settings.geminiCapUsd === v ? 'selected' : ''}>${l}</option>`).join('')}
                 </select>
             </div>
-            <div class="row">
-                <span class="row-label">Подготовка напред<small>Колко откъса се генерират преди да стигнете до тях</small></span>
-                <select class="select" id="setAhead">
-                    ${[1, 2, 3].map((n) => `<option value="${n}" ${settings.lookahead === n ? 'selected' : ''}>${n}</option>`).join('')}
-                </select>
-            </div>
+
             <div class="row">
                 <span class="row-label">Пазене на аудио<small id="cacheInfo">…</small></span>
                 <select class="select" id="setCache">
@@ -846,7 +971,6 @@ function renderSettings(body) {
         player.voiceChanged();
         rerenderSheet(renderSettings);
     };
-    $('#setAhead', body).onchange = (e) => { settings.lookahead = Number(e.target.value); saveSettings(); };
     $('#setFreeOnly', body).onchange = (e) => { settings.freeOnly = e.target.value === '1'; saveSettings(); };
     $('#setGeminiCap', body).onchange = (e) => { settings.geminiCapUsd = Number(e.target.value); saveSettings(); };
     $('#setCache', body).onchange = (e) => {
@@ -865,7 +989,7 @@ function renderUsage(box) {
     box.innerHTML = u.rows.map((r) => `
         <div class="usage-item">
             <div class="top"><span>${r.label}</span><span>${fmtUsd(r.cost)}</span></div>
-            <div class="sub">${r.minutes != null ? (r.minutes < 1 ? '< 1 мин аудио' : `~${Math.round(r.minutes)} мин аудио`) : `${fmtNum(r.used)} от ${fmtNum(r.free)} безплатни ${r.unit}`}</div>
+            <div class="sub">${r.translated ? `${fmtNum(r.used)} ${r.unit}` : r.minutes != null ? (r.minutes < 1 ? '< 1 мин аудио' : `~${Math.round(r.minutes)} мин аудио`) : `${fmtNum(r.used)} от ${fmtNum(r.free)} безплатни ${r.unit}`}</div>
             ${r.free ? `<div class="progress-track"><i style="width:${Math.min(100, r.used / r.free * 100).toFixed(1)}%"></i></div>` : ''}
         </div>`).join('') + `
         <div class="usage-total"><span>Общо (ориентировъчно)</span><span>${fmtUsd(u.total)}</span></div>
@@ -1110,7 +1234,7 @@ function openCloudSetup(opts = {}) {
             check();
         };
         const hear = $('#setupHear', body);
-        if (hear) hear.onclick = () => playSample();
+        if (hear) hear.onclick = () => (diag?.sample ? playSample() : previewVoice(hear));
         const done = $('#setupDone', body);
         if (done) done.onclick = () => {
             closeSheet();
@@ -1178,7 +1302,11 @@ function openCloudSetup(opts = {}) {
         document.removeEventListener('visibilitychange', setupRecheck);
         if (sampleUrl) URL.revokeObjectURL(sampleUrl);
     });
-    if (effectiveSettings().apiKey) check();
+    // Already connected: show it without another (billable) test call
+    if (settings.cloudReady && effectiveSettings().apiKey) {
+        diag = { key: 'ok', api: 'ok', billing: 'ok', failed: null, voice: settings.cloudVoice, sample: null };
+        rerenderSheet(render);
+    } else if (effectiveSettings().apiKey) check();
 }
 
 async function testKey(body) {
@@ -1266,17 +1394,31 @@ function bindEvents() {
     };
 
     const slider = $('#chapterSlider');
+    const bubble = $('#seekBubble');
     slider.addEventListener('input', () => {
         sliderDragging = true;
         const m = player.model(player.pos.c);
-        slider.style.setProperty('--p', `${(slider.value / Math.max(1, slider.max)) * 100}%`);
-        const left = charLen(m, Number(slider.value), m.sentences.length) / player.charsPerSecond / player.rate;
+        const v = Number(slider.value);
+        const pct = (v / Math.max(1, slider.max)) * 100;
+        slider.style.setProperty('--p', `${pct}%`);
+        const left = charLen(m, v, m.sentences.length) / player.charsPerSecond / player.rate;
         $('#pRemain').textContent = `${fmtDuration(left) || '< 1 мин'} до края на главата`;
+        // Preview the sentence you will land on
+        const text = m.sentences[v]?.t || '';
+        bubble.textContent = text.length > 110 ? text.slice(0, 110) + '…' : text;
+        bubble.classList.remove('hidden');
+        // Keep the bubble on screen near the thumb
+        const W = slider.clientWidth, bw = bubble.offsetWidth;
+        bubble.style.left = `${Math.min(W - bw / 2, Math.max(bw / 2, pct / 100 * W))}px`;
     });
-    slider.addEventListener('change', () => {
+    const endScrub = () => {
+        bubble.classList.add('hidden');
+        if (!sliderDragging) return;
         sliderDragging = false;
         player.seekTo(player.pos.c, Number(slider.value));
-    });
+    };
+    slider.addEventListener('change', endScrub);
+    slider.addEventListener('pointerup', () => setTimeout(() => bubble.classList.add('hidden'), 50));
 
     // Tap a sentence in the text view to read from there
     const stage = $('#textStage');
@@ -1339,6 +1481,12 @@ function bindEvents() {
     player.addEventListener('state', updatePlayState);
     player.addEventListener('position', updatePlayerUI);
     player.addEventListener('save', scheduleSave);
+    player.addEventListener('translating', (e) => { $('#pStatus').textContent = `Превеждам главата… ${Math.round(e.detail * 100)}%`; });
+    player.addEventListener('translated', () => {
+        renderedChapter = -1;
+        updatePlayerUI();
+        $('#textStage').setAttribute('lang', currentLang());
+    });
     player.addEventListener('sleep', () => { sleepTimer = null; updateSleepChip(); toast('Лека нощ. Спрях в края на главата.'); });
     player.addEventListener('finished', () => toast('Краят на книгата. Надявам се, че ви е харесала.'));
     player.addEventListener('error', (e) => {

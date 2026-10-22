@@ -26,6 +26,11 @@ export function recordUsage({ engine, tier, chars = 0, inTokens = 0, outTokens =
         u.gemini.inTokens += inTokens;
         u.gemini.outTokens += outTokens;
     }
+    if (engine === 'translate') {
+        u.translate = u.translate || { inTokens: 0, outTokens: 0 };
+        u.translate.inTokens += inTokens;
+        u.translate.outTokens += outTokens;
+    }
     localStorage.setItem(KEY, JSON.stringify(u));
 }
 
@@ -47,6 +52,11 @@ export function usageSummary() {
             label: 'Gemini разказвач', used: u.gemini.outTokens, cost, unit: 'аудио токена',
             minutes: u.gemini.outTokens / PRICES.gemini.tokensPerSecond / 60,
         });
+    }
+    if (u.translate?.inTokens) {
+        const cost = u.translate.inTokens / 1e6 * 0.1 + u.translate.outTokens / 1e6 * 0.4;
+        total += cost;
+        rows.push({ label: 'Превод (Gemini Flash-Lite)', used: u.translate.outTokens, cost, unit: 'токена', translated: true });
     }
     return { rows, total, month: u.month };
 }
