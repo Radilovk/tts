@@ -4,6 +4,7 @@
 //   gemini — Gemini TTS, steerable "narrator" intonation (paid per audio token)
 
 import { LOCALES } from './text.js';
+import { encodeOpus } from './opus.js';
 import { isNative, nativeVoices, nativeVoiceLabel, onNativeVoices } from './native.js';
 
 export const GEMINI_VOICES = [
@@ -328,8 +329,9 @@ export function geminiRequestBody({ text, voice, style, customStyle, lang }) {
     };
 }
 
-// Turn a generateContent response (interactive or from a batch) into a WAV blob.
-export function geminiParseAudio(data) {
+// Turn a generateContent response (interactive or from a batch) into compact audio:
+// Ogg/Opus when the browser can encode it (~12× smaller), WAV otherwise.
+export async function geminiParseAudio(data) {
     const part = data?.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data);
     if (!part) {
         const reason = data?.candidates?.[0]?.finishReason;
@@ -342,7 +344,7 @@ export function geminiParseAudio(data) {
     const trimmed = trimSilence(pcm, rate);
     const usage = data.usageMetadata || {};
     return {
-        blob: pcmToWav(trimmed, rate),
+        blob: (await encodeOpus(trimmed, rate)) || pcmToWav(trimmed, rate),
         dur: trimmed.length / rate,
         inTokens: usage.promptTokenCount || 0,
         outTokens: usage.candidatesTokenCount || Math.round(pcm.length / 2 / rate * PRICES.gemini.tokensPerSecond),

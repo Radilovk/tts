@@ -86,7 +86,7 @@ export async function pollBatches(apiKey, onDone) {
                 for (const resp of r.responses) {
                     if (!resp.key || !resp.response) continue;
                     try {
-                        const a = geminiParseAudio(resp.response);
+                        const a = await geminiParseAudio(resp.response);
                         const it = byKey[resp.key] || {};
                         await db.audioPut({ key: resp.key, blob: a.blob, dur: a.dur, chars: it.chars || 0, bookId: job.bookId });
                         if (it.text) sharedPutAudio(resp.key, it.vk, it.lang, it.text, a.blob, a.dur);
