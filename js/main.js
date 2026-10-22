@@ -13,6 +13,7 @@ import { translateChapter, translationCost, deviceTranslationAvailable, TRANSLAT
 import { isNative, Native, nativeFileUrl, loadNativeVoices, nativeEngines } from './native.js';
 import { submitChapter, pollBatches, hasJobs, pendingChapters, batchEstimate } from './batch.js';
 import { usableFreeKey } from './player.js';
+import { exportPlan, exportChapters, packageFiles } from './export.js';
 import { SHELVES, loadShelf, wikisourceWorks, fetchCatalogBook, sourceKey } from './library.js';
 import { usageSummary, resetUsage, hourlyCost, freeHoursPerMonth, recordUsage } from './usage.js';
 
@@ -22,7 +23,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.2';
+export const APP_VERSION = '2.3';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
@@ -438,6 +439,7 @@ async function openBook(id, autoplay) {
     showPlayer();
     renderLibrary();
     if (autoplay) startPlayback();
+    checkPendingExport().catch(() => {});
 }
 
 function setBookTranslation(to) {
@@ -914,6 +916,7 @@ function openBookMenu() {
             </div>` : ''}
             <div class="group list">
                 ${settings.engine === 'gemini' ? `<button class="list-item" data-a="batch"><span class="grow">Подготви следващите 3 глави на ½ цена<small>Gemini Batch: ~${approxUsd(batchEstimate(activeGeminiModel(), nextChaptersChars(3)))} · готово обикновено до няколко часа${pendingChapters(currentBook.id).length ? ` · в момента се подготвят ${pendingChapters(currentBook.id).length}` : ''}</small></span></button>` : ''}
+                <button class="list-item" data-a="export"><span class="grow">Изтегли като аудиокнига<small>Аудиофайл (.ogg) за всеки плейър · вече чутото е безплатно</small></span></button>
                 <button class="list-item" data-a="prepare"><span class="grow">Подготви текущата глава за офлайн<small>Генерира цялата глава предварително (същата цена като слушане)</small></span></button>
                 <button class="list-item" data-a="restart"><span class="grow">Започни отначало</span></button>
                 <button class="list-item danger" data-a="delete"><span class="grow">Премахни книгата</span></button>
@@ -935,6 +938,9 @@ function openBookMenu() {
             if (!a) return;
             if (a === 'delete') {
                 if (confirm(`Да премахна ли „${currentBook.title}“ и запазеното аудио?`)) { closeSheet(); deleteBook(currentBook.id); }
+            } else if (a === 'export') {
+                closeSheet();
+                openExport();
             } else if (a === 'batch') {
                 closeSheet();
                 prepareAhead(3, true);
@@ -1787,6 +1793,146 @@ function persistNow() {
 
 // ==================== Boot ====================
 
+// ==================== Export as audio files ====================
+
+const EXPORT_KEY = 'rz_pending_export';
+
+async function saveBlob(name, blob) {
+    if (isNative) {
+        const { id } = await Native.fileBegin();
+        const step = 1536 * 1024; // keeps every bridge message small
+        for (let off = 0; off < blob.size; off += step) {
+            const b64 = await new Promise((resolve, reject) => {
+                const r = new FileReader();
+                r.onload = () => resolve(String(r.result).split(',')[1] || '');
+                r.onerror = () => reject(r.error);
+                r.readAsDataURL(blob.slice(off, off + step));
+            });
+            await Native.fileAppend({ id, data: b64 });
+        }
+        const { path } = await Native.fileEnd({ id, name, mime: name.endsWith('.zip') ? 'application/zip' : 'audio/ogg' });
+        toast(`Записано: ${path}`, { duration: 8000 });
+        return;
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+function exportCost(missingChars, batch) {
+    const hours = missingChars / player.charsPerSecond / 3600;
+    const model = activeGeminiModel();
+    return settings.engine === 'cloud' ? hours * hourlyCost('cloud') : hours * hourlyCost('gemini', model, batch);
+}
+
+function openExport() {
+    if (!currentBook) return;
+    if (settings.engine === 'device') {
+        return toast('Гласът на телефона не може да се запише във файл. Изберете Gemini разказвача.', { action: { label: 'Настройки', run: openSettings } });
+    }
+    let scope = 'chapter';
+    const render = (body) => {
+        const chapters = scope === 'chapter' ? [player.pos.c] : currentBook.chapterTitles.map((_, i) => i);
+        body.innerHTML = `
+            <div class="seg" id="expScope">
+                <button data-s="chapter" class="${scope === 'chapter' ? 'on' : ''}">Текущата глава</button>
+                <button data-s="book" class="${scope === 'book' ? 'on' : ''}">Цялата книга</button>
+            </div>
+            <div id="expInfo" class="usage" style="margin-top:16px"><p class="hint" style="margin:0">Изчислявам…</p></div>
+            <div id="expActions" class="catalog-actions"></div>
+            <p class="hint">Формат: Ogg/Opus — пуска се в телефона, VLC и повечето плейъри. ${scope === 'book' ? 'Цялата книга се изтегля като ZIP с файл за всяка глава.' : ''} Във файла е отбелязано, че е озвучен с изкуствен интелект.</p>`;
+        body.onclick = (e) => {
+            const b = e.target.closest('#expScope [data-s]');
+            if (b && b.dataset.s !== scope) { scope = b.dataset.s; rerenderSheet(render); }
+            const act = e.target.closest('[data-exp]')?.dataset.exp;
+            if (act === 'now') { closeSheet(); runExport(chapters); }
+            if (act === 'batch') { closeSheet(); prepareExportHalfPrice(chapters); }
+        };
+        exportPlan(player, chapters).then((plan) => {
+            const info = $('#expInfo', body);
+            if (!info) return;
+            const hours = plan.total / player.charsPerSecond / 3600;
+            const readyPct = plan.chunks ? Math.round((plan.chunks - plan.missing) / plan.chunks * 100) : 0;
+            const now = exportCost(plan.missingChars, false);
+            const half = exportCost(plan.missingChars, true);
+            info.innerHTML = `
+                <div class="usage-item"><div class="top"><span>Продължителност</span><span>~${fmtDuration(hours * 3600) || '< 1 мин'}</span></div>
+                <div class="sub">Вече озвучено: ${readyPct}% — взема се от кеша безплатно</div>
+                <div class="progress-track"><i style="width:${readyPct}%"></i></div></div>`;
+            const actions = $('#expActions', body);
+            if (!plan.missing) {
+                actions.innerHTML = '<button class="btn btn-primary" data-exp="now">Изтегли (безплатно)</button>';
+            } else {
+                actions.innerHTML = `<button class="btn btn-primary" data-exp="now">Изтегли сега · ${approxUsd(now)}</button>
+                    ${settings.engine === 'gemini' ? `<button class="btn btn-ghost" data-exp="batch">На ½ цена · ${approxUsd(half)} — когато е готово</button>` : ''}`;
+            }
+        }).catch((e) => { const i = $('#expInfo', body); if (i) i.innerHTML = `<p class="hint">${esc(e.message)}</p>`; });
+    };
+    openSheet('Изтегли като аудиокнига', render);
+}
+
+async function runExport(chapters) {
+    const overlay = $('#importOverlay');
+    const arc = $('#importArc');
+    const label = $('#importText');
+    arc.style.strokeDashoffset = 125.7;
+    label.textContent = 'Подготвям аудиофайла…';
+    overlay.classList.remove('hidden');
+    const wasPlaying = player.playing;
+    if (wasPlaying) player.pause();
+    player.allowFullPrice = true;
+    try {
+        const files = await exportChapters(player, chapters, {
+            onProgress: (p, title) => {
+                arc.style.strokeDashoffset = 125.7 * (1 - p);
+                if (title) label.textContent = `Записвам: ${title}`;
+            },
+        });
+        label.textContent = 'Запазвам файла…';
+        const pkg = await packageFiles(currentBook, files);
+        overlay.classList.add('hidden');
+        await saveBlob(pkg.name, pkg.blob);
+    } catch (e) {
+        overlay.classList.add('hidden');
+        console.error(e);
+        if (e.name !== 'AbortError') toast(e.message || 'Аудиофайлът не можа да се създаде.', { error: true, duration: 7000 });
+    } finally {
+        player.allowFullPrice = false;
+    }
+}
+
+// Half price: queue the missing parts in Gemini Batch; the file is offered when they are ready
+async function prepareExportHalfPrice(chapters) {
+    const st = effectiveSettings();
+    let queued = 0;
+    try {
+        for (const c of chapters) queued += await submitChapter(player, c, st);
+    } catch (e) {
+        return toast('Партидата не беше приета: ' + e.message, { error: true });
+    }
+    localStorage.setItem(EXPORT_KEY, JSON.stringify({ bookId: currentBook.id, chapters }));
+    startBatchPolling();
+    toast(queued
+        ? `Подготвям ${queued} откъса на половин цена. Когато са готови, ще ви предложа файла.`
+        : 'Всичко вече е подготвено или се подготвя.', { duration: 8000 });
+}
+
+// Called after batch results arrive: offer the file once everything is narrated
+async function checkPendingExport() {
+    let pend;
+    try { pend = JSON.parse(localStorage.getItem(EXPORT_KEY) || 'null'); } catch { pend = null; }
+    if (!pend || !currentBook || currentBook.id !== pend.bookId) return;
+    const plan = await exportPlan(player, pend.chapters);
+    if (plan.missing) return;
+    localStorage.removeItem(EXPORT_KEY);
+    toast('Аудиокнигата е готова (на половин цена).', { duration: 20000, action: { label: 'Изтегли', run: () => runExport(pend.chapters) } });
+}
+
 // ==================== Gemini economy (Batch, half price) ====================
 
 function nextChaptersChars(n) {
@@ -1842,6 +1988,7 @@ function startBatchPolling() {
             toast(`Подготвена на половин цена: ${title || 'глава ' + (job.c + 1)}.`);
         }
     }).finally(() => {
+        checkPendingExport().catch(() => {});
         if (!hasJobs()) { clearInterval(batchTimer); batchTimer = null; }
     });
     batchTimer = setInterval(() => { if (!document.hidden) tick(); }, 60000);
