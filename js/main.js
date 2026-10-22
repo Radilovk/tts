@@ -13,7 +13,8 @@ import { translateChapter, translationCost, deviceTranslationAvailable, TRANSLAT
 import { isNative, Native, nativeFileUrl, loadNativeVoices, nativeEngines } from './native.js';
 import { submitChapter, pollBatches, hasJobs, pendingChapters, batchEstimate } from './batch.js';
 import { usableFreeKey } from './player.js';
-import { exportPlan, exportChapters, packageFiles } from './export.js';
+import { exportPlan, exportChapters, packageFiles, safeFileName } from './export.js';
+import { searchBooks, localizeTitles, SOURCES } from './search.js';
 import { SHELVES, loadShelf, wikisourceWorks, fetchCatalogBook, sourceKey } from './library.js';
 import { usageSummary, resetUsage, hourlyCost, freeHoursPerMonth, recordUsage } from './usage.js';
 
@@ -23,7 +24,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.3';
+export const APP_VERSION = '2.4';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
@@ -260,7 +261,7 @@ async function importFile(file) {
 }
 
 // Store a parsed book (from a file or from the catalog) and open it.
-async function saveImported(parsed, { fileName = '', source = null, translateTo } = {}) {
+async function saveImported(parsed, { fileName = '', source = null, translateTo, displayTitle = '' } = {}) {
     const overlay = $('#importOverlay');
     {
         const id = 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -275,8 +276,11 @@ async function saveImported(parsed, { fileName = '', source = null, translateTo 
             // Public-domain catalog books share narration and translations with everyone
             source: source ? { type: source.source, id: source.id } : null,
             sourceKey: source?.key || '',
-            shared: !!source,
+            // Narration is shared only for books every listener may legally receive
+            shared: !!source && source.shareable !== false,
+            originalTitle: parsed.title,
         };
+        if (displayTitle) meta.title = displayTitle;
         await db.put('contents', { id, chapters: parsed.chapters });
         await db.put('books', meta);
         db.requestPersistence();
@@ -298,6 +302,24 @@ async function saveImported(parsed, { fileName = '', source = null, translateTo 
 
 const shelfData = {};
 
+// The language the listener reads in: foreign titles and texts are shown in it
+function readerLang() {
+    return settings.lang && settings.lang !== 'auto' ? settings.lang : (settings.autoTranslate || 'bg');
+}
+
+async function localizeRow(shelfId, row) {
+    const d = shelfData[shelfId];
+    if (!d) return;
+    await localizeTitles(d.items, readerLang(), effectiveSettings().apiKey);
+    row.querySelectorAll('.shelf-card').forEach((card) => {
+        const it = d.items[Number(card.dataset.i)];
+        if (!it?.titleT) return;
+        card.querySelector('.book-title').textContent = it.titleT;
+        const sub = card.querySelector('.book-sub');
+        if (sub && it.authorT) sub.textContent = it.authorT;
+    });
+}
+
 async function renderDiscover() {
     const box = $('#shelves');
     if (!box || box.dataset.ready) return;
@@ -315,10 +337,51 @@ async function renderDiscover() {
             if (!items.length) { row.closest('.shelf').remove(); continue; }
             row.innerHTML = items.map((it, i) => shelfCard(it, sh.id, i)).join('');
             if (next) row.insertAdjacentHTML('beforeend', `<button class="shelf-more" data-more="${sh.id}">Още</button>`);
+            localizeRow(sh.id, row);
         } catch (e) {
             row.innerHTML = `<div class="shelf-loading muted">${esc(e.message)}</div>`;
         }
     }
+}
+
+// ---------- world search ----------
+
+let searchSeq = 0;
+
+async function runSearch(q) {
+    const seq = ++searchSeq;
+    const box = $('#searchResults');
+    const shelves = $('#shelves');
+    if (q.length < 3) {
+        box.innerHTML = '';
+        box.classList.add('hidden');
+        shelves.classList.remove('hidden');
+        return;
+    }
+    shelves.classList.add('hidden');
+    box.classList.remove('hidden');
+    box.innerHTML = Object.entries(SOURCES).map(([id, src]) => `
+        <section class="shelf" data-src="${id}">
+            <div class="shelf-head"><h3>${esc(src.label)}</h3><span class="muted">${esc(src.rights)}</span></div>
+            <div class="shelf-row"><div class="shelf-loading muted">Търся…</div></div>
+        </section>`).join('');
+    await searchBooks(q, readerLang(), (src, items, err) => {
+        if (seq !== searchSeq) return;
+        const sec = box.querySelector(`[data-src="${src}"]`);
+        if (!sec) return;
+        if (!items.length) { sec.remove(); }
+        else {
+            const id = 'q-' + src;
+            shelfData[id] = { items, next: null };
+            sec.querySelector('.shelf-head .muted').textContent = `${items.length} · ${SOURCES[src].rights}`;
+            const row = sec.querySelector('.shelf-row');
+            row.innerHTML = items.map((it, i) => shelfCard(it, id, i)).join('');
+            localizeRow(id, row);
+        }
+        if (!box.querySelector('.shelf') && seq === searchSeq) {
+            box.innerHTML = '<p class="hint" style="text-align:center;padding:20px 0">Няма свободни за изтегляне книги по това търсене. Опитайте с името на автора или оригиналното заглавие.</p>';
+        }
+    });
 }
 
 function shelfCard(it, shelfId, i) {
@@ -327,8 +390,8 @@ function shelfCard(it, shelfId, i) {
         + (it.cover ? `<img class="cover-img" src="${esc(it.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : '');
     return `<button class="shelf-card" data-shelf-id="${shelfId}" data-i="${i}">
         <div class="cover">${cover}</div>
-        <span class="book-title">${esc(it.title)}</span>
-        ${it.author ? `<span class="book-sub truncate">${esc(it.author)}</span>` : ''}
+        <span class="book-title">${esc(it.titleT || it.title)}</span>
+        ${it.author ? `<span class="book-sub truncate">${esc(it.authorT || it.author)}</span>` : ''}
     </button>`;
 }
 
@@ -348,27 +411,33 @@ async function openCatalogItem(it) {
         });
         return;
     }
-    openSheet(it.title, (body) => {
-        const foreign = it.translateTo && it.lang !== it.translateTo;
+    const target = readerLang();
+    const foreign = it.lang && it.lang !== target;
+    const src = SOURCES[it.source] || SOURCES.gutenberg;
+    openSheet(it.titleT || it.title, (body) => {
         body.innerHTML = `
             <div class="catalog-book">
-                <div class="cover">${coverHtml({ title: it.title, author: it.author })}${it.cover ? `<img class="cover-img" src="${esc(it.cover)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</div>
+                <div class="cover">${coverHtml({ title: it.titleT || it.title, author: it.authorT || it.author })}${it.cover ? `<img class="cover-img" src="${esc(it.cover)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</div>
                 <div>
-                    <p class="catalog-author">${esc(it.author || '')}</p>
-                    <p class="hint" style="margin-top:6px">Обществено достояние · ${it.source === 'gutenberg' ? 'Project Gutenberg' : 'Wikisource'} · ${esc(LANG_NAMES[it.lang] || it.lang)}</p>
-                    <p class="hint">Веднъж прочетена от разказвача, книгата се пази и следващите слушатели не плащат за нея.</p>
+                    <p class="catalog-author">${esc(it.authorT || it.author || '')}</p>
+                    ${it.titleT && it.titleT !== it.title ? `<p class="hint" style="margin-top:4px">Оригинал: ${esc(it.title)}</p>` : ''}
+                    <p class="hint" style="margin-top:6px">${esc(src.rights)} · ${esc(src.label)} · ${esc(LANG_NAMES[it.lang] || it.lang || '')}${it.year ? ' · ' + it.year : ''}</p>
+                    <p class="hint">${it.shareable === false
+                        ? 'Озвучаването остава само за вас.'
+                        : 'Веднъж прочетена от разказвача, книгата се пази и следващите слушатели не плащат за нея.'}</p>
                 </div>
             </div>
             <div class="catalog-actions">
-                ${foreign ? `<button class="btn btn-primary" data-act="tr">Слушай на ${esc(LANG_NAMES[it.translateTo].toLowerCase())}</button>
+                ${foreign ? `<button class="btn btn-primary" data-act="tr">Слушай на ${esc((LANG_NAMES[target] || target).toLowerCase())}</button>
                     <button class="btn btn-ghost" data-act="orig">Оригинал (${esc(LANG_NAMES[it.lang] || it.lang)})</button>`
                 : '<button class="btn btn-primary" data-act="orig">Добави и слушай</button>'}
-            </div>`;
+            </div>
+            <p class="hint">След добавяне: меню на книгата (⋯) → изтегляне като аудиокнига или като текст.</p>`;
         body.onclick = (e) => {
             const act = e.target.closest('[data-act]')?.dataset.act;
             if (!act) return;
             closeSheet();
-            importCatalog(it, { translateTo: act === 'tr' ? it.translateTo : null });
+            importCatalog(it, { translateTo: act === 'tr' ? target : null });
         };
     });
 }
@@ -379,12 +448,13 @@ async function importCatalog(item, { translateTo = null }) {
     if (existing) return openBook(existing.id, false);
     const overlay = $('#importOverlay');
     const arc = $('#importArc');
-    $('#importText').textContent = `Изтеглям „${item.title}“…`;
+    $('#importText').textContent = `Изтеглям „${item.titleT || item.title}“…`;
     arc.style.strokeDashoffset = 125.7;
     overlay.classList.remove('hidden');
     try {
         const parsed = await fetchCatalogBook(item, (p) => { arc.style.strokeDashoffset = 125.7 * (1 - p); });
-        await saveImported(parsed, { fileName: item.title, source: { ...item, key }, translateTo: translateTo && parsed.lang !== translateTo ? translateTo : null });
+        const tr = translateTo && parsed.lang !== translateTo ? translateTo : null;
+        await saveImported(parsed, { fileName: item.title, source: { ...item, key }, translateTo: tr, displayTitle: tr && item.titleT ? item.titleT : '' });
     } catch (e) {
         overlay.classList.add('hidden');
         console.error(e);
@@ -917,6 +987,7 @@ function openBookMenu() {
             <div class="group list">
                 ${settings.engine === 'gemini' ? `<button class="list-item" data-a="batch"><span class="grow">Подготви следващите 3 глави на ½ цена<small>Gemini Batch: ~${approxUsd(batchEstimate(activeGeminiModel(), nextChaptersChars(3)))} · готово обикновено до няколко часа${pendingChapters(currentBook.id).length ? ` · в момента се подготвят ${pendingChapters(currentBook.id).length}` : ''}</small></span></button>` : ''}
                 <button class="list-item" data-a="export"><span class="grow">Изтегли като аудиокнига<small>Аудиофайл (.ogg) за всеки плейър · вече чутото е безплатно</small></span></button>
+                <button class="list-item" data-a="text"><span class="grow">Изтегли като текст<small>Файл за четене (.txt)${currentBook.translateTo ? ' · в превод' : ''} · с посочен източник</small></span></button>
                 <button class="list-item" data-a="prepare"><span class="grow">Подготви текущата глава за офлайн<small>Генерира цялата глава предварително (същата цена като слушане)</small></span></button>
                 <button class="list-item" data-a="restart"><span class="grow">Започни отначало</span></button>
                 <button class="list-item danger" data-a="delete"><span class="grow">Премахни книгата</span></button>
@@ -941,6 +1012,9 @@ function openBookMenu() {
             } else if (a === 'export') {
                 closeSheet();
                 openExport();
+            } else if (a === 'text') {
+                closeSheet();
+                exportText();
             } else if (a === 'batch') {
                 closeSheet();
                 prepareAhead(3, true);
@@ -1565,6 +1639,19 @@ function bindEvents() {
     });
     fileInput.onchange = () => { importFile(fileInput.files[0]); fileInput.value = ''; };
 
+    let searchTimer = null;
+    const searchInput = $('#worldSearch');
+    searchInput.addEventListener('input', () => {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => runSearch(searchInput.value.trim()), 700);
+    });
+    searchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(searchInput.value.trim()); searchInput.blur(); }
+    });
+    $('#searchResults').addEventListener('click', (e) => {
+        const card = e.target.closest('.shelf-card');
+        if (card) openCatalogItem(shelfData[card.dataset.shelfId].items[Number(card.dataset.i)]);
+    });
     $('#shelves').addEventListener('click', async (e) => {
         const more = e.target.closest('[data-more]');
         if (more) {
@@ -1797,6 +1884,37 @@ function persistNow() {
 
 const EXPORT_KEY = 'rz_pending_export';
 
+// The whole book as plain text (translated when the book is read in translation)
+async function exportText() {
+    const book = currentBook;
+    if (book.translateTo) {
+        const left = player.chapters.filter((_, c) => player.needsTranslation(c));
+        if (left.length) {
+            const chars = left.reduce((n, ch) => n + ch.paras.join(' ').length, 0);
+            if (!confirm(`Остава да се преведат ${left.length} глави (~${approxUsd(translationCost(chars))}). Да продължа ли?`)) return;
+        }
+    }
+    try {
+        const parts = [book.title, book.author || '', ''];
+        for (let c = 0; c < player.chapters.length; c++) {
+            if (player.needsTranslation(c)) {
+                $('#pStatus').textContent = `Превеждам за текста: глава ${c + 1} от ${player.chapters.length}`;
+                await player.ensureChapter(c);
+            }
+            const ch = player.chapter(c);
+            if (ch.title) parts.push('', ch.title.toUpperCase(), '');
+            parts.push(ch.paras.join('\n\n'));
+        }
+        $('#pStatus').textContent = '';
+        const src = book.source ? SOURCES[book.source.type]?.label || book.source.type : '';
+        parts.push('', '---', src ? `Източник: ${src} (${book.source.id}).` : '', book.translateTo ? 'Преводът е машинен (Разказвач).' : '');
+        await saveBlob(`${safeFileName(book.title)}.txt`, new Blob([parts.join('\n')], { type: 'text/plain;charset=utf-8' }));
+    } catch (e) {
+        $('#pStatus').textContent = '';
+        toast(e.message || 'Текстът не можа да се запише.', { error: true });
+    }
+}
+
 async function saveBlob(name, blob) {
     if (isNative) {
         const { id } = await Native.fileBegin();
@@ -1810,7 +1928,7 @@ async function saveBlob(name, blob) {
             });
             await Native.fileAppend({ id, data: b64 });
         }
-        const { path } = await Native.fileEnd({ id, name, mime: name.endsWith('.zip') ? 'application/zip' : 'audio/ogg' });
+        const { path } = await Native.fileEnd({ id, name, mime: name.endsWith('.zip') ? 'application/zip' : name.endsWith('.txt') ? 'text/plain' : 'audio/ogg' });
         toast(`Записано: ${path}`, { duration: 8000 });
         return;
     }

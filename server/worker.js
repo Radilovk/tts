@@ -6,6 +6,8 @@
 //   PUT  /audio/:key                     → store a chunk; the key must be the SHA-1 of
 //                                          "voice|lang|text" sent in the headers
 //   GET  /trans/:key   PUT /trans/:key    → shared chapter translation (JSON)
+//   GET  /proxy?url=…                    → open libraries without browser CORS (arXiv, OAPEN,
+//                                          Internet Archive, Gutenberg); allow-listed hosts only
 //
 // Only public-domain books use the shared store (the app decides; see js/library.js).
 // Every chunk is synthesized once and then served to every listener.
@@ -18,6 +20,8 @@ const ALLOWED_ORIGINS = [
 ];
 const MAX_AUDIO_BYTES = 12 * 1024 * 1024;
 const MAX_TRANS_BYTES = 2 * 1024 * 1024;
+const MAX_PROXY_BYTES = 80 * 1024 * 1024;
+const PROXY_HOSTS = [/^(export\.)?arxiv\.org$/, /^library\.oapen\.org$/, /^([\w-]+\.)*archive\.org$/, /^(www\.)?gutenberg\.org$/];
 
 function cors(req) {
     const origin = req.headers.get('Origin') || '';
@@ -67,6 +71,28 @@ async function gutenberg(req, id, ctx) {
             }
         }
         if (!res) return json(req, { error: 'Книгата не е намерена в Project Gutenberg.' }, 404);
+    }
+    const out = new Response(res.body, res);
+    for (const [k, v] of Object.entries(cors(req))) out.headers.set(k, v);
+    return out;
+}
+
+async function proxy(req, ctx) {
+    let target;
+    try { target = new URL(new URL(req.url).searchParams.get('url') || ''); } catch { return json(req, { error: 'bad url' }, 400); }
+    if (target.protocol !== 'https:' || !PROXY_HOSTS.some((re) => re.test(target.hostname))) return json(req, { error: 'host not allowed' }, 403);
+    const cache = caches.default;
+    const cacheKey = new Request(`https://cache.razkazvach/proxy/${encodeURIComponent(target.href)}`);
+    let res = await cache.match(cacheKey);
+    if (!res) {
+        const r = await fetch(target.href, { headers: { 'User-Agent': 'RazkazvachLibrary/1.0 (+https://github.com/Radilovk/tts)' }, redirect: 'follow' });
+        const len = Number(r.headers.get('content-length') || 0);
+        if (len > MAX_PROXY_BYTES) return json(req, { error: 'too large' }, 413);
+        res = new Response(r.body, {
+            status: r.status,
+            headers: { 'Content-Type': r.headers.get('content-type') || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' },
+        });
+        if (r.ok) ctx.waitUntil(cache.put(cacheKey, res.clone()));
     }
     const out = new Response(res.body, res);
     for (const [k, v] of Object.entries(cors(req))) out.headers.set(k, v);
@@ -149,6 +175,7 @@ export default {
             if (path === '/health') return json(req, { ok: true, audio: !!env.AUDIO, trans: !!env.AUDIO });
             let m = path.match(/^\/gutenberg\/(\d{1,7})\.epub$/);
             if (m && req.method === 'GET') return gutenberg(req, m[1], ctx);
+            if (path === '/proxy' && req.method === 'GET') return proxy(req, ctx);
             m = path.match(/^\/audio\/([0-9a-f]{40})$/);
             if (m) return audio(req, env, m[1]);
             m = path.match(/^\/trans\/(.+)$/);
