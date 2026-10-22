@@ -32,6 +32,11 @@ export async function parseBook(file, onProgress = () => {}) {
         case 'md': case 'markdown': book = parsePlain(await decodeText(file), true); break;
         default: book = parsePlain(await decodeText(file), false);
     }
+    return finalizeBook(book, baseTitle);
+}
+
+// Shared last step for files and online sources: clean chapters, title, language.
+export function finalizeBook(book, baseTitle = 'книга') {
     book.chapters = tidyChapters(book.chapters);
     if (!book.chapters.length) throw new Error('Не открих текст в този файл.');
     book.title = normalizeSpace(book.title || '').replace(/^(untitled|unknown|без заглавие|microsoft word.*)$/i, '') || baseTitle;
@@ -39,6 +44,18 @@ export async function parseBook(file, onProgress = () => {}) {
     const sample = book.chapters.slice(0, 4).map((c) => c.paras.join(' ')).join(' ');
     book.lang = detectLang(sample) || (book.lang || 'bg').slice(0, 2).toLowerCase();
     return book;
+}
+
+// Book assembled from HTML chapters (Wikisource and similar online sources)
+export function bookFromHtmlChapters({ title, author, chapters }) {
+    const parser = new DOMParser();
+    const out = chapters.map((ch) => {
+        const doc = parser.parseFromString(ch.html, 'text/html');
+        const blocks = extractBlocks(doc.body);
+        const paras = blocks.filter((b, i) => !(b.h && i < 2 && b.t === ch.title)).map((b) => b.t);
+        return { title: ch.title || '', paras };
+    });
+    return finalizeBook({ title, author, cover: null, chapters: out }, title);
 }
 
 // ---------- helpers ----------

@@ -13,6 +13,7 @@ import { translateChapter, translationCost, deviceTranslationAvailable, TRANSLAT
 import { isNative, Native, nativeFileUrl, loadNativeVoices, nativeEngines } from './native.js';
 import { submitChapter, pollBatches, hasJobs, pendingChapters, batchEstimate } from './batch.js';
 import { usableFreeKey } from './player.js';
+import { SHELVES, loadShelf, wikisourceWorks, fetchCatalogBook, sourceKey } from './library.js';
 import { usageSummary, resetUsage, hourlyCost, freeHoursPerMonth, recordUsage } from './usage.js';
 
 const $ = (s, root = document) => root.querySelector(s);
@@ -21,7 +22,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '1.9';
+export const APP_VERSION = '2.2';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
@@ -46,7 +47,8 @@ function loadSettings() {
     // Earlier versions stored the default model explicitly: switch them to "cheapest"
     if (s.geminiModel === GEMINI_DEFAULT_MODEL && !s.geminiModelChosen) s.geminiModel = '';
     s = { ...DEFAULTS, ...s };
-    if (!s.engine) s.engine = (s.apiKey || preconfiguredKey()) ? 'cloud' : 'device';
+    // The Gemini narrator is the main voice; the phone voice is the free fallback
+    if (!s.engine) s.engine = (s.apiKey || preconfiguredKey()) ? 'gemini' : 'device';
     return s;
 }
 
@@ -197,6 +199,7 @@ async function allBooks() {
 }
 
 async function renderLibrary() {
+    renderDiscover();
     const books = await allBooks();
     const has = books.length > 0;
     $('#emptyState').classList.toggle('hidden', has);
@@ -247,14 +250,31 @@ async function importFile(file) {
     overlay.classList.remove('hidden');
     try {
         const parsed = await parseBook(file, (p) => { arc.style.strokeDashoffset = 125.7 * (1 - p); });
+        await saveImported(parsed, { fileName: file.name });
+    } catch (e) {
+        overlay.classList.add('hidden');
+        console.error(e);
+        toast(e.message || 'Неуспешно четене на файла.', { error: true, duration: 6000 });
+    }
+}
+
+// Store a parsed book (from a file or from the catalog) and open it.
+async function saveImported(parsed, { fileName = '', source = null, translateTo } = {}) {
+    const overlay = $('#importOverlay');
+    {
         const id = 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
         const chapterChars = parsed.chapters.map((c) => c.paras.reduce((n, p) => n + p.length + 1, c.title.length + 1));
         const meta = {
             id, title: parsed.title, author: parsed.author, lang: parsed.lang, cover: parsed.cover || null,
             chapterTitles: parsed.chapters.map((c) => c.title), chapterChars,
             totalChars: chapterChars.reduce((a, b) => a + b, 0), sentenceCounts: [],
-            addedAt: Date.now(), lastOpened: 0, position: { c: 0, s: 0 }, fileName: file.name,
-            translateTo: settings.autoTranslate && parsed.lang !== settings.autoTranslate ? settings.autoTranslate : null,
+            addedAt: Date.now(), lastOpened: 0, position: { c: 0, s: 0 }, fileName,
+            translateTo: translateTo !== undefined ? translateTo
+                : settings.autoTranslate && parsed.lang !== settings.autoTranslate ? settings.autoTranslate : null,
+            // Public-domain catalog books share narration and translations with everyone
+            source: source ? { type: source.source, id: source.id } : null,
+            sourceKey: source?.key || '',
+            shared: !!source,
         };
         await db.put('contents', { id, chapters: parsed.chapters });
         await db.put('books', meta);
@@ -270,19 +290,104 @@ async function importFile(file) {
                 duration: 10000, action: { label: 'Чети оригинала', run: () => setBookTranslation(null) },
             }), 600);
         }
-        if (settings.engine === 'device' && !settings.cloudReady && !localStorage.getItem('rz_hd_hint')) {
-            localStorage.setItem('rz_hd_hint', '1');
-            setTimeout(() => {
-                if (setupOpen || settings.cloudReady) return;
-                toast('Искате по-естествен глас? Google HD е ~20 ч месечно безплатно.', {
-                    duration: 9000, action: { label: 'Свържи', run: () => openCloudSetup({}) },
-                });
-            }, 3800);
+    }
+}
+
+// ==================== Discover (public-domain catalog) ====================
+
+const shelfData = {};
+
+async function renderDiscover() {
+    const box = $('#shelves');
+    if (!box || box.dataset.ready) return;
+    box.dataset.ready = '1';
+    box.innerHTML = SHELVES.map((sh) => `
+        <section class="shelf" data-shelf="${sh.id}">
+            <div class="shelf-head"><h3>${esc(sh.title)}</h3><span class="muted">${esc(sh.note || '')}</span></div>
+            <div class="shelf-row"><div class="shelf-loading muted">Зареждам…</div></div>
+        </section>`).join('');
+    for (const sh of SHELVES) {
+        const row = box.querySelector(`[data-shelf="${sh.id}"] .shelf-row`);
+        try {
+            const { items, next } = await loadShelf(sh, 1);
+            shelfData[sh.id] = { items, next };
+            if (!items.length) { row.closest('.shelf').remove(); continue; }
+            row.innerHTML = items.map((it, i) => shelfCard(it, sh.id, i)).join('');
+            if (next) row.insertAdjacentHTML('beforeend', `<button class="shelf-more" data-more="${sh.id}">Още</button>`);
+        } catch (e) {
+            row.innerHTML = `<div class="shelf-loading muted">${esc(e.message)}</div>`;
         }
+    }
+}
+
+function shelfCard(it, shelfId, i) {
+    // Generated cover underneath; the real one covers it once it loads
+    const cover = coverHtml({ title: it.title, author: it.source === 'wikisource-author' ? '' : it.author })
+        + (it.cover ? `<img class="cover-img" src="${esc(it.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : '');
+    return `<button class="shelf-card" data-shelf-id="${shelfId}" data-i="${i}">
+        <div class="cover">${cover}</div>
+        <span class="book-title">${esc(it.title)}</span>
+        ${it.author ? `<span class="book-sub truncate">${esc(it.author)}</span>` : ''}
+    </button>`;
+}
+
+async function openCatalogItem(it) {
+    if (it.source === 'wikisource-author') {
+        openSheet(it.title, (body) => {
+            body.innerHTML = '<p class="hint">Зареждам произведенията от Wikisource…</p>';
+            wikisourceWorks(it.lang, it.title).then((works) => {
+                body.innerHTML = works.length
+                    ? `<p class="hint" style="margin:0 0 6px">Обществено достояние · bg.wikisource.org</p><div class="list">${works.map((w, i) => `<button class="list-item" data-w="${i}"><span class="grow">${esc(w.title)}</span></button>`).join('')}</div>`
+                    : '<p class="hint">Не открих произведения.</p>';
+                body.onclick = (e) => {
+                    const b = e.target.closest('[data-w]');
+                    if (b) { closeSheet(); importCatalog(works[Number(b.dataset.w)], {}); }
+                };
+            }).catch((e) => { body.innerHTML = `<p class="hint">${esc(e.message)}</p>`; });
+        });
+        return;
+    }
+    openSheet(it.title, (body) => {
+        const foreign = it.translateTo && it.lang !== it.translateTo;
+        body.innerHTML = `
+            <div class="catalog-book">
+                <div class="cover">${coverHtml({ title: it.title, author: it.author })}${it.cover ? `<img class="cover-img" src="${esc(it.cover)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</div>
+                <div>
+                    <p class="catalog-author">${esc(it.author || '')}</p>
+                    <p class="hint" style="margin-top:6px">Обществено достояние · ${it.source === 'gutenberg' ? 'Project Gutenberg' : 'Wikisource'} · ${esc(LANG_NAMES[it.lang] || it.lang)}</p>
+                    <p class="hint">Веднъж прочетена от разказвача, книгата се пази и следващите слушатели не плащат за нея.</p>
+                </div>
+            </div>
+            <div class="catalog-actions">
+                ${foreign ? `<button class="btn btn-primary" data-act="tr">Слушай на ${esc(LANG_NAMES[it.translateTo].toLowerCase())}</button>
+                    <button class="btn btn-ghost" data-act="orig">Оригинал (${esc(LANG_NAMES[it.lang] || it.lang)})</button>`
+                : '<button class="btn btn-primary" data-act="orig">Добави и слушай</button>'}
+            </div>`;
+        body.onclick = (e) => {
+            const act = e.target.closest('[data-act]')?.dataset.act;
+            if (!act) return;
+            closeSheet();
+            importCatalog(it, { translateTo: act === 'tr' ? it.translateTo : null });
+        };
+    });
+}
+
+async function importCatalog(item, { translateTo = null }) {
+    const key = await sourceKey(item);
+    const existing = (await allBooks()).find((b) => b.sourceKey === key);
+    if (existing) return openBook(existing.id, false);
+    const overlay = $('#importOverlay');
+    const arc = $('#importArc');
+    $('#importText').textContent = `Изтеглям „${item.title}“…`;
+    arc.style.strokeDashoffset = 125.7;
+    overlay.classList.remove('hidden');
+    try {
+        const parsed = await fetchCatalogBook(item, (p) => { arc.style.strokeDashoffset = 125.7 * (1 - p); });
+        await saveImported(parsed, { fileName: item.title, source: { ...item, key }, translateTo: translateTo && parsed.lang !== translateTo ? translateTo : null });
     } catch (e) {
         overlay.classList.add('hidden');
         console.error(e);
-        toast(e.message || 'Неуспешно четене на файла.', { error: true, duration: 6000 });
+        toast(e.message || 'Книгата не можа да се изтегли.', { error: true, duration: 6000 });
     }
 }
 
@@ -321,6 +426,7 @@ async function openBook(id, autoplay) {
     player.translator = (c, chapter, onProgress) => translateChapter({
         bookId: player.book.id, c, chapter, from: player.book.lang, to: player.book.translateTo,
         apiKey: effectiveSettings().apiKey, model: settings.translateModel || TRANSLATE_DEFAULT_MODEL, onProgress,
+        sharedKey: player.book.shared ? player.book.sourceKey : '',
     });
     await player.load(meta, content.chapters);
     // Store sentence counts once so library progress is accurate
@@ -869,9 +975,9 @@ function renderSettings(body) {
     const hasPreKey = !!preconfiguredKey();
     const freeHrs = Math.round(freeHoursPerMonth('Chirp3-HD'));
     const engines = [
+        ['gemini', 'Gemini разказвач', 'Най-жива интонация: разказвачът „играе“ текста според избран стил и езика на книгата.', geminiCardPrice(), settings.geminiEconomy ? 'до −50% с пестелив режим' : 'плаща се само чутото'],
         ['device', 'Гласът на телефона', 'Безплатно и офлайн. Качеството зависи от устройството.', '0 $', 'завинаги'],
-        ['cloud', 'Google HD гласове', `Chirp 3 HD — много естествени гласове. ~${freeHrs} ч слушане месечно безплатно.`, 'безплатно', `после ~${hourlyCost('cloud').toFixed(2)} $/ч`],
-        ['gemini', 'Gemini разказвач', 'Най-жива интонация: разказвачът „играе“ текста според избран стил.', geminiCardPrice(), settings.geminiEconomy ? 'до −50% с пестелив режим' : 'плаща се само чутото'],
+        ['cloud', 'Google HD гласове', `Chirp 3 HD. ~${freeHrs} ч месечно безплатно, но на български звучат по-слабо от разказвача.`, 'безплатно', `после ~${hourlyCost('cloud').toFixed(2)} $/ч`],
     ];
     body.innerHTML = `
         <section class="group">
@@ -879,7 +985,7 @@ function renderSettings(body) {
             <div class="engine-list">
                 ${engines.map(([id, name, desc, price, sub]) => `
                 <button class="engine ${settings.engine === id ? 'on' : ''}" data-engine="${id}">
-                    <span class="engine-name">${name}${id === 'cloud' ? '<span class="badge">Изгодно</span>' : ''}</span>
+                    <span class="engine-name">${name}${id === 'gemini' ? '<span class="badge">Препоръчан</span>' : ''}</span>
                     <span class="engine-price">${price}<small>${sub}</small></span>
                     <span class="engine-desc">${desc}</span>
                 </button>`).join('')}
@@ -1453,6 +1559,25 @@ function bindEvents() {
     });
     fileInput.onchange = () => { importFile(fileInput.files[0]); fileInput.value = ''; };
 
+    $('#shelves').addEventListener('click', async (e) => {
+        const more = e.target.closest('[data-more]');
+        if (more) {
+            const sh = SHELVES.find((x) => x.id === more.dataset.more);
+            const d = shelfData[sh.id];
+            more.textContent = '…';
+            try {
+                const { items, next } = await loadShelf(sh, d.next);
+                const start = d.items.length;
+                d.items.push(...items);
+                d.next = next;
+                more.insertAdjacentHTML('beforebegin', items.map((it, i) => shelfCard(it, sh.id, start + i)).join(''));
+                if (next) more.textContent = 'Още'; else more.remove();
+            } catch { more.textContent = 'Още'; }
+            return;
+        }
+        const card = e.target.closest('.shelf-card');
+        if (card) openCatalogItem(shelfData[card.dataset.shelfId].items[Number(card.dataset.i)]);
+    });
     $('#bookGrid').addEventListener('click', (e) => {
         const b = e.target.closest('.book');
         if (b) openBook(b.dataset.id, false);

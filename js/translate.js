@@ -5,6 +5,7 @@
 
 import * as db from './db.js';
 import { recordUsage } from './usage.js';
+import { sharedGetTrans, sharedPutTrans } from './shared.js';
 import { LANG_NAMES } from './text.js';
 
 export const TRANSLATE_DEFAULT_MODEL = 'gemini-2.5-flash-lite';
@@ -112,10 +113,20 @@ function batches(items) {
 // ---------- public ----------
 
 // Translate one chapter ({ title, paras }) and cache it. Returns the translated chapter.
-export async function translateChapter({ bookId, c, chapter, from, to, apiKey, model, onProgress, signal }) {
+// sharedKey (public-domain books): the translation is shared with every listener.
+export async function translateChapter({ bookId, c, chapter, from, to, apiKey, model, onProgress, signal, sharedKey }) {
     const key = `${bookId}|${to}|${c}`;
     const cached = await db.get('trans', key);
     if (cached) return cached.chapter;
+    // The paragraph count is part of the key, so a mismatching entry can never block a good one
+    const remoteKey = sharedKey ? `${sharedKey}|${to}|${c}|${chapter.paras.length}` : '';
+    if (remoteKey) {
+        const remote = await sharedGetTrans(remoteKey);
+        if (remote && remote.paras?.length === chapter.paras.length) {
+            await db.put('trans', { key, chapter: remote, at: Date.now() });
+            return remote;
+        }
+    }
 
     const items = [chapter.auto ? '' : chapter.title, ...chapter.paras];
     const result = items.slice();
@@ -147,6 +158,7 @@ export async function translateChapter({ bookId, c, chapter, from, to, apiKey, m
 
     const translated = { title: chapter.auto ? chapter.title : result[0], paras: result.slice(1), auto: chapter.auto };
     await db.put('trans', { key, chapter: translated, at: Date.now() });
+    if (remoteKey) sharedPutTrans(remoteKey, translated);
     return translated;
 }
 

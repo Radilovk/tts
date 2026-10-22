@@ -4,6 +4,7 @@
 //   gemini — Gemini TTS, steerable "narrator" intonation (paid per audio token)
 
 import { LOCALES } from './text.js';
+import { encodeOpus } from './opus.js';
 import { isNative, nativeVoices, nativeVoiceLabel, onNativeVoices } from './native.js';
 
 export const GEMINI_VOICES = [
@@ -297,11 +298,25 @@ export async function geminiModels(apiKey) {
         .sort((a, b) => (b.includes('flash') - a.includes('flash')) || b.localeCompare(a));
 }
 
+// How a native audiobook narrator sounds in each language (stress, melody, pace).
+// Kept short: the narrator follows it, and it is never part of the read text.
+const LANGUAGE_NOTES = {
+    bg: 'Текстът е на български — използвай естествено българско произношение, правилни ударения и мелодия на изречението, както при професионален български разказвач',
+    en: 'The text is in English — use natural native English pronunciation, stress and sentence melody, like a professional audiobook narrator',
+    ru: 'The text is in Russian — read it in Russian with native pronunciation, correct word stress and natural Russian intonation, like a professional Russian audiobook narrator',
+    uk: 'The text is in Ukrainian — read it in Ukrainian with native pronunciation, correct stress and natural Ukrainian intonation',
+    sr: 'The text is in Serbian — read it in Serbian with native pronunciation, correct pitch accent and natural Serbian intonation',
+    de: 'The text is in German — read it in German with native pronunciation and natural German sentence melody, like a professional German Hörbuch narrator',
+    fr: 'The text is in French — read it in French with native pronunciation, liaisons and natural French intonation, like a professional French livre audio narrator',
+    es: 'The text is in Spanish — read it in Spanish with native pronunciation and natural Spanish intonation, like a professional Spanish audiolibro narrator',
+    it: 'The text is in Italian — read it in Italian with native pronunciation and natural Italian intonation, like a professional Italian audiolibro narrator',
+};
+
 export function geminiPrompt(text, style, lang, customStyle) {
     const s = NARRATION_STYLES[style] || NARRATION_STYLES.intriguing;
     const directive = (style === 'custom' && customStyle?.trim()) || (lang === 'bg' ? s.bg : s.en);
-    const langNote = lang === 'bg' ? ' Текстът е на български — използвай естествено българско произношение и ударения.' : '';
-    return `${directive}.${langNote}\n\n${text}`;
+    const note = LANGUAGE_NOTES[lang];
+    return `${directive}.${note ? ' ' + note + '.' : ''}\n\n${text}`;
 }
 
 export function geminiRequestBody({ text, voice, style, customStyle, lang }) {
@@ -314,8 +329,9 @@ export function geminiRequestBody({ text, voice, style, customStyle, lang }) {
     };
 }
 
-// Turn a generateContent response (interactive or from a batch) into a WAV blob.
-export function geminiParseAudio(data) {
+// Turn a generateContent response (interactive or from a batch) into compact audio:
+// Ogg/Opus when the browser can encode it (~12× smaller), WAV otherwise.
+export async function geminiParseAudio(data) {
     const part = data?.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data);
     if (!part) {
         const reason = data?.candidates?.[0]?.finishReason;
@@ -328,7 +344,7 @@ export function geminiParseAudio(data) {
     const trimmed = trimSilence(pcm, rate);
     const usage = data.usageMetadata || {};
     return {
-        blob: pcmToWav(trimmed, rate),
+        blob: (await encodeOpus(trimmed, rate)) || pcmToWav(trimmed, rate),
         dur: trimmed.length / rate,
         inTokens: usage.promptTokenCount || 0,
         outTokens: usage.candidatesTokenCount || Math.round(pcm.length / 2 / rate * PRICES.gemini.tokensPerSecond),
