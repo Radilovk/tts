@@ -74,22 +74,33 @@ function opusHead(rate) {
     return h;
 }
 
-function opusTags() {
-    const vendor = new TextEncoder().encode('razkazvach');
-    const t = new Uint8Array(8 + 4 + vendor.length + 4);
+// Vorbis-style comments: TITLE, ARTIST, ALBUM… (also used for the AI-narration label)
+function opusTags(tags = {}) {
+    const enc = new TextEncoder();
+    const vendor = enc.encode('razkazvach');
+    const comments = Object.entries(tags).filter(([, v]) => v).map(([k, v]) => enc.encode(`${k}=${v}`));
+    const size = 8 + 4 + vendor.length + 4 + comments.reduce((n, c) => n + 4 + c.length, 0);
+    const t = new Uint8Array(size);
     const v = new DataView(t.buffer);
-    t.set(new TextEncoder().encode('OpusTags'), 0);
+    t.set(enc.encode('OpusTags'), 0);
     v.setUint32(8, vendor.length, true);
     t.set(vendor, 12);
-    v.setUint32(12 + vendor.length, 0, true); // no user comments
+    let off = 12 + vendor.length;
+    v.setUint32(off, comments.length, true);
+    off += 4;
+    for (const c of comments) {
+        v.setUint32(off, c.length, true);
+        t.set(c, off + 4);
+        off += 4 + c.length;
+    }
     return t;
 }
 
-function mux(packets, rate) {
+function mux(packets, rate, tags) {
     const serial = (Math.random() * 0xffffffff) >>> 0;
     const pages = [
         oggPage([opusHead(rate)], { granule: 0, serial, seq: 0, bos: true }),
-        oggPage([opusTags()], { granule: 0, serial, seq: 1 }),
+        oggPage([opusTags(tags)], { granule: 0, serial, seq: 1 }),
     ];
     let seq = 2;
     let granule = PRE_SKIP;
@@ -103,37 +114,67 @@ function mux(packets, rate) {
 
 // ---------- public ----------
 
-// int16: mono Int16Array PCM. Resolves to an Ogg/Opus Blob, or null if unsupported.
-export async function encodeOpus(int16, rate) {
-    if (!int16.length || !(await supported(rate))) return null;
-    const packets = [];
-    let error = null;
-    const encoder = new AudioEncoder({
-        output: (chunk) => {
-            const data = new Uint8Array(chunk.byteLength);
-            chunk.copyTo(data);
-            packets.push({ data, duration: chunk.duration || FRAME_US });
-        },
-        error: (e) => { error = e; },
-    });
-    try {
-        encoder.configure({ codec: 'opus', sampleRate: rate, numberOfChannels: 1, bitrate: BITRATE });
-        // Feed in one-second pieces
-        for (let off = 0; off < int16.length; off += rate) {
-            const piece = int16.subarray(off, Math.min(int16.length, off + rate));
-            const data = new AudioData({
-                format: 's16', sampleRate: rate, numberOfFrames: piece.length, numberOfChannels: 1,
-                timestamp: Math.round(off / rate * 1e6), data: piece.slice(),
-            });
-            encoder.encode(data);
-            data.close();
-        }
-        await encoder.flush();
-    } catch (e) {
-        error = e;
-    } finally {
-        try { encoder.close(); } catch {}
+// Streaming encoder: add() PCM pieces one after another, finish() → Ogg/Opus Blob.
+// Keeps only compressed packets in memory, so whole chapters stay small.
+export class OpusWriter {
+    constructor(rate, tags = {}) {
+        this.rate = rate;
+        this.tags = tags;
+        this.packets = [];
+        this.error = null;
+        this.samples = 0;
+        this.encoder = null;
     }
-    if (error || !packets.length) return null;
-    return mux(packets, rate);
+
+    static async supported(rate) {
+        return supported(rate);
+    }
+
+    _ensure() {
+        if (this.encoder) return;
+        this.encoder = new AudioEncoder({
+            output: (chunk) => {
+                const data = new Uint8Array(chunk.byteLength);
+                chunk.copyTo(data);
+                this.packets.push({ data, duration: chunk.duration || FRAME_US });
+            },
+            error: (e) => { this.error = e; },
+        });
+        this.encoder.configure({ codec: 'opus', sampleRate: this.rate, numberOfChannels: 1, bitrate: BITRATE });
+    }
+
+    add(int16) {
+        if (this.error) throw this.error;
+        this._ensure();
+        for (let off = 0; off < int16.length; off += this.rate) {
+            const piece = int16.subarray(off, Math.min(int16.length, off + this.rate));
+            const data = new AudioData({
+                format: 's16', sampleRate: this.rate, numberOfFrames: piece.length, numberOfChannels: 1,
+                timestamp: Math.round(this.samples / this.rate * 1e6), data: piece.slice(),
+            });
+            this.encoder.encode(data);
+            data.close();
+            this.samples += piece.length;
+        }
+    }
+
+    async finish() {
+        if (!this.encoder) return null;
+        try { await this.encoder.flush(); } catch (e) { this.error = e; }
+        try { this.encoder.close(); } catch {}
+        if (this.error || !this.packets.length) return null;
+        return mux(this.packets, this.rate, this.tags);
+    }
+}
+
+// int16: mono Int16Array PCM. Resolves to an Ogg/Opus Blob, or null if unsupported.
+export async function encodeOpus(int16, rate, tags) {
+    if (!int16.length || !(await supported(rate))) return null;
+    const w = new OpusWriter(rate, tags);
+    try {
+        w.add(int16);
+        return await w.finish();
+    } catch {
+        return null;
+    }
 }

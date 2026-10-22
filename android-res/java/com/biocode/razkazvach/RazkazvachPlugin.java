@@ -2,6 +2,7 @@ package com.biocode.razkazvach;
 
 import android.Manifest;
 import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -9,6 +10,9 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
+import android.provider.MediaStore;
+import android.util.Base64;
 import android.provider.OpenableColumns;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
@@ -22,6 +26,7 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -298,6 +303,87 @@ public class RazkazvachPlugin extends Plugin {
         if (prefs.getBoolean("askedNotifications", false)) return;
         prefs.edit().putBoolean("askedNotifications", true).apply();
         ActivityCompat.requestPermissions(getActivity(), new String[] { Manifest.permission.POST_NOTIFICATIONS }, 4711);
+    }
+
+    // ------------------------------------------------------- saving audio files
+
+    private final Map<String, File> exports = new HashMap<>();
+
+    /** Start a file in the app cache; the web side then appends it in base64 pieces. */
+    @PluginMethod
+    public void fileBegin(PluginCall call) {
+        String id = "x" + System.currentTimeMillis();
+        File dir = new File(getContext().getCacheDir(), "exports");
+        if (!dir.exists()) dir.mkdirs();
+        File f = new File(dir, id + ".part");
+        if (f.exists()) f.delete();
+        exports.put(id, f);
+        JSObject ret = new JSObject();
+        ret.put("id", id);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void fileAppend(PluginCall call) {
+        File f = exports.get(call.getString("id", ""));
+        if (f == null) { call.reject("Няма такъв файл."); return; }
+        try (OutputStream os = new FileOutputStream(f, true)) {
+            os.write(Base64.decode(call.getString("data", ""), Base64.DEFAULT));
+            call.resolve();
+        } catch (Exception e) {
+            call.reject("Грешка при запис: " + e.getMessage());
+        }
+    }
+
+    /** Move the finished file into Downloads/Razkazvach (visible to every app). */
+    @PluginMethod
+    public void fileEnd(PluginCall call) {
+        String id = call.getString("id", "");
+        File f = exports.remove(id);
+        String name = safeName(call.getString("name", "audio.ogg"));
+        String mime = call.getString("mime", "audio/ogg");
+        if (f == null) { call.reject("Няма такъв файл."); return; }
+        new Thread(() -> {
+            try {
+                String where;
+                if (Build.VERSION.SDK_INT >= 29) {
+                    ContentValues v = new ContentValues();
+                    v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                    v.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+                    v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Razkazvach");
+                    v.put(MediaStore.MediaColumns.IS_PENDING, 1);
+                    ContentResolver cr = getContext().getContentResolver();
+                    Uri uri = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                    if (uri == null) throw new Exception("MediaStore отказа файла");
+                    try (InputStream in = new FileInputStream(f); OutputStream os = cr.openOutputStream(uri)) {
+                        byte[] buf = new byte[256 * 1024];
+                        int n;
+                        while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+                    }
+                    v.clear();
+                    v.put(MediaStore.MediaColumns.IS_PENDING, 0);
+                    cr.update(uri, v, null, null);
+                    where = Environment.DIRECTORY_DOWNLOADS + "/Razkazvach/" + name;
+                } else {
+                    File dir = new File(getContext().getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "Razkazvach");
+                    if (!dir.exists()) dir.mkdirs();
+                    File out = new File(dir, name);
+                    try (InputStream in = new FileInputStream(f); OutputStream os = new FileOutputStream(out)) {
+                        byte[] buf = new byte[256 * 1024];
+                        int n;
+                        while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+                    }
+                    where = out.getAbsolutePath();
+                }
+                f.delete();
+                JSObject ret = new JSObject();
+                ret.put("path", where);
+                call.resolve(ret);
+            } catch (Exception e) {
+                f.delete();
+                call.reject("Файлът не можа да се запише: " + e.getMessage());
+            }
+        }).start();
     }
 
     // ------------------------------------------------------------ shared files
