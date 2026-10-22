@@ -51,6 +51,17 @@ export function usageSummary() {
     return { rows, total, month: u.month };
 }
 
+// Characters used this month on a Google voice tier.
+export function monthlyCloudChars(tier) {
+    return load().cloud[tier] || 0;
+}
+
+// Estimated Gemini spend this month in USD.
+export function monthlyGeminiUsd() {
+    const g = load().gemini;
+    return g.inTokens / 1e6 * PRICES.gemini.inPer1M + g.outTokens / 1e6 * PRICES.gemini.outPer1M;
+}
+
 export function resetUsage() {
     localStorage.removeItem(KEY);
 }

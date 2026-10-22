@@ -20,6 +20,7 @@ const DEFAULTS = {
     engine: null, apiKey: '', cloudVoice: '', geminiVoice: 'Charon', geminiModel: GEMINI_DEFAULT_MODEL,
     style: 'intriguing', customStyle: '', deviceVoice: '', lang: 'auto', rate: 1, lookahead: 2,
     cacheMB: 500, theme: 'system', readerSize: 19, view: 'cover', cloudReady: false,
+    freeOnly: true, geminiCapUsd: 2,
 };
 
 let settings = loadSettings();
@@ -745,6 +746,19 @@ function renderSettings(body) {
         <section class="group">
             <div class="group-title">Икономия</div>
             <div class="row">
+                <span class="row-label">Google HD само безплатно<small>Спира при 95% от безплатния месечен лимит</small></span>
+                <select class="select" id="setFreeOnly">
+                    <option value="1" ${settings.freeOnly ? 'selected' : ''}>Да</option>
+                    <option value="0" ${!settings.freeOnly ? 'selected' : ''}>Не</option>
+                </select>
+            </div>
+            <div class="row">
+                <span class="row-label">Месечен лимит за Gemini<small>Над него четенето минава на гласа на телефона</small></span>
+                <select class="select" id="setGeminiCap">
+                    ${[[0.5, '0.5 $'], [1, '1 $'], [2, '2 $'], [5, '5 $'], [10, '10 $'], [0, 'Без лимит']].map(([v, l]) => `<option value="${v}" ${settings.geminiCapUsd === v ? 'selected' : ''}>${l}</option>`).join('')}
+                </select>
+            </div>
+            <div class="row">
                 <span class="row-label">Подготовка напред<small>Колко откъса се генерират преди да стигнете до тях</small></span>
                 <select class="select" id="setAhead">
                     ${[1, 2, 3].map((n) => `<option value="${n}" ${settings.lookahead === n ? 'selected' : ''}>${n}</option>`).join('')}
@@ -833,6 +847,8 @@ function renderSettings(body) {
         rerenderSheet(renderSettings);
     };
     $('#setAhead', body).onchange = (e) => { settings.lookahead = Number(e.target.value); saveSettings(); };
+    $('#setFreeOnly', body).onchange = (e) => { settings.freeOnly = e.target.value === '1'; saveSettings(); };
+    $('#setGeminiCap', body).onchange = (e) => { settings.geminiCapUsd = Number(e.target.value); saveSettings(); };
     $('#setCache', body).onchange = (e) => {
         settings.cacheMB = Number(e.target.value);
         saveSettings();
@@ -1328,6 +1344,14 @@ function bindEvents() {
     player.addEventListener('error', (e) => {
         const err = e.detail;
         console.error(err);
+        if (err.reason === 'APP_CAP') {
+            settings.engine = 'device';
+            saveSettings();
+            updatePlayerUI();
+            toast(err.message + ' Продължавам с гласа на телефона.', { duration: 9000, action: { label: 'Настройки', run: openSettings } });
+            player.play();
+            return;
+        }
         const offerDevice = settings.engine !== 'device';
         const setupIssue = settings.engine === 'cloud' && /^(API_KEY|SERVICE_DISABLED|BILLING_DISABLED)/.test(err.reason || '');
         if (setupIssue) {
