@@ -7,7 +7,7 @@ import { LANG_NAMES, LOCALES, charLen } from './text.js';
 import {
     GEMINI_VOICES, GEMINI_DEFAULT_MODEL, NARRATION_STYLES, PRICES,
     cloudVoices, cloudSynthesize, cloudDiagnose, CLOUD_LINKS, geminiSynthesize, geminiModels, deviceVoices, onDeviceVoicesChanged, cloudTier,
-    cheapestGeminiModel, geminiCost,
+    cheapestGeminiModel, isVerifiedGeminiModel, geminiCost,
 } from './engines.js';
 import { translateChapter, translationCost, deviceTranslationAvailable, TRANSLATE_DEFAULT_MODEL } from './translate.js';
 import { isNative, Native, nativeFileUrl, loadNativeVoices, nativeEngines } from './native.js';
@@ -21,7 +21,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '1.8';
+export const APP_VERSION = '1.9';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
@@ -1144,7 +1144,7 @@ function renderVoiceGroup(box, lang) {
             <p class="hint">Ключ от <b>нов проект без свързано плащане</b> използва безплатния дневен лимит на Google. Разказвачът първо чете с него, а когато лимитът свърши за деня, минава на основния ключ. Създава се в <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">AI Studio</a> → Create API key → „Create in new project“.${settings.geminiFreeKey && !usableFreeKey(settings) ? ' <b>Днешният безплатен лимит е изчерпан.</b>' : ''}</p>
             <div class="group-title" style="margin-top:18px">Модел</div>
             <select class="select" id="setGeminiModel"></select>
-            <p class="hint">„Автоматично“ избира най-евтиния модел, достъпен за ключа. Цените са по ценоразписа на Google и може да се променят.</p>`;
+            <p class="hint">„Автоматично“ избира най-евтиния проверен модел (Gemini 2.5 Flash TTS). Другите модели може да прочетат на глас инструкцията за стила — ако това стане, върнете „Автоматично“.</p>`;
         $('#setEconomy', box).onchange = (e) => { settings.geminiEconomy = e.target.value === '1'; saveSettings(); rerenderSheet(renderSettings); };
         $('#setFreeKey', box).onchange = (e) => { settings.geminiFreeKey = e.target.value.trim(); localStorage.removeItem('rz_free_key_exhausted'); saveSettings(); };
         $('#setGeminiVoice', box).onchange = (e) => { settings.geminiVoice = e.target.value; saveSettings(); player.voiceChanged(); };
@@ -1171,7 +1171,7 @@ function renderVoiceGroup(box, lang) {
             const all = [...new Set([...(settings.geminiModel ? [settings.geminiModel] : []), ...list.filter((m) => !/native|live|dialog/.test(m)), GEMINI_DEFAULT_MODEL])];
             const cheapest = cheapestGeminiModel(list.length ? list : [GEMINI_DEFAULT_MODEL]);
             modelSel.innerHTML = `<option value="" ${!settings.geminiModel ? 'selected' : ''}>Автоматично: ${esc(cheapest)} · ${perHour(cheapest)}</option>` +
-                all.map((m) => `<option value="${esc(m)}" ${m === settings.geminiModel ? 'selected' : ''}>${esc(m)} · ${perHour(m)}</option>`).join('');
+                all.map((m) => `<option value="${esc(m)}" ${m === settings.geminiModel ? 'selected' : ''}>${esc(m)} · ${perHour(m)}${isVerifiedGeminiModel(m) ? '' : ' · непроверен'}</option>`).join('');
         };
         fillModels(geminiModelList || knownGeminiModels());
         if (!geminiModelList && effectiveSettings().apiKey) {
@@ -1212,7 +1212,8 @@ function unlockAudio(el) {
     const had = el.src;
     if (had) return;
     el.src = SILENT_WAV;
-    el.play().then(() => el.pause()).catch(() => {});
+    // Pause only the silent clip — the real audio may already have replaced it
+    el.play().then(() => { if (el.src === SILENT_WAV) el.pause(); }).catch(() => {});
 }
 
 function playOrReport(el) {

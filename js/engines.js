@@ -37,12 +37,18 @@ export function geminiCost(model, inTokens, outTokens, batch = false) {
     return (inTokens * p.in + outTokens * p.out) / 1e6 * (batch ? 0.5 : 1);
 }
 
-// The cheapest TTS model the key can use (known prices win over guesses)
+// Models confirmed to treat the style line as direction (not read it aloud).
+// Others can still be chosen by hand in the settings.
+const VERIFIED_TTS = /^gemini-2\.5-flash(-preview)?-tts/;
+
+export function isVerifiedGeminiModel(model) {
+    return VERIFIED_TTS.test(model || '');
+}
+
+// The cheapest verified TTS model the key can use
 export function cheapestGeminiModel(models) {
-    const usable = (models || []).filter((m) => /tts/.test(m) && !/native|live|dialog/.test(m));
-    return usable.sort((a, b) => geminiPrice(a).out - geminiPrice(b).out
-        || Number(!!geminiPrice(a).guess) - Number(!!geminiPrice(b).guess)
-        || b.localeCompare(a))[0] || GEMINI_DEFAULT_MODEL;
+    const usable = (models || []).filter((m) => isVerifiedGeminiModel(m));
+    return usable.sort((a, b) => geminiPrice(a).out - geminiPrice(b).out || b.localeCompare(a))[0] || GEMINI_DEFAULT_MODEL;
 }
 
 export const NARRATION_STYLES = {
