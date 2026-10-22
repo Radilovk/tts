@@ -438,3 +438,27 @@ textarea.input { height: auto; min-height: 86px; padding: 12px 14px; resize: ver
 .snippet { display: block; font-size: 13px; line-height: 1.45; color: var(--ink-2); }
 .snippet mark { background: var(--highlight); color: var(--ink); border-radius: 3px; padding: 0 2px; }
 .list-item.done .grow > .truncate { color: var(--muted); }
+
+/* ===== Discover (catalog shelves) ===== */
+.discover { margin-top: 34px; }
+.shelf { margin-bottom: 26px; }
+.shelf-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.shelf-head h3 { font-family: var(--serif); font-weight: 500; font-size: 18px; }
+.shelf-head .muted { font-size: 12px; white-space: nowrap; }
+.shelf-row {
+    display: flex; gap: 14px; overflow-x: auto; scroll-snap-type: x proximity; padding: 2px 20px 10px;
+    margin: 0 -20px; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+}
+.shelf-row::-webkit-scrollbar { display: none; }
+.shelf-card { flex: 0 0 112px; display: flex; flex-direction: column; gap: 8px; text-align: left; scroll-snap-align: start; min-width: 0; }
+.shelf-card .cover { font-size: 11px; }
+.shelf-card .book-title { font-size: 13px; }
+.shelf-card:active .cover { transform: scale(.97); }
+.shelf-more { flex: 0 0 auto; align-self: center; height: 40px; padding: 0 16px; border-radius: 999px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); font-size: 13px; font-weight: 500; }
+.shelf-loading { font-size: 13px; padding: 30px 0; }
+.catalog-book { display: grid; grid-template-columns: 110px 1fr; gap: 16px; align-items: start; }
+.catalog-author { font-weight: 500; }
+.catalog-actions { display: grid; gap: 10px; margin-top: 20px; }
+.catalog-actions .btn { width: 100%; }
+.cover .cover-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.shelf-card .cover-gen b { font-size: 1.2em; }

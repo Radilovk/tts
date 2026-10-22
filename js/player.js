@@ -7,6 +7,7 @@ import * as db from './db.js';
 import { buildChapterModel, chunkBoundaries, nextBoundary, chunkText, charLen, LOCALES } from './text.js';
 import { cloudSynthesize, geminiSynthesize, geminiCost, cloudTier, deviceVoices, PRICES } from './engines.js';
 import { pendingKeys } from './batch.js';
+import { sharedGetAudio, sharedPutAudio } from './shared.js';
 import { recordUsage, monthlyCloudChars, monthlyGeminiUsd } from './usage.js';
 import { Native } from './native.js';
 
@@ -367,8 +368,19 @@ export class Player extends EventTarget {
         const p = (async () => {
             const cached = await db.audioGet(spec.key);
             if (cached) return cached;
+            const shared = !!this.book.shared;
+            // Public-domain book: someone may already have had this part narrated
+            if (shared) {
+                const remote = await sharedGetAudio(spec.key);
+                if (remote) {
+                    const rec = { key: spec.key, blob: remote.blob, dur: remote.dur || await blobDuration(remote.blob), chars: spec.chars, bookId: this.book.id };
+                    await db.audioPut(rec);
+                    return rec;
+                }
+            }
             const rec = await this._synthesize(spec);
             await db.audioPut(rec);
+            if (shared) sharedPutAudio(spec.key, spec.vk, this._lang(), spec.text, rec.blob, rec.dur);
             db.audioEvict(this.getSettings().cacheMB * 1024 * 1024).catch(() => {});
             return rec;
         })();

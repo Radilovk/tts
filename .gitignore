@@ -17,3 +17,6 @@ gen-lang-client-*.json
 android/
 capacitor-shell/
 *.apk
+
+# Wrangler local state
+server/.wrangler/

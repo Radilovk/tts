@@ -1,0 +1,9 @@
+# Разказвач library worker — book downloads (Project Gutenberg) and the shared
+# narration/translation cache in R2. Deployed by .github/workflows/deploy-library.yml
+name = "razkazvach-library"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+[[r2_buckets]]
+binding = "AUDIO"
+bucket_name = "razkazvach-audio"

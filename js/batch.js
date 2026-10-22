@@ -5,6 +5,7 @@
 import * as db from './db.js';
 import { geminiBatchSubmit, geminiBatchGet, geminiParseAudio, geminiRequestBody, geminiCost } from './engines.js';
 import { recordUsage } from './usage.js';
+import { sharedHasAudio, sharedPutAudio } from './shared.js';
 
 const STORE = 'rz_batches';
 const PER_JOB = 6; // chunks per job: keeps each inline response a manageable size on phones
@@ -39,12 +40,15 @@ export async function submitChapter(player, c, st) {
     const specs = await player.chapterSpecs(c);
     const pending = pendingKeys();
     const missing = [];
+    const shared = !!player.book.shared;
     for (const spec of specs) {
         if (pending.has(spec.key) || await db.audioHas(spec.key)) continue;
+        // Already narrated for another listener: it will simply be downloaded
+        if (shared && await sharedHasAudio(spec.key)) continue;
         missing.push(spec);
     }
     if (!missing.length) return 0;
-    const lang = player.book.translateTo || (st.lang !== 'auto' ? st.lang : player.book.lang);
+    const lang = player._lang();
     const jobs = loadJobs();
     for (let i = 0; i < missing.length; i += PER_JOB) {
         const group = missing.slice(i, i + PER_JOB);
@@ -58,7 +62,7 @@ export async function submitChapter(player, c, st) {
         });
         jobs.push({
             name, bookId: player.book.id, c, model: st.geminiModel, at: Date.now(),
-            items: group.map((spec) => ({ key: spec.key, chars: spec.chars })),
+            items: group.map((spec) => ({ key: spec.key, chars: spec.chars, ...(shared ? { vk: spec.vk, lang, text: spec.text } : {}) })),
         });
         saveJobs(jobs);
     }
@@ -78,12 +82,14 @@ export async function pollBatches(apiKey, onDone) {
             if (!r.done) continue;
             let stored = 0;
             if (r.ok) {
-                const chars = Object.fromEntries(job.items.map((it) => [it.key, it.chars]));
+                const byKey = Object.fromEntries(job.items.map((it) => [it.key, it]));
                 for (const resp of r.responses) {
                     if (!resp.key || !resp.response) continue;
                     try {
                         const a = geminiParseAudio(resp.response);
-                        await db.audioPut({ key: resp.key, blob: a.blob, dur: a.dur, chars: chars[resp.key] || 0, bookId: job.bookId });
+                        const it = byKey[resp.key] || {};
+                        await db.audioPut({ key: resp.key, blob: a.blob, dur: a.dur, chars: it.chars || 0, bookId: job.bookId });
+                        if (it.text) sharedPutAudio(resp.key, it.vk, it.lang, it.text, a.blob, a.dur);
                         recordUsage({ engine: 'gemini', inTokens: a.inTokens, outTokens: a.outTokens, usd: geminiCost(job.model, a.inTokens, a.outTokens, true), mode: 'batch' });
                         stored++;
                     } catch {}
