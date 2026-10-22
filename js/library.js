@@ -21,12 +21,13 @@ const BG_AUTHORS = [
 
 export const SHELVES = [
     { id: 'bg', title: 'Българска класика', note: 'Wikisource', kind: 'wikisource-authors', lang: 'bg' },
-    { id: 'world', title: 'Световна класика на български', note: 'AI превод · Project Gutenberg', kind: 'gutendex', params: { languages: 'en' }, translateTo: 'bg' },
-    { id: 'ru', title: 'Руска класика', note: 'оригинал', kind: 'gutendex', params: { languages: 'ru' } },
-    { id: 'de', title: 'Deutsche Klassiker', note: 'Original', kind: 'gutendex', params: { languages: 'de' } },
-    { id: 'fr', title: 'Classiques français', note: 'original', kind: 'gutendex', params: { languages: 'fr' } },
-    { id: 'es', title: 'Clásicos en español', note: 'original', kind: 'gutendex', params: { languages: 'es' } },
-    { id: 'it', title: 'Classici italiani', note: 'originale', kind: 'gutendex', params: { languages: 'it' } },
+    // Foreign shelves are shown and read in the reader's language (titles and text translated)
+    { id: 'world', title: 'Световна класика', note: 'превод на български', kind: 'gutendex', params: { languages: 'en' }, translateTo: 'bg' },
+    { id: 'ru', title: 'Руска класика', note: 'превод на български', kind: 'gutendex', params: { languages: 'ru' }, translateTo: 'bg' },
+    { id: 'de', title: 'Немска класика', note: 'превод на български', kind: 'gutendex', params: { languages: 'de' }, translateTo: 'bg' },
+    { id: 'fr', title: 'Френска класика', note: 'превод на български', kind: 'gutendex', params: { languages: 'fr' }, translateTo: 'bg' },
+    { id: 'es', title: 'Испанска класика', note: 'превод на български', kind: 'gutendex', params: { languages: 'es' }, translateTo: 'bg' },
+    { id: 'it', title: 'Италианска класика', note: 'превод на български', kind: 'gutendex', params: { languages: 'it' }, translateTo: 'bg' },
 ];
 
 // ---------- rights ----------
@@ -59,7 +60,7 @@ function authorName(a) {
     return m ? `${m[2]} ${m[1]}` : (a?.name || '');
 }
 
-function gutenbergItem(b, shelf) {
+export function gutenbergItem(b, shelf) {
     return {
         source: 'gutenberg', id: String(b.id), key: `pg-${b.id}`,
         title: b.title.replace(/\s*[:;]\s*$/, ''),
@@ -90,10 +91,26 @@ export async function loadShelf(shelf, page = 1) {
     return out;
 }
 
+// Book files go through our server: it has CORS and a trusted certificate on every
+// phone (some Android builds can't verify gutenberg.org themselves).
+async function viaServer(url) {
+    const api = libraryApi();
+    if (!api) throw new Error('Сървърът на библиотеката не е наличен.');
+    const r = await fetch(`${api}/proxy?url=${encodeURIComponent(url)}`);
+    if (!r.ok) throw new Error('Книгата не можа да се изтегли.');
+    return r.blob();
+}
+
 async function downloadGutenberg(id) {
-    const direct = `https://www.gutenberg.org/cache/epub/${id}/pg${id}.epub`; // text-only, ~0.5 MB
+    const api = libraryApi();
+    if (api) {
+        try {
+            const r = await fetch(`${api}/gutenberg/${id}.epub`);
+            if (r.ok) return await r.blob();
+        } catch {}
+    }
     if (isNative && window.Capacitor?.Plugins?.CapacitorHttp) {
-        // The Android app downloads natively, without the CORS proxy
+        const direct = `https://www.gutenberg.org/cache/epub/${id}/pg${id}.epub`;
         const res = await window.Capacitor.Plugins.CapacitorHttp.request({ url: direct, method: 'GET', responseType: 'blob' });
         if (res.status >= 400 || !res.data) throw new Error('Книгата не можа да се изтегли.');
         const bin = atob(res.data);
@@ -101,11 +118,34 @@ async function downloadGutenberg(id) {
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
         return new Blob([bytes], { type: 'application/epub+zip' });
     }
-    const api = libraryApi();
-    if (!api) throw new Error('Сървърът на библиотеката още не е включен.');
-    const r = await fetch(`${api}/gutenberg/${id}.epub`);
-    if (!r.ok) throw new Error('Книгата не можа да се изтегли.');
-    return r.blob();
+    throw new Error('Книгата не можа да се изтегли. Проверете връзката.');
+}
+
+// ---------- Internet Archive (public-domain scans from Open Library) ----------
+
+async function downloadArchive(item, onProgress) {
+    for (const id of item.ia || []) {
+        let meta;
+        try { meta = await (await fetch(`https://archive.org/metadata/${encodeURIComponent(id)}`)).json(); } catch { continue; }
+        const m = meta?.metadata || {};
+        if (!meta?.files || m['access-restricted-item'] === true || m['access-restricted-item'] === 'true') continue;
+        const files = meta.files.map((f) => f.name);
+        const base = `https://archive.org/download/${encodeURIComponent(id)}/`;
+        const epub = files.find((n) => n.endsWith('.epub') && !/encrypted|_lcp/.test(n));
+        const txt = files.find((n) => n.endsWith('_djvu.txt'));
+        onProgress?.(0.3);
+        try {
+            if (epub) {
+                const r = await fetch(base + encodeURIComponent(epub));
+                if (r.ok) return { file: new File([await r.blob()], `${item.title}.epub`) };
+            }
+            if (txt) {
+                const r = await fetch(base + encodeURIComponent(txt));
+                if (r.ok) return { file: new File([await r.blob()], `${item.title}.txt`) };
+            }
+        } catch {}
+    }
+    throw new Error('Няма свободно копие за изтегляне от Internet Archive.');
 }
 
 // ---------- Wikisource ----------
@@ -188,11 +228,28 @@ export async function fetchCatalogBook(item, onProgress) {
         return book;
     }
     if (item.source === 'wikisource') return downloadWikisource(item, onProgress);
+    if (item.source === 'ia') {
+        const { file } = await downloadArchive(item, onProgress);
+        const book = await parseBook(file, (p) => onProgress?.(0.5 + p / 2));
+        book.title = item.title;
+        if (!book.author || book.author === 'Unknown') book.author = item.author;
+        return book;
+    }
+    if (item.source === 'arxiv' || item.source === 'oapen') {
+        onProgress?.(0.1);
+        const blob = await viaServer(item.pdf);
+        const book = await parseBook(new File([blob], `${item.title}.pdf`), (p) => onProgress?.(0.4 + p * 0.6));
+        book.title = item.title;
+        book.author = item.author;
+        return book;
+    }
     throw new Error('Непознат източник.');
 }
 
 export async function sourceKey(item) {
     if (item.source === 'gutenberg') return `pg-${item.id}`;
+    if (item.source === 'ia') return `ia-${String(item.id).replace(/[^\w.-]/g, '').slice(0, 60)}`;
+    if (item.source === 'arxiv') return `arxiv-${String(item.id).replace(/[^\w.-]/g, '').slice(0, 60)}`;
     const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(`${item.lang}:${item.id}`));
     return 'ws-' + [...new Uint8Array(buf)].slice(0, 8).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
