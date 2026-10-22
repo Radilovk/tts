@@ -22,7 +22,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.1';
+export const APP_VERSION = '2.2';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
@@ -47,7 +47,8 @@ function loadSettings() {
     // Earlier versions stored the default model explicitly: switch them to "cheapest"
     if (s.geminiModel === GEMINI_DEFAULT_MODEL && !s.geminiModelChosen) s.geminiModel = '';
     s = { ...DEFAULTS, ...s };
-    if (!s.engine) s.engine = (s.apiKey || preconfiguredKey()) ? 'cloud' : 'device';
+    // The Gemini narrator is the main voice; the phone voice is the free fallback
+    if (!s.engine) s.engine = (s.apiKey || preconfiguredKey()) ? 'gemini' : 'device';
     return s;
 }
 
@@ -288,15 +289,6 @@ async function saveImported(parsed, { fileName = '', source = null, translateTo 
             setTimeout(() => toast(`Книгата е на ${LANG_NAMES[parsed.lang] || parsed.lang} — ще я чета на ${LANG_NAMES[meta.translateTo]}. Превежда се глава по глава при слушане (${approxUsd(translationCost(meta.totalChars))} за цялата книга).`, {
                 duration: 10000, action: { label: 'Чети оригинала', run: () => setBookTranslation(null) },
             }), 600);
-        }
-        if (settings.engine === 'device' && !settings.cloudReady && !localStorage.getItem('rz_hd_hint')) {
-            localStorage.setItem('rz_hd_hint', '1');
-            setTimeout(() => {
-                if (setupOpen || settings.cloudReady) return;
-                toast('Искате по-естествен глас? Google HD е ~20 ч месечно безплатно.', {
-                    duration: 9000, action: { label: 'Свържи', run: () => openCloudSetup({}) },
-                });
-            }, 3800);
         }
     }
 }
@@ -983,9 +975,9 @@ function renderSettings(body) {
     const hasPreKey = !!preconfiguredKey();
     const freeHrs = Math.round(freeHoursPerMonth('Chirp3-HD'));
     const engines = [
+        ['gemini', 'Gemini разказвач', 'Най-жива интонация: разказвачът „играе“ текста според избран стил и езика на книгата.', geminiCardPrice(), settings.geminiEconomy ? 'до −50% с пестелив режим' : 'плаща се само чутото'],
         ['device', 'Гласът на телефона', 'Безплатно и офлайн. Качеството зависи от устройството.', '0 $', 'завинаги'],
-        ['cloud', 'Google HD гласове', `Chirp 3 HD — много естествени гласове. ~${freeHrs} ч слушане месечно безплатно.`, 'безплатно', `после ~${hourlyCost('cloud').toFixed(2)} $/ч`],
-        ['gemini', 'Gemini разказвач', 'Най-жива интонация: разказвачът „играе“ текста според избран стил.', geminiCardPrice(), settings.geminiEconomy ? 'до −50% с пестелив режим' : 'плаща се само чутото'],
+        ['cloud', 'Google HD гласове', `Chirp 3 HD. ~${freeHrs} ч месечно безплатно, но на български звучат по-слабо от разказвача.`, 'безплатно', `после ~${hourlyCost('cloud').toFixed(2)} $/ч`],
     ];
     body.innerHTML = `
         <section class="group">
@@ -993,7 +985,7 @@ function renderSettings(body) {
             <div class="engine-list">
                 ${engines.map(([id, name, desc, price, sub]) => `
                 <button class="engine ${settings.engine === id ? 'on' : ''}" data-engine="${id}">
-                    <span class="engine-name">${name}${id === 'cloud' ? '<span class="badge">Изгодно</span>' : ''}</span>
+                    <span class="engine-name">${name}${id === 'gemini' ? '<span class="badge">Препоръчан</span>' : ''}</span>
                     <span class="engine-price">${price}<small>${sub}</small></span>
                     <span class="engine-desc">${desc}</span>
                 </button>`).join('')}
