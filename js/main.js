@@ -9,6 +9,7 @@ import {
     cloudVoices, cloudSynthesize, cloudDiagnose, CLOUD_LINKS, geminiSynthesize, geminiModels, deviceVoices, onDeviceVoicesChanged, cloudTier,
 } from './engines.js';
 import { translateChapter, translationCost, deviceTranslationAvailable, TRANSLATE_DEFAULT_MODEL } from './translate.js';
+import { isNative, Native, nativeFileUrl, loadNativeVoices, nativeEngines } from './native.js';
 import { usageSummary, resetUsage, hourlyCost, freeHoursPerMonth, recordUsage } from './usage.js';
 
 const $ = (s, root = document) => root.querySelector(s);
@@ -1004,13 +1005,33 @@ function renderVoiceGroup(box, lang) {
             <div class="group-title">Глас</div>
             ${voices.length ? `<div class="field">
                 <select class="select" id="setDeviceVoice">
-                    ${voices.map((v) => `<option value="${esc(v.voiceURI)}" ${v.voiceURI === settings.deviceVoice ? 'selected' : ''}>${esc(v.name)}${v.localService ? '' : ' · онлайн'}</option>`).join('')}
+                    ${voices.map((v) => `<option value="${esc(v.voiceURI)}" ${v.voiceURI === settings.deviceVoice ? 'selected' : ''}>${esc(v.name)}${v.localService || v.native ? '' : ' · онлайн'}</option>`).join('')}
                 </select>
                 <button class="btn btn-ghost btn-sm" data-preview>Чуй</button>
             </div>` : `<p class="hint">Няма инсталиран глас за ${esc(LANG_NAMES[lang] || lang)}. На Android: Настройки → Достъпност → Синтезиран говор → Google → Инсталиране на гласови данни.</p>`}
-            <p class="hint">Съвет: в настройките на Android изберете „Речеви услуги от Google“ и изтеглете гласа в най-високо качество.</p>`;
+            ${isNative ? `
+                <div class="row">
+                    <span class="row-label">Гласов двигател<small>Всички двигатели, инсталирани на телефона</small></span>
+                    <select class="select" id="setTtsEngine">
+                        ${nativeEngines().engines.map((e) => `<option value="${esc(e.name)}" ${e.name === nativeEngines().current ? 'selected' : ''}>${esc(e.label)}</option>`).join('')}
+                    </select>
+                </div>
+                <button class="btn btn-ghost btn-sm" id="btnTtsSettings">Изтегли още гласове</button>
+                <p class="hint">Чете и при изгасен екран. „HD“ гласовете звучат най-естествено; „онлайн“ гласовете искат интернет.</p>`
+            : '<p class="hint">Съвет: в настройките на Android изберете „Речеви услуги от Google“ и изтеглете гласа в най-високо качество.</p>'}`;
         const sel = $('#setDeviceVoice', box);
         if (sel) sel.onchange = () => { settings.deviceVoice = sel.value; saveSettings(); player.voiceChanged(); };
+        const eng = $('#setTtsEngine', box);
+        if (eng) eng.onchange = async () => {
+            settings.ttsEngine = eng.value;
+            settings.deviceVoice = '';
+            saveSettings();
+            player.voiceChanged();
+            await loadNativeVoices(eng.value);
+            renderVoiceGroup(box, lang);
+        };
+        const ttsSet = $('#btnTtsSettings', box);
+        if (ttsSet) ttsSet.onclick = () => Native.openTtsSettings();
     } else if (engine === 'cloud') {
         box.innerHTML = `<div class="group-title">Глас</div><p class="hint" id="cloudVoiceMsg">Зареждам гласовете…</p>`;
         if (!effectiveSettings().apiKey || !settings.cloudReady) {
@@ -1125,6 +1146,11 @@ async function previewVoice(btn) {
     const st = effectiveSettings();
     if (player.playing) player.pause();
     previewAudio?.pause();
+    if (st.engine === 'device' && isNative) {
+        const v = deviceVoices(lang).find((x) => x.voiceURI === st.deviceVoice) || deviceVoices(lang)[0];
+        Native.speak({ id: 'preview', text, voice: v?.voiceURI || '', lang: LOCALES[lang] || lang, rate: player.rate, pitch: 1, flush: true }).catch((e) => toast(e.message, { error: true }));
+        return;
+    }
     if (st.engine === 'device') {
         speechSynthesis.cancel();
         const u = new SpeechSynthesisUtterance(text);
@@ -1534,12 +1560,58 @@ function persistNow() {
 
 // ==================== Boot ====================
 
+// ==================== Android app ====================
+
+const importedShares = new Set();
+
+async function importShared(file) {
+    if (!file?.path || importedShares.has(file.path)) return;
+    importedShares.add(file.path);
+    try {
+        const blob = await (await fetch(nativeFileUrl(file.path))).blob();
+        await importFile(new File([blob], file.name || 'книга'));
+    } catch (e) {
+        toast('Файлът не можа да се отвори: ' + e.message, { error: true });
+    }
+}
+
+let lastPlayback = '';
+function syncPlaybackNotification() {
+    if (!Native || !currentBook) return;
+    const state = JSON.stringify([currentBook.title, currentBook.chapterTitles[player.pos.c] || '', player.playing]);
+    if (state === lastPlayback) return;
+    lastPlayback = state;
+    Native.updatePlayback({
+        title: currentBook.title,
+        subtitle: currentBook.chapterTitles[player.pos.c] || '',
+        playing: player.playing,
+    }).catch(() => {});
+}
+
+function initNative() {
+    loadNativeVoices(settings.ttsEngine || undefined);
+    Native.addListener('mediaAction', ({ action }) => {
+        if (action === 'play') startPlayback();
+        else if (action === 'pause') player.pause();
+        else if (action === 'forward' || action === 'next') player.skip(30);
+        else if (action === 'back' || action === 'prev') player.skip(-15);
+    });
+    Native.addListener('sharedFile', ({ file, error }) => {
+        if (error) return toast('Споделеният файл не можа да се прочете.', { error: true });
+        importShared(file);
+    });
+    Native.getPendingFile().then(({ file }) => importShared(file)).catch(() => {});
+    player.addEventListener('state', syncPlaybackNotification);
+    player.addEventListener('position', syncPlaybackNotification);
+}
+
 async function init() {
     applyTheme();
     bindEvents();
     updateSleepChip();
     await renderLibrary();
-    if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    if (isNative) initNative();
+    else if ('serviceWorker' in navigator && location.protocol !== 'file:') {
         navigator.serviceWorker.register('sw.js').catch(() => {});
     }
     // Reopen the last book after a reload while listening

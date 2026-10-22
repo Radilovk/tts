@@ -64,6 +64,17 @@
 (виж `.github/workflows/pages.yml`) — имайте предвид, че тогава ключът е видим в публикувания сайт;
 ограничете го по HTTP referrer в Google Cloud Console.
 
+## Android приложение (APK)
+
+Изтегляне: **https://github.com/Radilovk/tts/releases/download/apk-latest/Razkazvach.apk**
+(компилира се автоматично при всяко качване — `.github/workflows/build-apk.yml`).
+
+- Чете и при **изгасен екран** — фонова услуга с известие, контроли от заключения екран и слушалките.
+- **Всички гласове на телефона** — всеки инсталиран двигател (Google, Samsung…) и всичките му гласове.
+- **„Сподели“ / „Отвори с“** — EPUB, PDF, FB2, DOCX, TXT или споделен текст се отварят направо като книга.
+
+Подробности: `android-res/README.md`.
+
 ## Структура
 
 ```

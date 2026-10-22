@@ -1,0 +1,13 @@
+{
+  "appId": "com.biocode.razkazvach",
+  "appName": "Разказвач",
+  "webDir": "capacitor-shell",
+  "server": {
+    "androidScheme": "https",
+    "hostname": "localhost"
+  },
+  "android": {
+    "allowMixedContent": false,
+    "backgroundColor": "#F4EFE7"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "razkazvach",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Разказвач — аудиокниги от вашите файлове (PWA + Android APK)",
+  "scripts": {
+    "shell": "node scripts/build-shell.mjs",
+    "android": "npm run shell && npx cap add android && npx cap sync android && python3 android-res/patch-android.py"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/core": "^8.5.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.3"
+  }
+}

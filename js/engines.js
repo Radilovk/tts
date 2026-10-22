@@ -4,6 +4,7 @@
 //   gemini — Gemini TTS, steerable "narrator" intonation (paid per audio token)
 
 import { LOCALES } from './text.js';
+import { isNative, nativeVoices, nativeVoiceLabel, onNativeVoices } from './native.js';
 
 export const GEMINI_VOICES = [
     ['Kore', 'жен., уверен'], ['Aoede', 'жен., лек'], ['Leda', 'жен., младежки'], ['Zephyr', 'жен., ярък'],
@@ -332,6 +333,13 @@ function pcmToWav(int16, rate) {
 // ---------- Device (Web Speech API) ----------
 
 export function deviceVoices(lang) {
+    if (isNative) {
+        // Android: every installed voice of every engine, best quality first
+        return nativeVoices()
+            .filter((v) => v.language === lang || v.locale.toLowerCase().startsWith(lang))
+            .sort((a, b) => b.quality - a.quality || Number(a.network) - Number(b.network) || a.name.localeCompare(b.name))
+            .map((v, i) => ({ voiceURI: v.name, name: nativeVoiceLabel(v, i), lang: v.locale, localService: !v.network, native: true }));
+    }
     if (!('speechSynthesis' in window)) return [];
     const all = speechSynthesis.getVoices();
     const match = all.filter((v) => v.lang.toLowerCase().replace('_', '-').startsWith(lang));
@@ -341,5 +349,6 @@ export function deviceVoices(lang) {
 }
 
 export function onDeviceVoicesChanged(cb) {
-    if ('speechSynthesis' in window) speechSynthesis.addEventListener('voiceschanged', cb);
+    if (isNative) onNativeVoices(cb);
+    else if ('speechSynthesis' in window) speechSynthesis.addEventListener('voiceschanged', cb);
 }

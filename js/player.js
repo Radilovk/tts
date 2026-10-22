@@ -7,6 +7,7 @@ import * as db from './db.js';
 import { buildChapterModel, chunkBoundaries, nextBoundary, chunkText, charLen, LOCALES } from './text.js';
 import { cloudSynthesize, geminiSynthesize, cloudTier, deviceVoices, PRICES } from './engines.js';
 import { recordUsage, monthlyCloudChars, monthlyGeminiUsd } from './usage.js';
+import { Native } from './native.js';
 
 const CHUNK_CHARS = { cloud: 1400, gemini: 1500 };
 const FAST_START_CHARS = 320;
@@ -45,7 +46,9 @@ export class Player extends EventTarget {
         this.translator = null;       // async (c, chapter, onProgress) => translated chapter
         this.synthSeconds = {};       // engine -> average synthesis time
         this._seekTimer = null;
+        this._nq = [];                // native utterance ids queued in Android TTS
         this._bindAudio();
+        if (Native) this._bindNative();
     }
 
     // ---------- public API ----------
@@ -162,7 +165,7 @@ export class Player extends EventTarget {
         if (!this.playing) return;
         this.playing = false;
         this.session++;
-        if (this.engine === 'device') speechSynthesis.cancel();
+        if (this.engine === 'device') this._stopDeviceVoice();
         else this.audio.pause();
         this.loading = false;
         this._emit('state');
@@ -175,7 +178,7 @@ export class Player extends EventTarget {
         this.session++;
         this.playing = false;
         this.loading = false;
-        if ('speechSynthesis' in window) speechSynthesis.cancel();
+        this._stopDeviceVoice();
         this.audio.pause();
         this._releaseUrl();
         this.current = null;
@@ -248,7 +251,7 @@ export class Player extends EventTarget {
         if (this.engine === 'device' && this.playing) {
             // Restart the current sentence at the new rate
             this.session++;
-            speechSynthesis.cancel();
+            this._stopDeviceVoice();
             this._deviceSpeak(this.session);
         }
     }
@@ -568,7 +571,104 @@ export class Player extends EventTarget {
 
     // ---------- device voice ----------
 
+    _stopDeviceVoice() {
+        if (Native) {
+            this._nq = [];
+            Native.stopSpeaking().catch(() => {});
+        } else if ('speechSynthesis' in window) speechSynthesis.cancel();
+    }
+
+    // ---------- Android TTS (APK) ----------
+    // Sentences are queued in the native engine a few at a time, so reading goes
+    // on with the screen off even when the WebView is slow to respond.
+
+    _nativeStart(session) {
+        this._nq = [];
+        this._nCursor = { ...this.pos };
+        this._nFlush = true;
+        this._nStopAtChapter = false;
+        this._nativeFill(session);
+    }
+
+    async _nativeFill(session) {
+        if (this._nFilling) return;
+        this._nFilling = true;
+        try {
+            while (session === this.session && this.playing && this._nq.length < 3 && !this._nStopAtChapter) {
+                const { c, s } = this._nCursor;
+                if (c >= this.chapters.length) break;
+                const m = this.model(c);
+                if (s >= m.sentences.length) {
+                    if (c + 1 >= this.chapters.length) { this._nCursor = { c: this.chapters.length, s: 0 }; break; }
+                    if (this.sleepAtChapterEnd) { this._nStopAtChapter = true; break; }
+                    await this.ensureChapter(c + 1);
+                    if (session !== this.session) return;
+                    this._nCursor = { c: c + 1, s: 0 };
+                    continue;
+                }
+                this._nCursor = { c, s: s + 1 };
+                const sent = m.sentences[s];
+                if (!sent.speak) continue;
+                const next = m.sentences[s + 1];
+                const pause = !next ? 900 : next.p !== sent.p ? (m.paras[sent.p].h ? 800 : 450) : 0;
+                const id = `${session}|${c}|${s}`;
+                const st = this.getSettings();
+                const lang = this._lang();
+                this._nq.push(id);
+                await Native.speak({
+                    id, text: sent.speak, voice: st.deviceVoice || '', lang: LOCALES[lang] || lang,
+                    rate: this.rate, pitch: 1, flush: this._nFlush, pauseAfter: Math.round(pause / this.rate),
+                });
+                this._nFlush = false;
+            }
+        } catch (e) {
+            if (session === this.session) this._fail(e);
+        } finally {
+            this._nFilling = false;
+        }
+        // Nothing left to read
+        if (session === this.session && this.playing && !this._nq.length && this._nCursor.c >= this.chapters.length) this._finished();
+    }
+
+    _bindNative() {
+        const parse = (id) => {
+            const [sess, c, s] = String(id).split('|').map(Number);
+            return { sess, c, s };
+        };
+        Native.addListener('ttsStart', ({ id }) => {
+            if (String(id).endsWith(':pause')) return;
+            const u = parse(id);
+            if (u.sess !== this.session || !this.playing) return;
+            if (u.c !== this.pos.c) this._emit('chapter');
+            this.pos = { c: u.c, s: u.s };
+            this._emit('position');
+            this._emit('save');
+            this._prefetchTranslation(u.c, u.s);
+        });
+        Native.addListener('ttsDone', ({ id }) => {
+            if (String(id).endsWith(':pause')) return;
+            const u = parse(id);
+            this._nq = this._nq.filter((x) => x !== id);
+            if (u.sess !== this.session || !this.playing) return;
+            if (this._nStopAtChapter && !this._nq.length) {
+                this.sleepAtChapterEnd = false;
+                this._nStopAtChapter = false;
+                this.pos = { c: Math.min(u.c + 1, this.chapters.length - 1), s: 0 };
+                this.pause();
+                this._emit('position');
+                this._emit('sleep');
+                return;
+            }
+            this._nativeFill(this.session);
+        });
+        Native.addListener('ttsError', ({ id }) => {
+            const u = parse(id);
+            if (u.sess === this.session && this.playing) this._fail(new Error('Гласът на устройството не можа да прочете текста. Изберете друг глас.'));
+        });
+    }
+
     _deviceSpeak(session) {
+        if (Native) return this._nativeStart(session);
         if (!('speechSynthesis' in window)) return this._fail(new Error('Устройството не поддържа синтез на реч.'));
         const st = this.getSettings();
         let { c, s } = this.pos;

@@ -12,3 +12,8 @@ dist/
 # Google Cloud service account credentials — never commit these
 gen-lang-client-*.json
 *.json.key
+
+# Android build output
+android/
+capacitor-shell/
+*.apk

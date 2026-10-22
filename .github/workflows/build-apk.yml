@@ -1,0 +1,105 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, 'claude/**']
+    paths:
+      - 'index.html'
+      - 'manifest.json'
+      - 'css/**'
+      - 'js/**'
+      - 'icons/**'
+      - 'android-res/**'
+      - 'scripts/build-shell.mjs'
+      - 'capacitor.config.json'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/build-apk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          pip install --quiet pillow
+
+      - name: Signing key
+        # Optional: a private key in the RZ_KEYSTORE_BASE64 secret replaces the one in android-res/
+        env:
+          KEYSTORE_B64: ${{ secrets.RZ_KEYSTORE_BASE64 }}
+          STORE_PASS: ${{ secrets.RZ_STORE_PASS }}
+          KEY_PASS: ${{ secrets.RZ_KEY_PASS }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/rz.keystore"
+            echo "RZ_KEYSTORE_PATH=$RUNNER_TEMP/rz.keystore" >> "$GITHUB_ENV"
+            echo "RZ_STORE_PASS=$STORE_PASS" >> "$GITHUB_ENV"
+            echo "RZ_KEY_PASS=$KEY_PASS" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build web shell and Android project
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          node scripts/build-shell.mjs
+          npx cap add android
+          python3 android-res/patch-android.py
+          npx cap sync android
+
+      - name: Build APK
+        run: |
+          V_CODE=${{ github.run_number }}
+          V_NAME="1.0.${V_CODE}"
+          echo "V_NAME=${V_NAME}" >> "$GITHUB_ENV"
+          cd android
+          ./gradlew --no-daemon assembleRelease -PrzVersionName="$V_NAME" -PrzVersionCode="$V_CODE"
+          cd ..
+          mkdir -p release
+          cp android/app/build/outputs/apk/release/app-release.apk "release/Razkazvach.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Razkazvach-APK
+          path: release/Razkazvach.apk
+          retention-days: 30
+
+      - name: Publish download link
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="apk-latest"
+          gh release delete "$TAG" -y --cleanup-tag --repo "${{ github.repository }}" 2>/dev/null || true
+          gh release create "$TAG" release/Razkazvach.apk \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --prerelease \
+            --title "Разказвач ${V_NAME}" \
+            --notes "Най-новият APK (${{ github.ref_name }}, ${GITHUB_SHA::7}). Изтеглете Razkazvach.apk и го отворете на телефона."
+          echo "### APK ${V_NAME}" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://github.com/${{ github.repository }}/releases/download/${TAG}/Razkazvach.apk" >> "$GITHUB_STEP_SUMMARY"

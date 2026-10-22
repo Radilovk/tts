@@ -1,0 +1,33 @@
+// Applied from android/app/build.gradle by android-res/patch-android.py
+
+def rzVersionCode = project.findProperty('rzVersionCode')
+def rzVersionName = project.findProperty('rzVersionName')
+def keystorePath = System.getenv('RZ_KEYSTORE_PATH')
+
+android {
+    if (rzVersionCode != null) defaultConfig.versionCode rzVersionCode.toInteger()
+    if (rzVersionName != null) defaultConfig.versionName rzVersionName.toString()
+
+    // One fixed signing key, so every new APK installs as an update over the old one
+    // (library and saved audio are kept). See android-res/README.md.
+    signingConfigs {
+        rz {
+            storeFile file(keystorePath ?: "${rootDir}/../android-res/razkazvach.keystore")
+            storePassword System.getenv('RZ_STORE_PASS') ?: 'razkazvach'
+            keyAlias System.getenv('RZ_KEY_ALIAS') ?: 'razkazvach'
+            keyPassword System.getenv('RZ_KEY_PASS') ?: 'razkazvach'
+        }
+    }
+
+    buildTypes {
+        debug { signingConfig signingConfigs.rz }
+        release {
+            signingConfig signingConfigs.rz
+            minifyEnabled false
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.media:media:1.7.0'
+}
