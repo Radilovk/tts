@@ -19,6 +19,32 @@ export const GEMINI_VOICES = [
 
 export const GEMINI_DEFAULT_MODEL = 'gemini-2.5-flash-preview-tts';
 
+// Gemini TTS list prices in USD per 1M tokens (text in / audio out), by model family.
+// Date-aware: Gemini 3.8 Flash TTS is discounted until the end of 2026.
+// Source: ai.google.dev/gemini-api/docs/pricing — check there when prices change.
+export function geminiPrice(model, date = new Date()) {
+    const m = model || '';
+    if (/3\.8-flash/.test(m)) return date < new Date('2027-01-01T00:00:00Z') ? { in: 0.5, out: 9 } : { in: 0.5, out: 18 };
+    if (/2\.5-flash/.test(m)) return { in: 0.5, out: 10 };
+    if (/3\.1-flash/.test(m)) return { in: 1, out: 20 };
+    if (/2\.5-pro/.test(m)) return { in: 1, out: 20 };
+    if (/pro/.test(m)) return { in: 1, out: 20, guess: true };
+    return { in: 0.5, out: 10, guess: true };
+}
+
+export function geminiCost(model, inTokens, outTokens, batch = false) {
+    const p = geminiPrice(model);
+    return (inTokens * p.in + outTokens * p.out) / 1e6 * (batch ? 0.5 : 1);
+}
+
+// The cheapest TTS model the key can use (known prices win over guesses)
+export function cheapestGeminiModel(models) {
+    const usable = (models || []).filter((m) => /tts/.test(m) && !/native|live|dialog/.test(m));
+    return usable.sort((a, b) => geminiPrice(a).out - geminiPrice(b).out
+        || Number(!!geminiPrice(a).guess) - Number(!!geminiPrice(b).guess)
+        || b.localeCompare(a))[0] || GEMINI_DEFAULT_MODEL;
+}
+
 export const NARRATION_STYLES = {
     intriguing: {
         label: 'Интригуващ',
@@ -272,19 +298,18 @@ export function geminiPrompt(text, style, lang, customStyle) {
     return `${directive}.${langNote}\n\n${text}`;
 }
 
-export async function geminiSynthesize({ apiKey, model, text, voice, style, customStyle, lang, signal }) {
-    const body = {
+export function geminiRequestBody({ text, voice, style, customStyle, lang }) {
+    return {
         contents: [{ parts: [{ text: geminiPrompt(text, style, lang, customStyle) }] }],
         generationConfig: {
             responseModalities: ['AUDIO'],
             speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } },
         },
     };
-    const data = await withRetry(() => fetchJson(`${GEMINI_BASE}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-    }, 180000, signal), signal);
+}
+
+// Turn a generateContent response (interactive or from a batch) into a WAV blob.
+export function geminiParseAudio(data) {
     const part = data?.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data);
     if (!part) {
         const reason = data?.candidates?.[0]?.finishReason;
@@ -294,11 +319,59 @@ export async function geminiSynthesize({ apiKey, model, text, voice, style, cust
     }
     const rate = Number((part.inlineData.mimeType || '').match(/rate=(\d+)/)?.[1] || 24000);
     const pcm = base64ToBytes(part.inlineData.data);
+    const trimmed = trimSilence(pcm, rate);
     const usage = data.usageMetadata || {};
     return {
-        blob: pcmToWav(trimSilence(pcm, rate), rate),
+        blob: pcmToWav(trimmed, rate),
+        dur: trimmed.length / rate,
         inTokens: usage.promptTokenCount || 0,
         outTokens: usage.candidatesTokenCount || Math.round(pcm.length / 2 / rate * PRICES.gemini.tokensPerSecond),
+    };
+}
+
+// retry429=false lets the caller switch keys at once when a free daily quota runs out.
+export async function geminiSynthesize({ apiKey, model, text, voice, style, customStyle, lang, signal, retry429 = true }) {
+    const body = geminiRequestBody({ text, voice, style, customStyle, lang });
+    const call = () => fetchJson(`${GEMINI_BASE}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    }, 180000, signal);
+    const data = retry429 ? await withRetry(call, signal) : await call();
+    return geminiParseAudio(data);
+}
+
+// ---------- Gemini Batch API (half price, finished within minutes to hours) ----------
+
+export async function geminiBatchSubmit({ apiKey, model, items, name }) {
+    const body = {
+        batch: {
+            display_name: name,
+            input_config: { requests: { requests: items.map((it) => ({ request: it.request, metadata: { key: it.key } })) } },
+        },
+    };
+    const data = await fetchJson(`${GEMINI_BASE}/models/${model}:batchGenerateContent?key=${encodeURIComponent(apiKey)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    }, 60000);
+    if (!data?.name) throw new ApiError('Gemini не прие партидата.', 0, false);
+    return data.name;
+}
+
+export async function geminiBatchGet(apiKey, name) {
+    const data = await fetchJson(`${GEMINI_BASE}/${name}?key=${encodeURIComponent(apiKey)}`, {}, 120000);
+    const meta = data.metadata || {};
+    const state = meta.state || data.state || '';
+    const box = data.response?.inlinedResponses || meta.output?.inlinedResponses || data.output?.inlinedResponses || {};
+    const list = Array.isArray(box) ? box : (box.inlinedResponses || []);
+    const done = !!data.done || /SUCCEEDED|FAILED|CANCELLED|EXPIRED/.test(state);
+    return {
+        state,
+        done,
+        ok: done && !/FAILED|CANCELLED|EXPIRED/.test(state) && !data.error,
+        error: data.error?.message || '',
+        responses: list.map((r) => ({ key: r.metadata?.key, response: r.response, error: r.error?.message })),
     };
 }
 
