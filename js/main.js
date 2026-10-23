@@ -24,7 +24,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.5';
+export const APP_VERSION = '2.6';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
@@ -279,6 +279,7 @@ async function saveImported(parsed, { fileName = '', source = null, translateTo,
             // Narration is shared only for books every listener may legally receive
             shared: !!source && source.shareable !== false,
             originalTitle: parsed.title,
+            chunkV: 2,
         };
         if (displayTitle) meta.title = displayTitle;
         await db.put('contents', { id, chapters: parsed.chapters });
@@ -597,6 +598,9 @@ async function openBook(id, autoplay) {
         persistNow();
     }
     meta.lastOpened = Date.now();
+    // Nothing narrated yet: switch to the longer, paragraph-aligned passages
+    if (!meta.chunkV && !(await db.audioCountBook(id).catch(() => 1))) meta.chunkV = 2;
+    if (seq !== openSeq) return;
     if (meta.cover && !coverUrls.has(id)) coverUrls.set(id, URL.createObjectURL(meta.cover));
     meta.coverUrl = coverUrls.get(id) || '';
     currentBook = meta;

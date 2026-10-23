@@ -13,6 +13,10 @@ import { Native } from './native.js';
 
 const CHUNK_CHARS = { cloud: 1400, gemini: 1500 };
 const FAST_START_CHARS = 320;
+// Chunking v2 (new books): longer passages that end at paragraphs, so the joins between
+// separately narrated passages are fewer and fall on natural pauses.
+const CHUNK_V2 = { gemini: { max: 2600, para: 0.6 }, cloud: { max: 1400, para: 0.5 } };
+const FAST_START_V2 = { min: 450, max: 1100 };
 
 async function hash(str) {
     if (crypto.subtle) {
@@ -279,7 +283,7 @@ export class Player extends EventTarget {
     async chapterSpecs(c) {
         await this.ensureChapter(c);
         const m = this.model(c);
-        const starts = chunkBoundaries(m, CHUNK_CHARS[this.engine] || CHUNK_CHARS.gemini);
+        const starts = this._boundaries(m);
         const out = [];
         for (let i = 0; i < starts.length; i++) {
             const s1 = i + 1 < starts.length ? starts[i + 1] : m.sentences.length;
@@ -293,7 +297,7 @@ export class Player extends EventTarget {
     async prepareChapter(c, onProgress) {
         await this.ensureChapter(c);
         const m = this.model(c);
-        const starts = chunkBoundaries(m, CHUNK_CHARS[this.engine]);
+        const starts = this._boundaries(m);
         for (let i = 0; i < starts.length; i++) {
             const s1 = i + 1 < starts.length ? starts[i + 1] : m.sentences.length;
             const spec = await this._spec(c, starts[i], s1);
@@ -318,6 +322,14 @@ export class Player extends EventTarget {
     }
 
     // ---------- chunk planning ----------
+
+    // Fixed chunk starts of a chapter. Books keep the chunking they were first narrated
+    // with, so audio already paid for keeps matching.
+    _boundaries(m) {
+        const v2 = this.book?.chunkV >= 2 && CHUNK_V2[this.engine];
+        if (v2) return chunkBoundaries(m, v2.max, v2.para);
+        return chunkBoundaries(m, CHUNK_CHARS[this.engine] || CHUNK_CHARS.gemini);
+    }
 
     _settingsKey() {
         const st = this.getSettings();
@@ -348,13 +360,13 @@ export class Player extends EventTarget {
             await this.ensureChapter(c);
             const m = this.model(c);
             if (s < m.sentences.length) {
-                const starts = chunkBoundaries(m, CHUNK_CHARS[this.engine]);
+                const starts = this._boundaries(m);
                 let s1 = nextBoundary(starts, s, m.sentences.length);
                 let spec = await this._spec(c, s, s1);
                 if (!spec) { s = s1; continue; }
                 // No fast-start split for a chunk that is being prepared at half price:
                 // waiting for it is the whole point of economy mode
-                if (fastStart && spec.chars > FAST_START_CHARS * 1.5 && !pendingKeys().has(spec.key) && !(await db.audioHas(spec.key))) {
+                if (fastStart && spec.chars > this._fastMin() * 1.5 && !pendingKeys().has(spec.key) && !(await db.audioHas(spec.key))) {
                     // Start quickly with a short piece; the rest follows while it plays
                     spec = await this._spec(c, s, this._fastSplit(m, s, s1));
                 }
@@ -467,9 +479,22 @@ export class Player extends EventTarget {
 
     // Short opening piece of a chunk, so playback starts within seconds. The split
     // point depends only on the text, so the pieces get the same cache keys every time.
+    _fastMin() {
+        return this.book?.chunkV >= 2 ? FAST_START_V2.min : FAST_START_CHARS;
+    }
+
     _fastSplit(m, s0, s1) {
         let n = 0, k = s0;
-        while (k < s1 - 1 && n < FAST_START_CHARS) { n += m.sentences[k].speak.length + 1; k++; }
+        if (this.book?.chunkV >= 2) {
+            // End the opening piece with a paragraph, so the join sounds like a pause
+            while (k < s1 - 1 && n < FAST_START_V2.max) {
+                n += m.sentences[k].speak.length + 1;
+                k++;
+                if (n >= FAST_START_V2.min && m.sentences[k].p !== m.sentences[k - 1].p) return k;
+            }
+            k = s0; n = 0;
+        }
+        while (k < s1 - 1 && n < this._fastMin()) { n += m.sentences[k].speak.length + 1; k++; }
         return k;
     }
 
@@ -481,7 +506,7 @@ export class Player extends EventTarget {
         if (session !== this.session) return;
         const m = this.model(c);
         if (s < m.sentences.length) {
-            const starts = chunkBoundaries(m, CHUNK_CHARS[this.engine]);
+            const starts = this._boundaries(m);
             let a = 0;
             for (const b of starts) if (b <= s) a = b;
             const end = nextBoundary(starts, a, m.sentences.length);
