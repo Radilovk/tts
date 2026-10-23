@@ -120,6 +120,11 @@ export async function audioEvict(maxBytes) {
     });
 }
 
+export async function audioCountBook(bookId) {
+    const db = await open();
+    return wrap(db.transaction('audio').objectStore('audio').index('bookId').count(IDBKeyRange.only(bookId)));
+}
+
 export async function audioDeleteBook(bookId) {
     const db = await open();
     return new Promise((resolve, reject) => {

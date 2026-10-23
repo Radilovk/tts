@@ -95,14 +95,14 @@ export function buildChapterModel(chapter, lang) {
 }
 
 // Fixed chunk start indexes for a chapter at a given max chunk size.
-export function chunkBoundaries(model, maxChars) {
+export function chunkBoundaries(model, maxChars, paraFrac = 0.75) {
     const starts = [0];
     let len = 0;
     model.sentences.forEach((s, i) => {
         const l = s.speak.length + 1;
         // Prefer to break at paragraph starts once the chunk is reasonably full
         const paraStart = i > 0 && model.sentences[i - 1].p !== s.p;
-        if (i > 0 && (len + l > maxChars || (paraStart && len > maxChars * 0.75))) {
+        if (i > 0 && (len + l > maxChars || (paraStart && len > maxChars * paraFrac))) {
             starts.push(i);
             len = 0;
         }

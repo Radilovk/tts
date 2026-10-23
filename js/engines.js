@@ -312,19 +312,44 @@ const LANGUAGE_NOTES = {
     it: 'The text is in Italian — read it in Italian with native pronunciation and natural Italian intonation, like a professional Italian audiolibro narrator',
 };
 
+// Every passage is a separate request and the model remembers nothing between them,
+// so each one is told it continues one long recording in the same voice and pace.
+const CONTINUITY = {
+    bg: 'Това е откъс от един непрекъснат запис на аудиокнига: запази същия глас, тембър, височина, сила и темпо от първата до последната дума, без да започваш наново с различна енергия',
+    en: 'This is a passage from one continuous audiobook recording: keep the same voice, timbre, pitch, loudness and pace from the first word to the last, without starting afresh with different energy',
+};
+
 export function geminiPrompt(text, style, lang, customStyle) {
     const s = NARRATION_STYLES[style] || NARRATION_STYLES.intriguing;
     const directive = (style === 'custom' && customStyle?.trim()) || (lang === 'bg' ? s.bg : s.en);
     const note = LANGUAGE_NOTES[lang];
-    return `${directive}.${note ? ' ' + note + '.' : ''}\n\n${text}`;
+    const cont = lang === 'bg' ? CONTINUITY.bg : CONTINUITY.en;
+    return `${directive}.${note ? ' ' + note + '.' : ''} ${cont}.\n\n${text}`;
 }
 
-export function geminiRequestBody({ text, voice, style, customStyle, lang }) {
+// A fixed seed and a slightly lower temperature make passages sound alike. Below ~0.5
+// the TTS models are reported to return no audio, so 0.7 stays on the safe side.
+const STEADY = { temperature: 0.7, seed: 1234 };
+const STEADY_FLAG = 'rz_gemini_steady';
+
+function steadyState() {
+    try { return localStorage.getItem(STEADY_FLAG) || ''; } catch { return ''; }
+}
+
+function setSteadyState(v) {
+    try { localStorage.setItem(STEADY_FLAG, v); } catch {}
+}
+
+// steady: null = use it only if the API has already accepted it (batch requests,
+// which cannot be retried one by one)
+export function geminiRequestBody({ text, voice, style, customStyle, lang, steady = null }) {
+    const use = steady ?? steadyState() === 'ok';
     return {
         contents: [{ parts: [{ text: geminiPrompt(text, style, lang, customStyle) }] }],
         generationConfig: {
             responseModalities: ['AUDIO'],
             speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } },
+            ...(use ? STEADY : {}),
         },
     };
 }
@@ -341,7 +366,7 @@ export async function geminiParseAudio(data) {
     }
     const rate = Number((part.inlineData.mimeType || '').match(/rate=(\d+)/)?.[1] || 24000);
     const pcm = base64ToBytes(part.inlineData.data);
-    const trimmed = trimSilence(pcm, rate);
+    const trimmed = levelLoudness(trimSilence(pcm, rate));
     const usage = data.usageMetadata || {};
     return {
         blob: (await encodeOpus(trimmed, rate)) || pcmToWav(trimmed, rate),
@@ -353,13 +378,26 @@ export async function geminiParseAudio(data) {
 
 // retry429=false lets the caller switch keys at once when a free daily quota runs out.
 export async function geminiSynthesize({ apiKey, model, text, voice, style, customStyle, lang, signal, retry429 = true }) {
-    const body = geminiRequestBody({ text, voice, style, customStyle, lang });
-    const call = () => fetchJson(`${GEMINI_BASE}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-    }, 180000, signal);
-    const data = retry429 ? await withRetry(call, signal) : await call();
+    const send = async (steady) => {
+        const body = geminiRequestBody({ text, voice, style, customStyle, lang, steady });
+        const call = () => fetchJson(`${GEMINI_BASE}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        }, 180000, signal);
+        return retry429 ? withRetry(call, signal) : call();
+    };
+    const steady = steadyState() !== 'off';
+    let data;
+    try {
+        data = await send(steady);
+        if (steady && steadyState() !== 'ok') setSteadyState('ok');
+    } catch (e) {
+        // The model does not take seed/temperature: remember that and read without them
+        if (!steady || e.status !== 400) throw e;
+        setSteadyState('off');
+        data = await send(false);
+    }
     return geminiParseAudio(data);
 }
 
@@ -408,6 +446,29 @@ function trimSilence(bytes, rate) {
     start = Math.max(0, start - keep);
     end = Math.min(view.length, end + keep);
     return view.slice(start, end);
+}
+
+// Bring every passage to the same speech loudness, so one is never louder or quieter
+// than the one before. Only voiced samples are measured; peaks are softly limited.
+const TARGET_RMS = 3300; // ≈ -20 dBFS
+function levelLoudness(view) {
+    let sum = 0, n = 0;
+    for (let i = 0; i < view.length; i += 4) {
+        const x = view[i];
+        if (x > 500 || x < -500) { sum += x * x; n++; }
+    }
+    if (n < 1000) return view;
+    const gain = Math.max(0.6, Math.min(2.2, TARGET_RMS / Math.sqrt(sum / n)));
+    if (Math.abs(gain - 1) < 0.05) return view;
+    const out = new Int16Array(view.length);
+    const knee = 24000;
+    for (let i = 0; i < view.length; i++) {
+        let y = view[i] * gain;
+        const a = Math.abs(y);
+        if (a > knee) y = Math.sign(y) * (knee + (32767 - knee) * Math.tanh((a - knee) / (32767 - knee)));
+        out[i] = y;
+    }
+    return out;
 }
 
 function pcmToWav(int16, rate) {
