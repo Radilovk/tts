@@ -36,7 +36,13 @@ async function hash(str) {
 export class Player extends EventTarget {
     constructor(getSettings) {
         super();
-        this.getSettings = getSettings;
+        // A book narrated by the night studio always plays in the studio's voice, so the
+        // audio made on the server is what is heard (no new synthesis, no other voice)
+        this.getSettings = () => {
+            const st = getSettings();
+            const v = this.book?.factory?.voice;
+            return v ? { ...st, ...v, engine: 'gemini' } : st;
+        };
         this.audio = new Audio();
         this.audio.preload = 'auto';
         this.book = null;       // metadata record
@@ -284,15 +290,16 @@ export class Player extends EventTarget {
         if (wasPlaying) this.play();
     }
 
-    // All fixed chunks of chapter c for the current voice settings.
-    async chapterSpecs(c) {
+    // All fixed chunks of chapter c for the current voice settings, or for the given
+    // settings (audio files and the night studio always use the Gemini narrator).
+    async chapterSpecs(c, st = null) {
         await this.ensureChapter(c);
         const m = this.model(c);
-        const starts = this._boundaries(m);
+        const starts = this._boundaries(m, st?.engine);
         const out = [];
         for (let i = 0; i < starts.length; i++) {
             const s1 = i + 1 < starts.length ? starts[i + 1] : m.sentences.length;
-            const spec = await this._spec(c, starts[i], s1);
+            const spec = await this._spec(c, starts[i], s1, st);
             if (spec) out.push(spec);
         }
         return out;
@@ -330,14 +337,13 @@ export class Player extends EventTarget {
 
     // Fixed chunk starts of a chapter. Books keep the chunking they were first narrated
     // with, so audio already paid for keeps matching.
-    _boundaries(m) {
-        const v = this.book?.chunkV >= 3 ? CHUNK_V3[this.engine] : this.book?.chunkV >= 2 && CHUNK_V2[this.engine];
+    _boundaries(m, engine = this.engine) {
+        const v = this.book?.chunkV >= 3 ? CHUNK_V3[engine] : this.book?.chunkV >= 2 && CHUNK_V2[engine];
         if (v) return chunkBoundaries(m, v.max, v.para);
-        return chunkBoundaries(m, CHUNK_CHARS[this.engine] || CHUNK_CHARS.gemini);
+        return chunkBoundaries(m, CHUNK_CHARS[engine] || CHUNK_CHARS.gemini);
     }
 
-    _settingsKey() {
-        const st = this.getSettings();
+    _settingsKey(st = this.getSettings()) {
         if (st.engine === 'cloud') return `cloud|${st.cloudVoice}`;
         if (st.engine === 'gemini') return `gemini|${st.geminiModel}|${st.geminiVoice}|${st.style}|${st.style === 'custom' ? st.customStyle : ''}`;
         return 'device';
@@ -349,14 +355,14 @@ export class Player extends EventTarget {
         return st.lang && st.lang !== 'auto' ? st.lang : (this.book.lang || 'bg');
     }
 
-    async _spec(c, s0, s1) {
+    async _spec(c, s0, s1, st = null) {
         const m = this.model(c);
         const text = chunkText(m, s0, s1);
         if (!text) return null;
-        const vk = this._settingsKey();
+        const vk = this._settingsKey(st || undefined);
         const lang = this._lang();
         const key = await hash(`${vk}|${lang}|${text}`);
-        return { c, s0, s1, text, key, vk, lang, chars: charLen(m, s0, s1) };
+        return { c, s0, s1, text, key, vk, lang, chars: charLen(m, s0, s1), ...(st ? { st } : {}) };
     }
 
     // Spec for a chunk starting at sentence s (partial up to the next fixed boundary).
@@ -438,7 +444,7 @@ export class Player extends EventTarget {
     }
 
     async _synthesize(spec, book = this.book) {
-        const st = this.getSettings();
+        const st = spec.st || this.getSettings();
         const freeKey = st.engine === 'gemini' ? usableFreeKey(st) : '';
         if (!st.apiKey && !freeKey) throw new Error('Добавете Google API ключ в настройките или изберете гласа на устройството.');
         const lang = spec.lang || this._lang();

@@ -24,12 +24,43 @@ export function normalizeSpace(s) {
         .trim();
 }
 
+// ---------- notes (footnotes, endnotes, translator's notes) ----------
+// Notes stay in the text view (muted, marked "бележка"), but are never read aloud.
+// Parsers mark a note paragraph with an invisible prefix; older books are recognised
+// by their shape: a reference mark at the start and a citation or note wording.
+export const NOTE_MARK = '\u2063';
+const NOTE_START = /^\s*(?:\[\s*(?:\d{1,3}|\*{1,3})\s*\]|\{\d{1,3}\}|[¹²³⁴⁵⁶⁷⁸⁹⁰]+|\*{1,3}(?=\s*\p{L}))/u;
+const NUMBER_START = /^\s*\d{1,3}\s*[.)]?\s+\S/;
+const NOTE_WORDS = /(?:^|[\s(—–-])(?:бел\.|б\.\s?пр|б\.\s?а|б\.\s?ред|прев\.|пак там|цит\.|вж\.|срв\.|прим\.|изд\.|стр\.\s?\d|с\.\s?\d|т\.\s?\d|ibid|op\.\s?cit|cf\.|see\s|pp?\.\s?\d|vol\.|note\b|trans\.)/i;
+
+export function isNotePara(t) {
+    if (!t) return false;
+    if (t[0] === NOTE_MARK) return true;
+    if (t.length > 900) return false;
+    if (NOTE_START.test(t)) return true;
+    return NUMBER_START.test(t) && t.length < 500 && NOTE_WORDS.test(t);
+}
+
+export function noteText(t) {
+    return t && t[0] === NOTE_MARK ? t.slice(1) : t;
+}
+
+const NOTES_TITLE = /^\s*(бележки|бележки на преводача|бележки под линия|забележки|примечания|сноски|notes|endnotes|footnotes|anmerkungen|notes de bas de page)\s*\.?\s*$/i;
+
+export function isNotesTitle(title) {
+    return NOTES_TITLE.test(title || '');
+}
+
 // Remove things a narrator should not read and that cost money: footnote
 // markers, URLs, decorative separators.
 export function cleanForSpeech(s) {
     return s
         .replace(/https?:\/\/\S+/g, '')
-        .replace(/\[\d{1,3}\]|\{\d{1,3}\}/g, '')
+        .replace(/\[\s*(?:\d{1,3}|\*{1,3})\s*\]|\{\d{1,3}\}/g, '')
+        .replace(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g, '')
+        // "(бел. пр.)", "— Б. пр.", "(Note)": the marker of an inline note
+        .replace(/\s*[(\[]\s*(?:бел\.\s?(?:пр|ред|а|авт)\.?|б\.\s?(?:пр|ред|а)\.?|прим\.\s?(?:пер|ред|авт)\.?|translator'?s note|t\.n\.)\s*[)\]]/gi, '')
+        .replace(/\s*[—–-]\s*(?:бел\.|б\.)\s?(?:пр|ред|а)\.?(?=\s*[)\]]?\s*$)/gi, '')
         .replace(/([а-яa-z»"”.,!?])\d{1,3}(?=[\s.,;:!?]|$)/gi, '$1') // trailing footnote digits
         .replace(/^[\s*•·~#=_\-–—]{3,}$/g, '')
         .replace(/[*_#]{2,}/g, '')
@@ -79,17 +110,20 @@ export function splitSentences(text, lang, maxLen = 450) {
 export function buildChapterModel(chapter, lang) {
     const sentences = [];
     const paras = [];
+    // A chapter that is only the notes ("Бележки") is shown, not read
+    const allNotes = isNotesTitle(chapter.title);
     const blocks = chapter.title && !chapter.auto
-        ? [{ t: chapter.title, h: true }, ...chapter.paras.map((t) => ({ t }))]
+        ? [{ t: chapter.title, h: true, note: allNotes }, ...chapter.paras.map((t) => ({ t }))]
         : chapter.paras.map((t) => ({ t }));
     blocks.forEach((b) => {
         const pIndex = paras.length;
         const first = sentences.length;
-        for (const s of splitSentences(b.t, lang)) {
-            const speak = cleanForSpeech(s);
+        const note = !!b.note || (!b.h && (allNotes || isNotePara(b.t)));
+        for (const s of splitSentences(noteText(b.t), lang)) {
+            const speak = note ? '' : cleanForSpeech(s);
             sentences.push({ t: s, speak, p: pIndex });
         }
-        paras.push({ first, last: sentences.length, h: !!b.h });
+        paras.push({ first, last: sentences.length, h: !!b.h, note });
     });
     return { sentences, paras };
 }

@@ -14,8 +14,10 @@
 //   POST /community/:id/report           → notice of infringement: the book is hidden at once
 //   POST /community/:id/restore          → (admin, ADMIN_TOKEN) show a reported book again
 //
-// Night studio (whole books narrated on the server while the app is closed). Every call
-// needs "Authorization: Bearer <STUDIO_TOKEN>" (falls back to ADMIN_TOKEN):
+// Night studio (whole books narrated on the server while the app is closed). No extra
+// secrets: every call carries the owner's Gemini API key in "X-Rz-Key"; the worker keeps
+// only its SHA-256 as the owner id, and each key sees only its own jobs. The runner uses
+// the same key (the repo secret GEMINI_API_KEY that is also built into the app).
 //   POST   /jobs                         → queue a book: { title, engine, mode, items:[{key,vk,lang,text,req}] }
 //   GET    /jobs                         → state of every job (the runner and the app)
 //   GET    /jobs/:id                     → state of one job
@@ -48,7 +50,7 @@ function cors(req) {
     return {
         'Access-Control-Allow-Origin': ok ? origin : ALLOWED_ORIGINS[0],
         'Access-Control-Allow-Methods': 'GET, HEAD, PUT, POST, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, X-Rz-Voice, X-Rz-Lang, X-Rz-Text, Authorization',
+        'Access-Control-Allow-Headers': 'Content-Type, X-Rz-Voice, X-Rz-Lang, X-Rz-Text, X-Rz-Key, Authorization',
         'Access-Control-Max-Age': '86400',
         Vary: 'Origin',
     };
@@ -291,25 +293,27 @@ async function communityRestore(req, env, id) {
 
 // ---------- night studio ----------
 
-function studioAllowed(req, env) {
-    const token = env.STUDIO_TOKEN || env.ADMIN_TOKEN;
-    return !!token && req.headers.get('Authorization') === `Bearer ${token}`;
+async function studioOwner(req) {
+    const key = req.headers.get('X-Rz-Key') || '';
+    if (!/^[\w-]{20,200}$/.test(key)) return '';
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('razkazvach-studio|' + key));
+    return [...new Uint8Array(buf)].slice(0, 12).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 const STATE_FIELDS = ['status', 'done', 'failed', 'failedKeys', 'batches', 'freeDay', 'costUsd', 'usage', 'error', 'log'];
 
-async function jobState(env, id) {
-    const obj = await env.AUDIO.get(`j/s/${id}`);
+async function jobState(env, id, owner) {
+    const obj = await env.AUDIO.get(`j/s/${owner}/${id}`);
     return obj ? obj.json() : null;
 }
 
-async function jobsList(req, env) {
+async function jobsList(req, env, owner) {
     const out = [];
     let cursor;
     do {
-        const page = await env.AUDIO.list({ prefix: 'j/s/', cursor, limit: 1000 });
+        const page = await env.AUDIO.list({ prefix: `j/s/${owner}/`, cursor, limit: 1000 });
         for (const o of page.objects) {
-            const st = await jobState(env, o.key.slice(4));
+            const st = await jobState(env, o.key.slice(`j/s/${owner}/`.length), owner);
             if (st) out.push(st);
         }
         cursor = page.truncated ? page.cursor : null;
@@ -318,7 +322,7 @@ async function jobsList(req, env) {
     return json(req, { jobs: out });
 }
 
-async function jobCreate(req, env) {
+async function jobCreate(req, env, owner) {
     const body = await req.text();
     if (body.length > MAX_JOB_BYTES) return json(req, { error: 'Книгата е твърде голяма.' }, 413);
     let d;
@@ -336,39 +340,40 @@ async function jobCreate(req, env) {
         total: d.items.length, chars: d.items.reduce((n, it) => n + String(it.text).length, 0),
         status: 'queued', done: 0, failed: 0, batches: [], costUsd: 0, error: '', log: '',
     };
-    await env.AUDIO.put(`j/b/${id}`, body, { httpMetadata: { contentType: 'application/json' } });
-    await env.AUDIO.put(`j/s/${id}`, JSON.stringify(state), { httpMetadata: { contentType: 'application/json' } });
+    await env.AUDIO.put(`j/b/${owner}/${id}`, body, { httpMetadata: { contentType: 'application/json' } });
+    await env.AUDIO.put(`j/s/${owner}/${id}`, JSON.stringify(state), { httpMetadata: { contentType: 'application/json' } });
     return json(req, state);
 }
 
-async function jobUpdate(req, env, id) {
-    const st = await jobState(env, id);
+async function jobUpdate(req, env, id, owner) {
+    const st = await jobState(env, id, owner);
     if (!st) return json(req, { error: 'not found' }, 404);
     let d = {};
     try { d = await req.json(); } catch { return json(req, { error: 'bad json' }, 400); }
     for (const k of STATE_FIELDS) if (k in d) st[k] = d[k];
     st.updated = Date.now();
-    await env.AUDIO.put(`j/s/${id}`, JSON.stringify(st), { httpMetadata: { contentType: 'application/json' } });
+    await env.AUDIO.put(`j/s/${owner}/${id}`, JSON.stringify(st), { httpMetadata: { contentType: 'application/json' } });
     return json(req, st);
 }
 
 async function jobs(req, env, id, sub) {
     if (!env.AUDIO) return json(req, { error: 'Сървърът няма хранилище (R2).' }, 503);
-    if (!studioAllowed(req, env)) return json(req, { error: 'Невалиден код за нощното студио.' }, 403);
-    if (!id && req.method === 'GET') return jobsList(req, env);
-    if (!id && req.method === 'POST') return jobCreate(req, env);
+    const owner = await studioOwner(req);
+    if (!owner) return json(req, { error: 'Нужен е Google API ключ.' }, 403);
+    if (!id && req.method === 'GET') return jobsList(req, env, owner);
+    if (!id && req.method === 'POST') return jobCreate(req, env, owner);
     if (id && sub === '/book' && req.method === 'GET') {
-        const obj = await env.AUDIO.get(`j/b/${id}`);
+        const obj = await env.AUDIO.get(`j/b/${owner}/${id}`);
         if (!obj) return json(req, { error: 'not found' }, 404);
         return new Response(obj.body, { headers: { ...cors(req), 'Content-Type': 'application/json' } });
     }
     if (id && !sub && req.method === 'GET') {
-        const st = await jobState(env, id);
+        const st = await jobState(env, id, owner);
         return st ? json(req, st) : json(req, { error: 'not found' }, 404);
     }
-    if (id && !sub && req.method === 'PUT') return jobUpdate(req, env, id);
+    if (id && !sub && req.method === 'PUT') return jobUpdate(req, env, id, owner);
     if (id && !sub && req.method === 'DELETE') {
-        await env.AUDIO.delete([`j/s/${id}`, `j/b/${id}`]);
+        await env.AUDIO.delete([`j/s/${owner}/${id}`, `j/b/${owner}/${id}`]);
         return json(req, { ok: true });
     }
     return json(req, { error: 'method' }, 405);
@@ -380,7 +385,7 @@ export default {
         const url = new URL(req.url);
         const path = decodeURIComponent(url.pathname);
         try {
-            if (path === '/health') return json(req, { ok: true, audio: !!env.AUDIO, trans: !!env.AUDIO, studio: !!(env.AUDIO && (env.STUDIO_TOKEN || env.ADMIN_TOKEN)) });
+            if (path === '/health') return json(req, { ok: true, audio: !!env.AUDIO, trans: !!env.AUDIO, studio: !!env.AUDIO });
             let m = path.match(/^\/gutenberg\/(\d{1,7})\.epub$/);
             if (m && req.method === 'GET') return gutenberg(req, m[1], ctx);
             if (path === '/proxy' && req.method === 'GET') return proxy(req, ctx);

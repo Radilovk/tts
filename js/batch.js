@@ -37,7 +37,7 @@ export function batchEstimate(model, chars) {
 export async function submitChapter(player, c, st) {
     if (c < 0 || c >= player.chapters.length) return 0;
     await player.ensureChapter(c);
-    const specs = await player.chapterSpecs(c);
+    const specs = await player.chapterSpecs(c, st);
     const pending = pendingKeys();
     const missing = [];
     const shared = !!player.book.shared;

@@ -11,7 +11,8 @@
 //           billing); a few dozen passages a day, so a book takes days, but costs 0 $
 //   cloud — Google HD (Chirp 3 HD) inside the free 1M characters a month
 //
-// Env: STUDIO_TOKEN (required), GEMINI_API_KEY, GEMINI_FREE_KEY, GOOGLE_TTS_KEY,
+// Env: GEMINI_API_KEY (the repo secret the app is built with; it is also the owner id of
+//      the queue — no other secret is needed), GEMINI_FREE_KEY, GOOGLE_TTS_KEY,
 //      LIBRARY_API (default: from js/config.js), MAX_MINUTES (default 300),
 //      CLOUD_FREE_CHARS (default 700000 a month; 0 = no cap)
 
@@ -25,9 +26,7 @@ const MAX_MS = (Number(process.env.MAX_MINUTES) || 300) * 60_000;
 const timeLeft = () => MAX_MS - (Date.now() - started);
 const API = (process.env.LIBRARY_API || readFileSync(new URL('../js/config.js', import.meta.url), 'utf8')
     .match(/LIBRARY_API\s*=\s*'([^']+)'/)?.[1] || '').replace(/\/$/, '');
-const TOKEN = process.env.STUDIO_TOKEN || '';
 const KEY = process.env.GEMINI_API_KEY || '';
-const FREE_KEY = process.env.GEMINI_FREE_KEY || '';
 const TTS_KEY = process.env.GOOGLE_TTS_KEY || KEY;
 // 700k leaves room in Google's free 1M a month for listening live with Google HD
 const CLOUD_CAP = process.env.CLOUD_FREE_CHARS === undefined ? 700_000 : Number(process.env.CLOUD_FREE_CHARS);
@@ -43,7 +42,7 @@ const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 async function api(path, opts = {}) {
     const r = await fetch(API + path, {
         ...opts,
-        headers: { Authorization: `Bearer ${TOKEN}`, ...(opts.body && typeof opts.body === 'string' ? { 'Content-Type': 'application/json' } : {}), ...opts.headers },
+        headers: { 'X-Rz-Key': KEY, ...(opts.body && typeof opts.body === 'string' ? { 'Content-Type': 'application/json' } : {}), ...opts.headers },
     });
     if (!r.ok) throw new Error(`${opts.method || 'GET'} ${path}: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`);
     return r.json();
@@ -184,7 +183,9 @@ function todayPacific() {
 
 // Free daily quota: one passage at a time, slowly, until Google says "enough for today"
 async function runFree(job, book, missing) {
-    if (!FREE_KEY) return saveState(job, { error: 'Няма GEMINI_FREE_KEY — безплатният режим не може да работи.' });
+    // The free key entered in the app travels with the job; the repo secret is a fallback
+    const FREE_KEY = book.freeKey || process.env.GEMINI_FREE_KEY || '';
+    if (!FREE_KEY) return saveState(job, { error: 'Няма безплатен ключ — въведете го в Настройки → Gemini → „Безплатен ключ“ и изпратете наново.' });
     if (job.freeDay === todayPacific()) return log(`  free quota already used today`);
     let made = 0;
     for (const item of missing) {
@@ -296,7 +297,7 @@ async function runCloud(job, book, missing, usedThisMonth) {
 // ---------- main ----------
 
 async function main() {
-    if (!API || !TOKEN) { log('LIBRARY_API or STUDIO_TOKEN missing — nothing to do'); return; }
+    if (!API || !KEY) { log('LIBRARY_API or GEMINI_API_KEY missing — nothing to do'); return; }
     const { jobs } = await api('/jobs');
     const open = jobs.filter((j) => !['done', 'cancelled'].includes(j.status));
     log(`${open.length} open job(s)`);

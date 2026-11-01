@@ -6,7 +6,7 @@
 import * as db from './db.js';
 import { recordUsage } from './usage.js';
 import { sharedGetTrans, sharedPutTrans } from './shared.js';
-import { LANG_NAMES } from './text.js';
+import { LANG_NAMES, NOTE_MARK } from './text.js';
 
 export const TRANSLATE_DEFAULT_MODEL = 'gemini-2.5-flash-lite';
 const BATCH_CHARS = 6000;
@@ -156,7 +156,9 @@ export async function translateChapter({ bookId, c, chapter, from, to, apiKey, m
         await Promise.all(Array.from({ length: Math.min(CONCURRENCY, groups.length) }, worker));
     }
 
-    const translated = { title: chapter.auto ? chapter.title : result[0], paras: result.slice(1), auto: chapter.auto };
+    // Translators drop the invisible note mark: put it back where it was
+    const paras = result.slice(1).map((t, i) => (chapter.paras[i]?.[0] === NOTE_MARK && t[0] !== NOTE_MARK ? NOTE_MARK + t : t));
+    const translated = { title: chapter.auto ? chapter.title : result[0], paras, auto: chapter.auto };
     await db.put('trans', { key, chapter: translated, at: Date.now() });
     if (remoteKey) sharedPutTrans(remoteKey, translated);
     return translated;

@@ -1,8 +1,8 @@
 name: Night studio (whole books narrated on the server)
 
 # Narrates the books queued from the app ("⋯ → Озвучи цялата книга на сървъра") while
-# the phone is off. Needs the secrets STUDIO_TOKEN (the same value as the worker's
-# STUDIO_TOKEN) and GEMINI_API_KEY; GEMINI_FREE_KEY for the free mode is optional.
+# the phone is off. Uses only the existing secret GEMINI_API_KEY (the key the app is
+# built with): it pays for the narration and identifies the owner's queue on the worker.
 on:
   schedule:
     - cron: '17 * * * *'
@@ -23,10 +23,10 @@ jobs:
       - name: Check the studio is set up
         id: creds
         env:
-          STUDIO_TOKEN: ${{ secrets.STUDIO_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          if [ -z "$STUDIO_TOKEN" ]; then
-            echo "::notice::Няма secret STUDIO_TOKEN — нощното студио не е включено."
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "::notice::Няма secret GEMINI_API_KEY — нощното студио не може да работи."
             echo "ok=false" >> "$GITHUB_OUTPUT"
           else
             echo "ok=true" >> "$GITHUB_OUTPUT"
@@ -47,7 +47,6 @@ jobs:
       - name: Narrate
         if: steps.creds.outputs.ok == 'true'
         env:
-          STUDIO_TOKEN: ${{ secrets.STUDIO_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_FREE_KEY: ${{ secrets.GEMINI_FREE_KEY }}
           GOOGLE_TTS_KEY: ${{ secrets.GOOGLE_TTS_KEY }}
