@@ -14,6 +14,7 @@ import { isNative, Native, nativeFileUrl, loadNativeVoices, nativeEngines } from
 import { submitChapter, pollBatches, hasJobs, pendingChapters, batchEstimate } from './batch.js';
 import { usableFreeKey } from './player.js';
 import { exportPlan, exportChapters, packageFiles, safeFileName } from './export.js';
+import { buildJob, submitJob, jobStatus, cancelJob, downloadBook } from './studio.js';
 import { searchBooks, localizeTitles, SOURCES } from './search.js';
 import { SHELVES, loadShelf, wikisourceWorks, fetchCatalogBook, sourceKey, RIGHTS_LABELS, shareCommunityBook, reportCommunityBook } from './library.js';
 import { usageSummary, resetUsage, hourlyCost, freeHoursPerMonth, recordUsage } from './usage.js';
@@ -24,14 +25,14 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.6';
+export const APP_VERSION = '2.7';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
     engine: null, apiKey: '', cloudVoice: '', geminiVoice: 'Charon', geminiModel: '', geminiEconomy: true, geminiFreeKey: '',
     style: 'intriguing', customStyle: '', deviceVoice: '', lang: 'auto', rate: 1, lookahead: 2,
     cacheMB: 500, theme: 'system', readerSize: 19, view: 'cover', cloudReady: false, autoTranslate: 'bg',
-    freeOnly: true, geminiCapUsd: 2,
+    freeOnly: true, geminiCapUsd: 2, studioToken: '',
 };
 
 let settings = loadSettings();
@@ -279,7 +280,7 @@ async function saveImported(parsed, { fileName = '', source = null, translateTo,
             // Narration is shared only for books every listener may legally receive
             shared: !!source && source.shareable !== false,
             originalTitle: parsed.title,
-            chunkV: 2,
+            chunkV: 3,
         };
         if (displayTitle) meta.title = displayTitle;
         await db.put('contents', { id, chapters: parsed.chapters });
@@ -599,7 +600,7 @@ async function openBook(id, autoplay) {
     }
     meta.lastOpened = Date.now();
     // Nothing narrated yet: switch to the longer, paragraph-aligned passages
-    if (!meta.chunkV && !(await db.audioCountBook(id).catch(() => 1))) meta.chunkV = 2;
+    if ((meta.chunkV || 0) < 3 && !meta.factory && !(await db.audioCountBook(id).catch(() => 1))) meta.chunkV = 3;
     if (seq !== openSeq) return;
     if (meta.cover && !coverUrls.has(id)) coverUrls.set(id, URL.createObjectURL(meta.cover));
     meta.coverUrl = coverUrls.get(id) || '';
@@ -1105,6 +1106,7 @@ function openBookMenu() {
             </div>` : ''}
             <div class="group list">
                 ${settings.engine === 'gemini' ? `<button class="list-item" data-a="batch"><span class="grow">Подготви следващите 3 глави на ½ цена<small>Gemini Batch: ~${approxUsd(batchEstimate(activeGeminiModel(), nextChaptersChars(3)))} · готово обикновено до няколко часа${pendingChapters(currentBook.id).length ? ` · в момента се подготвят ${pendingChapters(currentBook.id).length}` : ''}</small></span></button>` : ''}
+                ${settings.engine !== 'device' ? `<button class="list-item" data-a="studio"><span class="grow">Озвучи цялата книга на сървъра<small>${currentBook.factory ? 'Изпратена в нощното студио — вижте докъде е стигнала' : 'Нощно студио: прави се докато телефонът е изключен · ½ цена или безплатно'}</small></span></button>` : ''}
                 <button class="list-item" data-a="export"><span class="grow">Изтегли като аудиокнига<small>Аудиофайл (.ogg) за всеки плейър · вече чутото е безплатно</small></span></button>
                 ${!currentBook.source ? '<button class="list-item" data-a="share"><span class="grow">Сподели в общата библиотека<small>Само свободни книги · посочвате източник и основание</small></span></button>' : ''}
                 <button class="list-item" data-a="text"><span class="grow">Изтегли като текст<small>Файл за четене (.txt)${currentBook.translateTo ? ' · в превод' : ''} · с посочен източник</small></span></button>
@@ -1132,6 +1134,8 @@ function openBookMenu() {
             } else if (a === 'export') {
                 closeSheet();
                 openExport();
+            } else if (a === 'studio') {
+                openStudio();
             } else if (a === 'share') {
                 openShareCommunity();
             } else if (a === 'text') {
@@ -1161,6 +1165,141 @@ function openBookMenu() {
             }
         };
     });
+}
+
+// ---------- Night studio (whole book narrated on the server) ----------
+
+function studioVoiceLabel(st) {
+    if (st.engine === 'cloud') return `Google HD · ${(st.cloudVoice || '').split('-').slice(-1)[0]}`;
+    const style = st.style === 'custom' ? 'свой стил' : (NARRATION_STYLES[st.style]?.label || '').toLowerCase();
+    return `Gemini разказвач · ${st.geminiVoice} · ${style} · ${st.geminiModel}`;
+}
+
+function openStudio() {
+    if (!currentBook) return;
+    const book = currentBook;
+    let mode = settings.engine === 'cloud' ? 'cloud' : 'batch';
+    let job = null;
+    let busy = '';
+    const render = (body) => {
+        const st = effectiveSettings();
+        const hours = book.totalChars / player.charsPerSecond / 3600;
+        const freeHrs = freeHoursPerMonth('Chirp3-HD');
+        if (book.factory && job) {
+            const pct = job.total ? Math.round(job.done / job.total * 100) : 0;
+            const statusText = job.status === 'done' ? 'Готово — пуснете книгата, аудиото идва от сървъра.'
+                : job.status === 'queued' ? 'Чака реда си — сървърът проверява на всеки час.'
+                : job.engine === 'gemini' && job.mode === 'batch' && job.batches?.length ? `Google озвучава (${job.batches.length} партиди на ½ цена) — обикновено до няколко часа.`
+                : job.mode === 'free' ? 'Озвучава се с безплатния дневен лимит — всеки ден по малко.'
+                : 'Озвучава се.';
+            body.innerHTML = `
+                <div class="usage">
+                    <div class="usage-item"><div class="top"><span>Готово</span><span>${job.done} от ${job.total} откъса · ${pct}%</span></div>
+                    <div class="progress-track"><i style="width:${pct}%"></i></div>
+                    <div class="sub">${esc(statusText)}</div>
+                    ${job.costUsd ? `<div class="sub">Платено досега: ${fmtUsd(job.costUsd)}</div>` : ''}
+                    ${job.error ? `<div class="sub" style="color:var(--danger, #c33)">${esc(job.error)}</div>` : ''}</div>
+                </div>
+                <p class="hint">Глас: ${esc(job.voice)}${job.model ? ' · ' + esc(job.model) : ''}. Ако смените гласа или стила в настройките, готовото аудио няма да съвпада — върнете същия глас, за да го слушате.</p>
+                <div class="catalog-actions">
+                    <button class="btn btn-primary" data-st="dl" ${busy ? 'disabled' : ''}>${busy === 'dl' ? 'Свалям…' : 'Свали готовото в телефона'}</button>
+                    <button class="btn btn-ghost" data-st="refresh">Обнови</button>
+                    <button class="btn btn-ghost" data-st="cancel">Откажи / изпрати наново</button>
+                </div>
+                <p class="hint">Не е нужно да сваляте: при слушане готовите откъси идват от сървъра без нов синтез. Свалянето е за слушане без интернет.</p>`;
+        } else if (book.factory && !job) {
+            body.innerHTML = '<p class="hint">Проверявам докъде е стигнал сървърът…</p>';
+        } else {
+            const est = {
+                batch: approxUsd(batchEstimate(st.geminiModel, book.totalChars)),
+                free: '0 $',
+                cloud: hours <= freeHrs ? '0 $ (в безплатния месечен лимит)' : `~${fmtUsd(Math.max(0, hours - freeHrs) * hourlyCost('cloud'))} или безплатно за ${Math.ceil(hours / freeHrs)} месеца`,
+            };
+            const modes = st.engine === 'cloud'
+                ? [['cloud', 'Google HD', est.cloud, 'Безплатните 1M знака на месец; при изчерпване продължава от 1-во число.']]
+                : [['batch', '½ цена (Batch)', est.batch, 'Google озвучава в тихите си часове — обикновено готово за няколко часа.'],
+                    ['free', 'Безплатно, бавно', est.free, 'Само безплатният дневен лимит (secret GEMINI_FREE_KEY на сървъра). Голяма книга отнема дни.']];
+            body.innerHTML = `
+                <p class="hint" style="margin-top:0">Книгата се изпраща на сървъра и се озвучава <b>цялата</b>, докато приложението е затворено. После просто натискате ▶ — аудиото е готово.</p>
+                <div class="group">
+                    <div class="row"><span class="row-label">Обем</span><span class="muted">~${hours.toFixed(1)} ч · ${fmtNum(book.totalChars)} знака</span></div>
+                    <div class="row"><span class="row-label">Глас</span><span class="muted">${esc(studioVoiceLabel(st))}</span></div>
+                </div>
+                <div class="group list" id="stModes">
+                    ${modes.map(([k, label, cost, hint]) => `<button class="list-item ${mode === k ? 'on' : ''}" data-mode="${k}"><span class="grow">${mode === k ? '● ' : '○ '}${label} — ${cost}<small>${hint}</small></span></button>`).join('')}
+                </div>
+                ${!settings.studioToken ? `<div class="group-title">Код за студиото</div>
+                    <input class="input" id="stToken" type="password" autocomplete="off" spellcheck="false" placeholder="STUDIO_TOKEN от настройките на сървъра">
+                    <p class="hint">Еднократно: същата стойност като secret <b>STUDIO_TOKEN</b> на worker-а и в GitHub репото (виж README → „Нощно студио“).</p>` : ''}
+                <div class="catalog-actions">
+                    <button class="btn btn-primary" data-st="send" ${busy ? 'disabled' : ''}>${busy === 'send' ? 'Изпращам…' : 'Изпрати за озвучаване'}</button>
+                </div>
+                <p class="hint">За най-добро качество първо изберете гласа, стила и модела в Настройки — сървърът озвучава с тях.${book.translateTo ? ' Книгата ще бъде преведена изцяло преди изпращане.' : ''}</p>`;
+        }
+        body.onclick = async (e) => {
+            const m = e.target.closest('[data-mode]');
+            if (m) { mode = m.dataset.mode; rerenderSheet(render); return; }
+            const act = e.target.closest('[data-st]')?.dataset.st;
+            if (!act || busy) return;
+            const tokenInput = $('#stToken', body);
+            if (tokenInput?.value.trim()) { settings.studioToken = tokenInput.value.trim(); saveSettings(); }
+            const token = settings.studioToken;
+            if (act === 'send') {
+                if (!token) return toast('Въведете кода за студиото.', { error: true });
+                if (settings.engine === 'cloud' && !settings.cloudVoice && !(await pickDefaultCloudVoice())) return;
+                busy = 'send';
+                rerenderSheet(render);
+                try {
+                    const j = await buildJob(player, effectiveSettings(), mode, (p) => { $('#pStatus').textContent = `Подготвям текста: ${Math.round(p * 100)}%`; });
+                    $('#pStatus').textContent = '';
+                    job = await submitJob(token, j);
+                    book.factory = { jobId: job.id, at: Date.now() };
+                    persistBook(book);
+                    toast('Изпратено. Сървърът започва до час; можете да затворите приложението.', { duration: 8000 });
+                } catch (err) {
+                    $('#pStatus').textContent = '';
+                    if (/код/.test(err.message)) { settings.studioToken = ''; saveSettings(); }
+                    toast(err.message, { error: true, duration: 8000 });
+                }
+                busy = '';
+                rerenderSheet(render);
+            } else if (act === 'refresh') {
+                job = null;
+                rerenderSheet(render);
+                load();
+            } else if (act === 'cancel') {
+                if (!confirm('Да откажа ли задачата? Вече озвученото остава на сървъра и няма да се плаща отново.')) return;
+                try { await cancelJob(token, book.factory.jobId); } catch {}
+                delete book.factory;
+                persistBook(book);
+                job = null;
+                rerenderSheet(render);
+            } else if (act === 'dl') {
+                busy = 'dl';
+                rerenderSheet(render);
+                try {
+                    const r = await downloadBook(player, (p) => { $('#pStatus').textContent = `Свалям: ${Math.round(p * 100)}%`; });
+                    toast(r.missing ? `Свалени ${r.got} от ${r.total} откъса; останалите още не са готови.` : 'Цялата книга е в телефона.');
+                } catch (err) { toast(err.message, { error: true }); }
+                $('#pStatus').textContent = '';
+                busy = '';
+                rerenderSheet(render);
+            }
+        };
+    };
+    const load = () => {
+        if (!book.factory || !settings.studioToken) return;
+        jobStatus(settings.studioToken, book.factory.jobId).then((j) => {
+            job = j;
+            if ($('#sheetTitle').textContent === 'Нощно студио') rerenderSheet(render);
+        }).catch((err) => {
+            if (/not found/.test(err.message)) { delete book.factory; persistBook(book); }
+            else toast(err.message, { error: true });
+            if ($('#sheetTitle').textContent === 'Нощно студио') rerenderSheet(render);
+        });
+    };
+    openSheet('Нощно студио', render);
+    load();
 }
 
 // ---------- Settings ----------
@@ -1941,6 +2080,7 @@ function bindEvents() {
     player.addEventListener('save', scheduleSave);
     player.addEventListener('position', savePositionSoon);
     player.addEventListener('position', maybePrepareNext);
+    player.addEventListener('retrying', (e) => { $('#pStatus').textContent = `Връзката прекъсна — опитвам отново след ${e.detail.seconds} сек…`; });
     player.addEventListener('translating', (e) => { $('#pStatus').textContent = `Превеждам главата… ${Math.round(e.detail * 100)}%`; });
     player.addEventListener('translated', () => {
         renderedChapter = -1;

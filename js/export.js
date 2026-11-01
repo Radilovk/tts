@@ -18,7 +18,7 @@ export function safeFileName(s) {
 // How much of the selection is already narrated (free) and how much is missing.
 export async function exportPlan(player, chapters) {
     let total = 0, missingChars = 0, chunks = 0, missing = 0;
-    const shared = !!player.book.shared;
+    const shared = !!player.book.shared || !!player.book.factory;
     for (const c of chapters) {
         for (const spec of await player.chapterSpecs(c)) {
             chunks++;

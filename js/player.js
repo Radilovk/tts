@@ -17,6 +17,11 @@ const FAST_START_CHARS = 320;
 // separately narrated passages are fewer and fall on natural pauses.
 const CHUNK_V2 = { gemini: { max: 2600, para: 0.6 }, cloud: { max: 1400, para: 0.5 } };
 const FAST_START_V2 = { min: 450, max: 1100 };
+// Chunking v3: Google HD gets longer passages (up to ~2000 characters, still within its
+// 5000-byte limit), so the voice keeps one melody over more text and joins are rarer.
+const CHUNK_V3 = { ...CHUNK_V2, cloud: { max: 2000, para: 0.6 } };
+// Network hiccups during playback are retried instead of stopping the book
+const PLAY_RETRIES = [3, 6, 12, 20, 30];
 
 async function hash(str) {
     if (crypto.subtle) {
@@ -326,8 +331,8 @@ export class Player extends EventTarget {
     // Fixed chunk starts of a chapter. Books keep the chunking they were first narrated
     // with, so audio already paid for keeps matching.
     _boundaries(m) {
-        const v2 = this.book?.chunkV >= 2 && CHUNK_V2[this.engine];
-        if (v2) return chunkBoundaries(m, v2.max, v2.para);
+        const v = this.book?.chunkV >= 3 ? CHUNK_V3[this.engine] : this.book?.chunkV >= 2 && CHUNK_V2[this.engine];
+        if (v) return chunkBoundaries(m, v.max, v.para);
         return chunkBoundaries(m, CHUNK_CHARS[this.engine] || CHUNK_CHARS.gemini);
     }
 
@@ -366,7 +371,7 @@ export class Player extends EventTarget {
                 if (!spec) { s = s1; continue; }
                 // No fast-start split for a chunk that is being prepared at half price:
                 // waiting for it is the whole point of economy mode
-                if (fastStart && spec.chars > this._fastMin() * 1.5 && !pendingKeys().has(spec.key) && !(await db.audioHas(spec.key))) {
+                if (fastStart && !this.book.factory && spec.chars > this._fastMin() * 1.5 && !pendingKeys().has(spec.key) && !(await db.audioHas(spec.key))) {
                     // Start quickly with a short piece; the rest follows while it plays
                     spec = await this._spec(c, s, this._fastSplit(m, s, s1));
                 }
@@ -384,15 +389,17 @@ export class Player extends EventTarget {
     }
 
     // Get (from cache or by synthesis) the audio record for a chunk.
-    _ensure(spec) {
+    // remoteOnly: take it from the cache or the server, never pay for a new synthesis
+    _ensure(spec, { remoteOnly = false } = {}) {
         if (this.queue.has(spec.key)) return this.queue.get(spec.key);
         const book = this.book;
         const p = (async () => {
             const cached = await db.audioGet(spec.key);
             if (cached) return cached;
             const shared = !!book.shared;
-            // Public-domain book: someone may already have had this part narrated
-            if (shared) {
+            // Public-domain book: someone may already have had this part narrated.
+            // A book sent to the night studio: the server has narrated it
+            if (shared || book.factory) {
                 const remote = await sharedGetAudio(spec.key);
                 if (remote) {
                     const rec = { key: spec.key, blob: remote.blob, dur: remote.dur || await blobDuration(remote.blob), chars: spec.chars, bookId: book.id };
@@ -400,6 +407,7 @@ export class Player extends EventTarget {
                     return rec;
                 }
             }
+            if (remoteOnly) throw Object.assign(new Error('not ready'), { name: 'AbortError' });
             const rec = await this._synthesize(spec, book);
             await db.audioPut(rec);
             if (shared) sharedPutAudio(spec.key, spec.vk, spec.lang, spec.text, rec.blob, rec.dur);
@@ -532,11 +540,19 @@ export class Player extends EventTarget {
         this.loading = true;
         this._emit('state');
         let rec;
-        try {
-            rec = await this._ensure(spec);
-        } catch (e) {
-            if (session === this.session) this._fail(e);
-            return;
+        for (let attempt = 0; ; attempt++) {
+            try {
+                rec = await this._ensure(spec);
+                break;
+            } catch (e) {
+                if (session !== this.session) return;
+                // Lost connection or a busy server: wait and try again instead of stopping
+                const transient = e?.retryable || e?.status === 0 || (typeof navigator !== 'undefined' && navigator.onLine === false);
+                if (!transient || attempt >= PLAY_RETRIES.length || !this.playing || /APP_CAP|BATCH_PENDING/.test(e?.reason || '')) { this._fail(e); return; }
+                this.dispatchEvent(new CustomEvent('retrying', { detail: { seconds: PLAY_RETRIES[attempt], message: e.message } }));
+                await waitOnline(PLAY_RETRIES[attempt] * 1000);
+                if (session !== this.session || !this.playing) return;
+            }
         }
         if (session !== this.session || !this.playing) { this.loading = false; this._emit('state'); return; }
         spec.dur = rec.dur;
@@ -567,13 +583,29 @@ export class Player extends EventTarget {
     // Just-in-time: synthesize the next chunk only when the current one is about
     // to end (with a margin based on how long synthesis really takes), so pausing
     // or stopping never leaves paid-for audio nobody asked for.
-    async _prefetch(spec, session) {
-        const next = await this._specAfter(spec);
-        if (!next || session !== this.session) return;
-        this._ensure(next).catch(() => {});
+    // Google HD within the free monthly characters costs nothing, so it works two
+    // passages ahead from the moment a passage starts: a slow network, a phone that
+    // throttles the page with the screen off, or a retry never leaves a gap.
+    async _prefetch(spec, session, depth = 1) {
+        let cur = spec;
+        // Night-studio book with another voice: only download what the server made
+        const remoteOnly = this.getSettings().engine !== 'cloud' && !!this.book?.factory;
+        for (let i = 0; i < depth; i++) {
+            const next = await this._specAfter(cur);
+            if (!next || session !== this.session) return;
+            try { await this._ensure(next, { remoteOnly: remoteOnly && i > 0 }); } catch { return; }
+            if (session !== this.session) return;
+            cur = next;
+        }
+    }
+
+    _eagerPrefetch() {
+        const st = this.getSettings();
+        return st.engine === 'cloud' || !!this.book?.factory;
     }
 
     _prefetchMargin() {
+        if (this._eagerPrefetch()) return Infinity;
         const avg = this.synthSeconds[this.engine] || (this.engine === 'gemini' ? 20 : 4);
         return avg * 2 + 8;
     }
@@ -602,7 +634,7 @@ export class Player extends EventTarget {
             const left = (dur - a.currentTime) / (a.playbackRate || 1);
             if (left < this._prefetchMargin() && this._prefetchedFor !== this.current.key) {
                 this._prefetchedFor = this.current.key;
-                this._prefetch(this.current, this.session);
+                this._prefetch(this.current, this.session, this._eagerPrefetch() ? 2 : 1);
             }
             this._emit('time');
         });
@@ -873,6 +905,14 @@ export function usableFreeKey(st) {
 
 function markFreeKeyExhausted() {
     localStorage.setItem(FREE_KEY_STATE, todayPacific());
+}
+
+function waitOnline(ms) {
+    return new Promise((resolve) => {
+        const done = () => { clearTimeout(t); window.removeEventListener('online', done); resolve(); };
+        const t = setTimeout(done, ms);
+        window.addEventListener('online', done);
+    });
 }
 
 function blobDuration(blob) {
