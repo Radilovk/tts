@@ -14,6 +14,17 @@
 //   POST /community/:id/report           → notice of infringement: the book is hidden at once
 //   POST /community/:id/restore          → (admin, ADMIN_TOKEN) show a reported book again
 //
+// Night studio (whole books narrated on the server while the app is closed). Every call
+// needs "Authorization: Bearer <STUDIO_TOKEN>" (falls back to ADMIN_TOKEN):
+//   POST   /jobs                         → queue a book: { title, engine, mode, items:[{key,vk,lang,text,req}] }
+//   GET    /jobs                         → state of every job (the runner and the app)
+//   GET    /jobs/:id                     → state of one job
+//   GET    /jobs/:id/book                → the full job with texts and requests (the runner)
+//   PUT    /jobs/:id                     → update the state (the runner: progress, batches, cost)
+//   DELETE /jobs/:id                     → cancel / forget a job
+// The runner (.github/workflows/night-studio.yml) stores finished passages through
+// PUT /audio/:key, so the player finds them by the same keys as any cached passage.
+//
 // Only public-domain books use the shared store (the app decides; see js/library.js).
 // Every chunk is synthesized once and then served to every listener.
 
@@ -27,6 +38,7 @@ const MAX_AUDIO_BYTES = 12 * 1024 * 1024;
 const MAX_TRANS_BYTES = 2 * 1024 * 1024;
 const MAX_PROXY_BYTES = 80 * 1024 * 1024;
 const MAX_BOOK_BYTES = 6 * 1024 * 1024;
+const MAX_JOB_BYTES = 40 * 1024 * 1024;
 const RIGHTS = ['pd', 'own', 'cc0', 'cc-by', 'cc-by-sa'];
 const PROXY_HOSTS = [/^(export\.)?arxiv\.org$/, /^library\.oapen\.org$/, /^([\w-]+\.)*archive\.org$/, /^(www\.)?gutenberg\.org$/];
 
@@ -35,7 +47,7 @@ function cors(req) {
     const ok = ALLOWED_ORIGINS.includes(origin) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
     return {
         'Access-Control-Allow-Origin': ok ? origin : ALLOWED_ORIGINS[0],
-        'Access-Control-Allow-Methods': 'GET, HEAD, PUT, POST, OPTIONS',
+        'Access-Control-Allow-Methods': 'GET, HEAD, PUT, POST, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, X-Rz-Voice, X-Rz-Lang, X-Rz-Text, Authorization',
         'Access-Control-Max-Age': '86400',
         Vary: 'Origin',
@@ -277,13 +289,98 @@ async function communityRestore(req, env, id) {
     return (await setHidden(env, id, false)) ? json(req, { ok: true }) : json(req, { error: 'not found' }, 404);
 }
 
+// ---------- night studio ----------
+
+function studioAllowed(req, env) {
+    const token = env.STUDIO_TOKEN || env.ADMIN_TOKEN;
+    return !!token && req.headers.get('Authorization') === `Bearer ${token}`;
+}
+
+const STATE_FIELDS = ['status', 'done', 'failed', 'failedKeys', 'batches', 'freeDay', 'costUsd', 'usage', 'error', 'log'];
+
+async function jobState(env, id) {
+    const obj = await env.AUDIO.get(`j/s/${id}`);
+    return obj ? obj.json() : null;
+}
+
+async function jobsList(req, env) {
+    const out = [];
+    let cursor;
+    do {
+        const page = await env.AUDIO.list({ prefix: 'j/s/', cursor, limit: 1000 });
+        for (const o of page.objects) {
+            const st = await jobState(env, o.key.slice(4));
+            if (st) out.push(st);
+        }
+        cursor = page.truncated ? page.cursor : null;
+    } while (cursor);
+    out.sort((a, b) => a.created - b.created);
+    return json(req, { jobs: out });
+}
+
+async function jobCreate(req, env) {
+    const body = await req.text();
+    if (body.length > MAX_JOB_BYTES) return json(req, { error: 'Книгата е твърде голяма.' }, 413);
+    let d;
+    try { d = JSON.parse(body); } catch { return json(req, { error: 'bad json' }, 400); }
+    if (!['gemini', 'cloud'].includes(d.engine)) return json(req, { error: 'bad engine' }, 400);
+    if (!Array.isArray(d.items) || !d.items.length || d.items.length > 20000) return json(req, { error: 'Няма текст.' }, 400);
+    for (const it of d.items) {
+        if (!/^[0-9a-f]{40}$/.test(it?.key || '') || !it.text || !it.vk || !it.req) return json(req, { error: 'bad item' }, 400);
+    }
+    const id = crypto.randomUUID().replace(/-/g, '').slice(0, 20);
+    const now = Date.now();
+    const state = {
+        id, created: now, updated: now, bookId: cleanStr(d.bookId, 60), title: cleanStr(d.title, 200), author: cleanStr(d.author, 200),
+        engine: d.engine, model: cleanStr(d.model, 80), voice: cleanStr(d.voice, 80), mode: cleanStr(d.mode, 20) || 'batch',
+        total: d.items.length, chars: d.items.reduce((n, it) => n + String(it.text).length, 0),
+        status: 'queued', done: 0, failed: 0, batches: [], costUsd: 0, error: '', log: '',
+    };
+    await env.AUDIO.put(`j/b/${id}`, body, { httpMetadata: { contentType: 'application/json' } });
+    await env.AUDIO.put(`j/s/${id}`, JSON.stringify(state), { httpMetadata: { contentType: 'application/json' } });
+    return json(req, state);
+}
+
+async function jobUpdate(req, env, id) {
+    const st = await jobState(env, id);
+    if (!st) return json(req, { error: 'not found' }, 404);
+    let d = {};
+    try { d = await req.json(); } catch { return json(req, { error: 'bad json' }, 400); }
+    for (const k of STATE_FIELDS) if (k in d) st[k] = d[k];
+    st.updated = Date.now();
+    await env.AUDIO.put(`j/s/${id}`, JSON.stringify(st), { httpMetadata: { contentType: 'application/json' } });
+    return json(req, st);
+}
+
+async function jobs(req, env, id, sub) {
+    if (!env.AUDIO) return json(req, { error: 'Сървърът няма хранилище (R2).' }, 503);
+    if (!studioAllowed(req, env)) return json(req, { error: 'Невалиден код за нощното студио.' }, 403);
+    if (!id && req.method === 'GET') return jobsList(req, env);
+    if (!id && req.method === 'POST') return jobCreate(req, env);
+    if (id && sub === '/book' && req.method === 'GET') {
+        const obj = await env.AUDIO.get(`j/b/${id}`);
+        if (!obj) return json(req, { error: 'not found' }, 404);
+        return new Response(obj.body, { headers: { ...cors(req), 'Content-Type': 'application/json' } });
+    }
+    if (id && !sub && req.method === 'GET') {
+        const st = await jobState(env, id);
+        return st ? json(req, st) : json(req, { error: 'not found' }, 404);
+    }
+    if (id && !sub && req.method === 'PUT') return jobUpdate(req, env, id);
+    if (id && !sub && req.method === 'DELETE') {
+        await env.AUDIO.delete([`j/s/${id}`, `j/b/${id}`]);
+        return json(req, { ok: true });
+    }
+    return json(req, { error: 'method' }, 405);
+}
+
 export default {
     async fetch(req, env, ctx) {
         if (req.method === 'OPTIONS') return new Response(null, { headers: cors(req) });
         const url = new URL(req.url);
         const path = decodeURIComponent(url.pathname);
         try {
-            if (path === '/health') return json(req, { ok: true, audio: !!env.AUDIO, trans: !!env.AUDIO });
+            if (path === '/health') return json(req, { ok: true, audio: !!env.AUDIO, trans: !!env.AUDIO, studio: !!(env.AUDIO && (env.STUDIO_TOKEN || env.ADMIN_TOKEN)) });
             let m = path.match(/^\/gutenberg\/(\d{1,7})\.epub$/);
             if (m && req.method === 'GET') return gutenberg(req, m[1], ctx);
             if (path === '/proxy' && req.method === 'GET') return proxy(req, ctx);
@@ -296,6 +393,8 @@ export default {
             if (m && !m[2] && req.method === 'GET') return communityGet(req, env, m[1]);
             if (m && m[2] === '/report' && req.method === 'POST') return communityReport(req, env, m[1]);
             if (m && m[2] === '/restore' && req.method === 'POST') return communityRestore(req, env, m[1]);
+            m = path.match(/^\/jobs(?:\/([0-9a-f]{20})(\/book)?)?$/);
+            if (m) return jobs(req, env, m[1], m[2]);
             m = path.match(/^\/trans\/(.+)$/);
             if (m) return trans(req, env, m[1]);
             return json(req, { error: 'not found' }, 404);

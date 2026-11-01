@@ -1,0 +1,55 @@
+name: Night studio (whole books narrated on the server)
+
+# Narrates the books queued from the app ("⋯ → Озвучи цялата книга на сървъра") while
+# the phone is off. Needs the secrets STUDIO_TOKEN (the same value as the worker's
+# STUDIO_TOKEN) and GEMINI_API_KEY; GEMINI_FREE_KEY for the free mode is optional.
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: night-studio
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  narrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Check the studio is set up
+        id: creds
+        env:
+          STUDIO_TOKEN: ${{ secrets.STUDIO_TOKEN }}
+        run: |
+          if [ -z "$STUDIO_TOKEN" ]; then
+            echo "::notice::Няма secret STUDIO_TOKEN — нощното студио не е включено."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.creds.outputs.ok == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.creds.outputs.ok == 'true'
+        with:
+          node-version: '22'
+
+      - name: ffmpeg
+        if: steps.creds.outputs.ok == 'true'
+        run: command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
+
+      - name: Narrate
+        if: steps.creds.outputs.ok == 'true'
+        env:
+          STUDIO_TOKEN: ${{ secrets.STUDIO_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_FREE_KEY: ${{ secrets.GEMINI_FREE_KEY }}
+          GOOGLE_TTS_KEY: ${{ secrets.GOOGLE_TTS_KEY }}
+          MAX_MINUTES: '300'
+        run: node scripts/night-studio.mjs
