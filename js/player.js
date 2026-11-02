@@ -344,7 +344,9 @@ export class Player extends EventTarget {
     }
 
     _settingsKey(st = this.getSettings()) {
-        if (st.engine === 'cloud') return `cloud|${st.cloudVoice}`;
+        // v2: one continuous text per passage. The version is part of the cache key, so
+        // passages narrated with per-paragraph pauses (timbre jumps) are not replayed
+        if (st.engine === 'cloud') return `cloud2|${st.cloudVoice}`;
         if (st.engine === 'gemini') return `gemini|${st.geminiModel}|${st.geminiVoice}|${st.style}|${st.style === 'custom' ? st.customStyle : ''}`;
         return 'device';
     }
