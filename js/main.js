@@ -1174,10 +1174,10 @@ function studioVoiceLabel(st) {
     return `Gemini разказвач · ${st.geminiVoice} · ${style}`;
 }
 
-// The key built into the app is the repo secret the server runner uses, so the server
-// recognises the owner's books with no extra code or secret.
+// The app's own key: it files the book on the server (only its hash is the owner id)
+// and pays for the narration there — nothing else to set up.
 function studioKey() {
-    return preconfiguredKey() || settings.apiKey;
+    return effectiveSettings().apiKey;
 }
 
 function openStudio() {

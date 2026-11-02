@@ -14,10 +14,14 @@
 //   POST /community/:id/report           → notice of infringement: the book is hidden at once
 //   POST /community/:id/restore          → (admin, ADMIN_TOKEN) show a reported book again
 //
-// Night studio (whole books narrated on the server while the app is closed). No extra
-// secrets: every call carries the owner's Gemini API key in "X-Rz-Key"; the worker keeps
-// only its SHA-256 as the owner id, and each key sees only its own jobs. The runner uses
-// the same key (the repo secret GEMINI_API_KEY that is also built into the app).
+// Night studio (whole books narrated on the server while the app is closed). No secrets
+// to set up anywhere:
+//   • the app sends its Gemini key in "X-Rz-Key"; the jobs are filed under a hash of it,
+//     so each key sees only its own books; the key itself travels inside the job (it is
+//     what pays for the narration);
+//   • the runner (.github/workflows/night-studio.yml in Radilovk/tts) proves itself with
+//     the OIDC token GitHub signs for every workflow run — verified here against GitHub's
+//     public keys — and may then read every job. Runner calls add ?o=<owner>.
 //   POST   /jobs                         → queue a book: { title, engine, mode, items:[{key,vk,lang,text,req}] }
 //   GET    /jobs                         → state of every job (the runner and the app)
 //   GET    /jobs/:id                     → state of one job
@@ -300,6 +304,39 @@ async function studioOwner(req) {
     return [...new Uint8Array(buf)].slice(0, 12).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+// ---- GitHub Actions OIDC (the runner) ----
+const OIDC_ISSUER = 'https://token.actions.githubusercontent.com';
+const OIDC_AUDIENCE = 'razkazvach-studio';
+const RUNNER_REPO = 'radilovk/tts';
+let jwksCache = null;
+
+function b64urlBytes(s) {
+    const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4));
+    return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+}
+
+async function isRunner(req) {
+    const m = (req.headers.get('Authorization') || '').match(/^Bearer\s+([\w-]+)\.([\w-]+)\.([\w-]+)$/);
+    if (!m) return false;
+    try {
+        const header = JSON.parse(new TextDecoder().decode(b64urlBytes(m[1])));
+        const claims = JSON.parse(new TextDecoder().decode(b64urlBytes(m[2])));
+        const now = Date.now() / 1000;
+        if (header.alg !== 'RS256' || claims.iss !== OIDC_ISSUER || claims.aud !== OIDC_AUDIENCE) return false;
+        if (!(claims.exp > now) || String(claims.repository || '').toLowerCase() !== RUNNER_REPO) return false;
+        if (!jwksCache || jwksCache.at < Date.now() - 3600_000 || !jwksCache.keys.some((k) => k.kid === header.kid)) {
+            const r = await fetch(`${OIDC_ISSUER}/.well-known/jwks`);
+            jwksCache = { at: Date.now(), keys: (await r.json()).keys || [] };
+        }
+        const jwk = jwksCache.keys.find((k) => k.kid === header.kid);
+        if (!jwk) return false;
+        const key = await crypto.subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
+        return await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, b64urlBytes(m[3]), new TextEncoder().encode(`${m[1]}.${m[2]}`));
+    } catch {
+        return false;
+    }
+}
+
 const STATE_FIELDS = ['status', 'done', 'failed', 'failedKeys', 'batches', 'freeDay', 'costUsd', 'usage', 'error', 'log'];
 
 async function jobState(env, id, owner) {
@@ -307,14 +344,17 @@ async function jobState(env, id, owner) {
     return obj ? obj.json() : null;
 }
 
+// owner '' (the runner): every owner's jobs
 async function jobsList(req, env, owner) {
     const out = [];
     let cursor;
+    const prefix = owner ? `j/s/${owner}/` : 'j/s/';
     do {
-        const page = await env.AUDIO.list({ prefix: `j/s/${owner}/`, cursor, limit: 1000 });
+        const page = await env.AUDIO.list({ prefix, cursor, limit: 1000 });
         for (const o of page.objects) {
-            const st = await jobState(env, o.key.slice(`j/s/${owner}/`.length), owner);
-            if (st) out.push(st);
+            const [, , own, id] = o.key.split('/');
+            const st = id && await jobState(env, id, own);
+            if (st) out.push({ ...st, owner: own });
         }
         cursor = page.truncated ? page.cursor : null;
     } while (cursor);
@@ -332,6 +372,8 @@ async function jobCreate(req, env, owner) {
     for (const it of d.items) {
         if (!/^[0-9a-f]{40}$/.test(it?.key || '') || !it.text || !it.vk || !it.req) return json(req, { error: 'bad item' }, 400);
     }
+    // The key that pays for the narration is the one the job was filed with
+    d.apiKey = req.headers.get('X-Rz-Key');
     const id = crypto.randomUUID().replace(/-/g, '').slice(0, 20);
     const now = Date.now();
     const state = {
@@ -340,7 +382,7 @@ async function jobCreate(req, env, owner) {
         total: d.items.length, chars: d.items.reduce((n, it) => n + String(it.text).length, 0),
         status: 'queued', done: 0, failed: 0, batches: [], costUsd: 0, error: '', log: '',
     };
-    await env.AUDIO.put(`j/b/${owner}/${id}`, body, { httpMetadata: { contentType: 'application/json' } });
+    await env.AUDIO.put(`j/b/${owner}/${id}`, JSON.stringify(d), { httpMetadata: { contentType: 'application/json' } });
     await env.AUDIO.put(`j/s/${owner}/${id}`, JSON.stringify(state), { httpMetadata: { contentType: 'application/json' } });
     return json(req, state);
 }
@@ -358,10 +400,12 @@ async function jobUpdate(req, env, id, owner) {
 
 async function jobs(req, env, id, sub) {
     if (!env.AUDIO) return json(req, { error: 'Сървърът няма хранилище (R2).' }, 503);
-    const owner = await studioOwner(req);
-    if (!owner) return json(req, { error: 'Нужен е Google API ключ.' }, 403);
+    const runner = await isRunner(req);
+    const owner = runner ? (new URL(req.url).searchParams.get('o') || '').replace(/[^0-9a-f]/g, '') : await studioOwner(req);
+    if (!runner && !owner) return json(req, { error: 'Нужен е Google API ключ.' }, 403);
     if (!id && req.method === 'GET') return jobsList(req, env, owner);
-    if (!id && req.method === 'POST') return jobCreate(req, env, owner);
+    if (!id && req.method === 'POST') return runner ? json(req, { error: 'method' }, 405) : jobCreate(req, env, owner);
+    if (!owner) return json(req, { error: 'owner' }, 400);
     if (id && sub === '/book' && req.method === 'GET') {
         const obj = await env.AUDIO.get(`j/b/${owner}/${id}`);
         if (!obj) return json(req, { error: 'not found' }, 404);

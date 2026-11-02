@@ -11,8 +11,10 @@
 //           billing); a few dozen passages a day, so a book takes days, but costs 0 $
 //   cloud — Google HD (Chirp 3 HD) inside the free 1M characters a month
 //
-// Env: GEMINI_API_KEY (the repo secret the app is built with; it is also the owner id of
-//      the queue — no other secret is needed), GEMINI_FREE_KEY, GOOGLE_TTS_KEY,
+// No secrets: the runner proves itself to the worker with the OIDC token GitHub issues to
+// this workflow (permissions: id-token: write), and every job carries the key that pays
+// for it (the one the app sent it with). Optional env fallbacks: GEMINI_API_KEY,
+//      GEMINI_FREE_KEY, GOOGLE_TTS_KEY,
 //      LIBRARY_API (default: from js/config.js), MAX_MINUTES (default 300),
 //      CLOUD_FREE_CHARS (default 700000 a month; 0 = no cap)
 
@@ -26,7 +28,8 @@ const MAX_MS = (Number(process.env.MAX_MINUTES) || 300) * 60_000;
 const timeLeft = () => MAX_MS - (Date.now() - started);
 const API = (process.env.LIBRARY_API || readFileSync(new URL('../js/config.js', import.meta.url), 'utf8')
     .match(/LIBRARY_API\s*=\s*'([^']+)'/)?.[1] || '').replace(/\/$/, '');
-const KEY = process.env.GEMINI_API_KEY || '';
+const ENV_KEY = process.env.GEMINI_API_KEY || '';
+let KEY = ENV_KEY; // set per job: the key the job was filed with
 const TTS_KEY = process.env.GOOGLE_TTS_KEY || KEY;
 // 700k leaves room in Google's free 1M a month for listening live with Google HD
 const CLOUD_CAP = process.env.CLOUD_FREE_CHARS === undefined ? 700_000 : Number(process.env.CLOUD_FREE_CHARS);
@@ -39,16 +42,27 @@ const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
 // ---------- worker ----------
 
+let OIDC = '';
+async function oidcToken() {
+    const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL, tok = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+    if (!url || !tok) return '';
+    const r = await fetch(`${url}&audience=razkazvach-studio`, { headers: { Authorization: `bearer ${tok}` } });
+    return r.ok ? (await r.json()).value || '' : '';
+}
+
 async function api(path, opts = {}) {
+    // GitHub's tokens live a few minutes: take a fresh one now and then
+    if (!OIDC || Date.now() - (api.at || 0) > 4 * 60_000) { OIDC = await oidcToken() || OIDC; api.at = Date.now(); }
     const r = await fetch(API + path, {
         ...opts,
-        headers: { 'X-Rz-Key': KEY, ...(opts.body && typeof opts.body === 'string' ? { 'Content-Type': 'application/json' } : {}), ...opts.headers },
+        headers: { ...(OIDC ? { Authorization: `Bearer ${OIDC}` } : { 'X-Rz-Key': KEY }), ...(opts.body && typeof opts.body === 'string' ? { 'Content-Type': 'application/json' } : {}), ...opts.headers },
     });
     if (!r.ok) throw new Error(`${opts.method || 'GET'} ${path}: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`);
     return r.json();
 }
 
-const saveState = (job, patch) => api(`/jobs/${job.id}`, { method: 'PUT', body: JSON.stringify(patch) }).then((s) => Object.assign(job, s));
+const ownerQ = (job) => (job.owner ? `?o=${job.owner}` : '');
+const saveState = (job, patch) => api(`/jobs/${job.id}${ownerQ(job)}`, { method: 'PUT', body: JSON.stringify(patch) }).then((s) => Object.assign(job, s));
 
 async function onServer(key) {
     for (let i = 0; i < 3; i++) {
@@ -297,7 +311,10 @@ async function runCloud(job, book, missing, usedThisMonth) {
 // ---------- main ----------
 
 async function main() {
-    if (!API || !KEY) { log('LIBRARY_API or GEMINI_API_KEY missing — nothing to do'); return; }
+    if (!API) { log('LIBRARY_API missing — nothing to do'); return; }
+    OIDC = await oidcToken();
+    api.at = Date.now();
+    if (!OIDC && !KEY) { log('no OIDC token and no GEMINI_API_KEY — nothing to do'); return; }
     const { jobs } = await api('/jobs');
     const open = jobs.filter((j) => !['done', 'cancelled'].includes(j.status));
     log(`${open.length} open job(s)`);
@@ -306,7 +323,9 @@ async function main() {
         if (timeLeft() < 120_000) break;
         log(`job ${job.id}: ${job.title} [${job.engine}/${job.mode}]`);
         try {
-            const book = await api(`/jobs/${job.id}/book`);
+            const book = await api(`/jobs/${job.id}/book${ownerQ(job)}`);
+            KEY = book.apiKey || ENV_KEY;
+            if (!KEY) { await saveState(job, { error: 'Задачата няма ключ — изпратете я наново от приложението.' }); continue; }
             if (job.engine === 'gemini' && job.batches?.length) await collectBatches(job, book);
             const failed = new Set(job.failedKeys || []);
             const missing = [];
