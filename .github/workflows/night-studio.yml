@@ -1,8 +1,8 @@
 name: Night studio (whole books narrated on the server)
 
 # Narrates the books queued from the app ("⋯ → Озвучи цялата книга на сървъра") while
-# the phone is off. Uses only the existing secret GEMINI_API_KEY (the key the app is
-# built with): it pays for the narration and identifies the owner's queue on the worker.
+# the phone is off. No secrets: the worker trusts this workflow through the OIDC token
+# GitHub signs for every run, and each book carries the key that pays for it.
 on:
   schedule:
     - cron: '17 * * * *'
@@ -14,38 +14,23 @@ concurrency:
 
 permissions:
   contents: read
+  id-token: write   # the OIDC token the worker checks
 
 jobs:
   narrate:
     runs-on: ubuntu-latest
     timeout-minutes: 330
     steps:
-      - name: Check the studio is set up
-        id: creds
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          if [ -z "$GEMINI_API_KEY" ]; then
-            echo "::notice::Няма secret GEMINI_API_KEY — нощното студио не може да работи."
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "ok=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - uses: actions/checkout@v4
-        if: steps.creds.outputs.ok == 'true'
 
       - uses: actions/setup-node@v4
-        if: steps.creds.outputs.ok == 'true'
         with:
           node-version: '22'
 
       - name: ffmpeg
-        if: steps.creds.outputs.ok == 'true'
         run: command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
 
       - name: Narrate
-        if: steps.creds.outputs.ok == 'true'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_FREE_KEY: ${{ secrets.GEMINI_FREE_KEY }}
