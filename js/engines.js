@@ -213,13 +213,11 @@ export async function cloudVoices(apiKey, lang) {
 // melody: every paragraph must end like a sentence (a heading or a list line without a
 // full stop runs into the next one with a "continuing" tone), a dialogue dash at the
 // start of a line is spoken as a sound, and words in capitals are spelled out.
-// Paragraph breaks become explicit pauses through Chirp's markup ([pause]).
 function prepareParagraph(p) {
     let t = p.trim()
         .replace(/^[—–-]\s*/, '')                    // dialogue dash at the start of a line
         .replace(/\s+[—–]\s+/g, ' — ')               // one kind of dash inside the line
-        .replace(/\.{3,}/g, '…')
-        .replace(/[[\]]/g, '');                      // brackets would be read as markup
+        .replace(/\.{3,}/g, '…');
     // A heading in capitals ("ГЛАВА ПЪРВА") is spoken letter by letter; abbreviations stay
     if (/\p{Lu}{2,}/u.test(t) && !/\p{Ll}/u.test(t) && /\p{Lu}{2,}\s+\p{Lu}{2,}/u.test(t)) {
         t = t.toLowerCase().replace(/^\P{L}*\p{L}/u, (c) => c.toUpperCase());
@@ -228,39 +226,25 @@ function prepareParagraph(p) {
     return t;
 }
 
-const MARKUP_FLAG = 'rz_chirp_markup';
-const MAX_INPUT_BYTES = 4900; // Google's limit is 5000 bytes per request
-
-export function cloudRequestBody({ text, voice, locale, markup = null }) {
-    const paras = String(text).split(/\n{2,}/).map(prepareParagraph).filter(Boolean);
-    let useMarkup = markup ?? (/Chirp3-HD/.test(voice) && localStorage.getItem(MARKUP_FLAG) !== 'off');
-    let input = useMarkup ? { markup: paras.join(' [pause] ') } : { text: paras.join('\n\n') };
-    if (useMarkup && new TextEncoder().encode(input.markup).length > MAX_INPUT_BYTES) {
-        useMarkup = false;
-        input = { text: paras.join('\n\n') };
-    }
+// The whole passage goes as ONE continuous text. Chirp splits a request at pause tags
+// and line breaks and renders each piece on its own, so the voice audibly changes
+// timbre and energy at every paragraph; joined into one flow it keeps one voice, and
+// the full stop that ends each paragraph still gives a natural pause.
+export function cloudRequestBody({ text, voice, locale }) {
+    const paras = String(text).split(/\n+/).map(prepareParagraph).filter(Boolean);
     return {
-        input,
+        input: { text: paras.join(' ') },
         voice: { languageCode: locale, name: voice },
         audioConfig: { audioEncoding: cloudAudioFormat.enc },
     };
 }
 
 export async function cloudSynthesize({ apiKey, text, voice, locale, signal }) {
-    const send = (markup) => withRetry(() => fetchJson(`${CLOUD_BASE}/text:synthesize?key=${encodeURIComponent(apiKey)}`, {
+    const data = await withRetry(() => fetchJson(`${CLOUD_BASE}/text:synthesize?key=${encodeURIComponent(apiKey)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(cloudRequestBody({ text, voice, locale, markup })),
+        body: JSON.stringify(cloudRequestBody({ text, voice, locale })),
     }, 60000, signal), signal, 5);
-    let data;
-    try {
-        data = await send(null);
-    } catch (e) {
-        // A voice/locale that does not take markup: remember it and send plain text
-        if (e.status !== 400 || !/Chirp3-HD/.test(voice) || localStorage.getItem(MARKUP_FLAG) === 'off') throw e;
-        localStorage.setItem(MARKUP_FLAG, 'off');
-        data = await send(false);
-    }
     if (!data?.audioContent) throw new ApiError('Не е получено аудио.', 0, true);
     return { blob: new Blob([base64ToBytes(data.audioContent)], { type: cloudAudioFormat.mime }), chars: text.length };
 }
