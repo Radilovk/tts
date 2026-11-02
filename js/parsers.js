@@ -1,7 +1,7 @@
 // Book parsers: EPUB, PDF, FB2, DOCX, TXT, Markdown, HTML.
 // Every parser returns { title, author, lang, cover: Blob|null, chapters: [{ title, paras: [string] }] }.
 
-import { normalizeSpace, detectLang } from './text.js';
+import { normalizeSpace, detectLang, NOTE_MARK } from './text.js';
 
 const JSZIP_URL = 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js';
 // Legacy build: works in older Chromium-based browsers (Opera, Huawei WebView)
@@ -99,14 +99,28 @@ const BLOCK_TAGS = new Set([
 const SKIP_TAGS = new Set(['script', 'style', 'head', 'nav', 'svg', 'math', 'img', 'image', 'audio', 'video', 'binary', 'noscript']);
 const HEADING = /^h[1-3]$/;
 
-// Walk a DOM subtree and return text blocks: [{ t, h }] (h = heading)
+// Footnotes / endnotes in HTML-based books (EPUB, FB2, HTML, DOCX→HTML)
+const NOTE_TYPE = /footnote|endnote|rearnote|\bnote\b/i;
+const NOTE_CLASS = /footnote|endnote|fnote|\bftn|^fn\d|^note[_-]?\d|^notes?$|бележк/i;
+
+function isNoteNode(n, tag) {
+    if (tag === 'aside') return true;
+    const type = `${n.getAttribute('epub:type') || ''} ${n.getAttribute('role') || ''} ${n.getAttribute('type') || ''}`;
+    if (NOTE_TYPE.test(type) && !/noteref/i.test(type)) return true;
+    const cls = (n.getAttribute('class') || '').split(/\s+/);
+    return cls.some((c) => NOTE_CLASS.test(c)) || NOTE_CLASS.test(n.getAttribute('id') || '');
+}
+
+// Walk a DOM subtree and return text blocks: [{ t, h }] (h = heading).
+// Note blocks carry NOTE_MARK: shown in the text, never read aloud.
 function extractBlocks(root, opts = {}) {
     const out = [];
     let buf = '';
     let isHeading = false;
+    let inNote = 0;
     const flush = () => {
         const t = normalizeSpace(buf);
-        if (t) out.push({ t, h: isHeading });
+        if (t) out.push({ t: inNote ? NOTE_MARK + t : t, h: isHeading && !inNote });
         buf = '';
     };
     (function walk(node) {
@@ -117,15 +131,24 @@ function extractBlocks(root, opts = {}) {
             if (SKIP_TAGS.has(tag)) continue;
             if (opts.skip && opts.skip(n, tag)) continue;
             if (tag === 'br') { buf += ' '; continue; }
-            // Footnote reference markers like <sup><a>12</a></sup>
-            if ((tag === 'sup' || tag === 'a') && /^\s*[\[(]?\d{1,3}[\])]?\s*$/.test(n.textContent) &&
-                (tag === 'a' || n.querySelector('a') || n.getAttribute('epub:type') === 'noteref')) continue;
-            if (BLOCK_TAGS.has(tag)) {
+            // Footnote reference markers like <sup><a>12</a></sup>: kept in the text as "[12]"
+            // (the reader sees where a note belongs), removed from what is read aloud
+            const ref = n.textContent.match(/^\s*[\[(]?(\d{1,3}|\*{1,3})[\])]?\s*$/);
+            if ((tag === 'sup' || tag === 'a') && ref &&
+                (tag === 'a' || n.querySelector('a') || /noteref/.test(n.getAttribute('epub:type') || ''))) {
+                if (!inNote) buf += `[${ref[1]}]`;
+                else buf += ref[1] + ' ';
+                continue;
+            }
+            const note = isNoteNode(n, tag);
+            if (BLOCK_TAGS.has(tag) || note) {
                 flush();
                 const wasHeading = isHeading;
                 if (HEADING.test(tag) || tag === 'title') isHeading = true;
+                if (note) inNote++;
                 walk(n);
                 flush();
+                if (note) inNote--;
                 isHeading = wasHeading;
             } else {
                 walk(n);
@@ -276,9 +299,7 @@ async function parseEpub(file, onProgress) {
         if (!f) continue;
         const doc = parser.parseFromString(await f.async('string'), 'text/html');
         if (!doc.body) continue;
-        const blocks = extractBlocks(doc.body, {
-            skip: (n) => /footnote|endnote|rearnote|aside/.test(n.getAttribute('epub:type') || ''),
-        });
+        const blocks = extractBlocks(doc.body);
         if (!blocks.length) continue;
         const tocTitle = tocTitles[spine[i].href];
         let title = tocTitle || '';
@@ -329,6 +350,7 @@ async function parsePdf(file, onProgress) {
                 cur = { text: '', y, x, h, right: x };
             }
             cur.text += it.str;
+            if (it.str.trim()) cur.big = Math.max(cur.big || 0, h);
             cur.right = Math.max(cur.right, x + (it.width || 0));
             if (it.hasEOL) { if (cur.text.trim()) lines.push(cur); cur = null; }
         }
@@ -359,14 +381,43 @@ async function parsePdf(file, onProgress) {
     const paras = []; // { t, page, heading }
     let buf = '';
     let bufPage = 0;
+    let heldNotes = []; // notes of a page whose last paragraph goes on to the next page
     const flush = (heading = false) => {
         const t = normalizeSpace(buf);
         if (t) paras.push({ t, page: bufPage, heading });
         buf = '';
+        for (const n of heldNotes) paras.push({ t: NOTE_MARK + normalizeSpace(n.t), page: n.page, heading: false });
+        heldNotes = [];
     };
+    // Footnotes at the bottom of a page: a block of smaller type that starts with a
+    // reference mark ("1", "*", "¹"). Kept as notes: shown in the text, never read.
+    const NOTE_LEAD = /^\s*(?:\d{1,3}|[¹²³⁴⁵⁶⁷⁸⁹⁰]+|\*{1,3}|\[\d{1,3}\])(?=[\s.)\p{L}„"«(])/u;
+    const splitNotes = (clean) => {
+        if (clean.length < 4) return { body: clean, notes: [] };
+        const sizes = clean.map((l) => l.big || l.h).sort((a, b) => a - b);
+        const bodyH = sizes[Math.floor(sizes.length / 2)];
+        let k = clean.length;
+        while (k > 0 && (clean[k - 1].big || clean[k - 1].h) < bodyH * 0.92) k--;
+        // The small block must start with a mark; search inside it for the first mark
+        let start = -1;
+        for (let i = k; i < clean.length; i++) if (NOTE_LEAD.test(clean[i].text)) { start = i; break; }
+        if (start < 0 || start < clean.length * 0.3) return { body: clean, notes: [] };
+        const notes = [];
+        for (const l of clean.slice(start)) {
+            const t = l.text.trim();
+            if (!notes.length || NOTE_LEAD.test(t)) notes.push(t);
+            else notes[notes.length - 1] += (/[\p{L}]-$/u.test(notes[notes.length - 1]) ? '' : ' ') + t;
+        }
+        return { body: clean.slice(0, start), notes };
+    };
+
     pages.forEach((lines, pi) => {
-        const clean = lines.filter((l, i) => !isNoise(l, i, lines));
-        if (!clean.length) return;
+        const split = splitNotes(lines.filter((l, i) => !isNoise(l, i, lines)));
+        const clean = split.body;
+        if (!clean.length) {
+            heldNotes.push(...split.notes.map((t) => ({ t, page: pi })));
+            return;
+        }
         const left = Math.min(...clean.map((l) => l.x));
         const right = Math.max(...clean.map((l) => l.right));
         const width = right - left || 1;
@@ -400,6 +451,9 @@ async function parsePdf(file, onProgress) {
             if (/[\p{L}]-$/u.test(buf) && /^\p{Ll}/u.test(t)) buf = buf.slice(0, -1) + t;
             else buf += (buf ? ' ' : '') + t;
         });
+        // The page's notes go right after the paragraph they belong to, once it ends
+        heldNotes.push(...split.notes.map((t) => ({ t, page: pi })));
+        if (heldNotes.length && /[.!?…"»”]$/.test(buf.trim())) flush();
     });
     flush();
 

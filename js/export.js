@@ -16,11 +16,12 @@ export function safeFileName(s) {
 }
 
 // How much of the selection is already narrated (free) and how much is missing.
-export async function exportPlan(player, chapters) {
+// st: the voice settings of the file (always the Gemini narrator, see main.js)
+export async function exportPlan(player, chapters, st = null) {
     let total = 0, missingChars = 0, chunks = 0, missing = 0;
     const shared = !!player.book.shared || !!player.book.factory;
     for (const c of chapters) {
-        for (const spec of await player.chapterSpecs(c)) {
+        for (const spec of await player.chapterSpecs(c, st)) {
             chunks++;
             total += spec.chars;
             if (await db.audioHas(spec.key)) continue;
@@ -42,13 +43,13 @@ async function decodeTo24k(blob) {
 }
 
 // Build one Ogg/Opus file per chapter. onProgress(fraction, label)
-export async function exportChapters(player, chapters, { onProgress, isCancelled } = {}) {
+export async function exportChapters(player, chapters, { onProgress, isCancelled, st = null } = {}) {
     if (!(await OpusWriter.supported(RATE))) {
         throw new Error('Този браузър не може да записва аудио файлове. Опитайте в Chrome или в Android приложението.');
     }
     const book = player.book;
     const allSpecs = [];
-    for (const c of chapters) allSpecs.push(...(await player.chapterSpecs(c)).map((s) => ({ ...s, c })));
+    for (const c of chapters) allSpecs.push(...(await player.chapterSpecs(c, st)).map((s) => ({ ...s, c })));
     const width = String(player.chapters.length).length;
     const files = [];
     let done = 0;
