@@ -10,6 +10,7 @@ import { pendingKeys } from './batch.js';
 import { sharedGetAudio, sharedPutAudio } from './shared.js';
 import { recordUsage, monthlyGeminiUsd, cloudReserve, cloudRelease, reportCloudUsage } from './usage.js';
 import { Native, NativeAudio } from './native.js';
+import { sentenceMarks } from './align.js';
 
 const CHUNK_CHARS = { cloud: 1400, gemini: 1500 };
 const FAST_START_CHARS = 320;
@@ -263,6 +264,9 @@ export class Player extends EventTarget {
         const t = this.audio.currentTime + seconds;
         const dur = this.current.dur || this.audio.duration || 0;
         if (t >= 0 && t < dur) { this.audio.currentTime = t; return; }
+        // Paused, into another passage: move the reading place by sentences (playing
+        // passages are only loaded while playing)
+        if (!this.playing) return this._skipSentences(Math.round(seconds / 4));
         if (t < 0) {
             const prev = this.history[this.history.length - 1];
             if (prev) {
@@ -561,7 +565,7 @@ export class Player extends EventTarget {
                 if (session !== this.session) return;
                 if (piece && (this.queue.has(piece.key) || await db.audioHas(piece.key))) {
                     if (session !== this.session) return;
-                    return this._playSpec(piece, session, { offsetFrac: charLen(m, x, s) / piece.chars });
+                    return this._playSpec(piece, session, { sentence: s, offsetFrac: charLen(m, x, s) / piece.chars });
                 }
             }
         }
@@ -608,13 +612,25 @@ export class Player extends EventTarget {
                 return badAudio(e);
             }
             if (session !== this.session || !this.playing) { this.loading = false; this._emit('state'); return; }
+            // Android's own length of the passage is exact
+            if (this.audio.duration > 0) { spec.dur = this.audio.duration; if (!rec.dur) rec.dur = spec.dur; }
         } else {
             this._url = URL.createObjectURL(rec.blob);
             this.audio.src = this._url;
         }
         this.audio.playbackRate = this.rate;
+        // Starting inside a passage (tap on a sentence, resume): at the sentence's real
+        // start in the audio when it is known, otherwise by characters
+        if (opts.sentence != null) {
+            const marks = await this._marksFor(spec, rec, 2500);
+            if (session !== this.session || !this.playing) return;
+            const t = marks?.[opts.sentence - spec.s0];
+            if (t != null) { opts.offset = t; opts.offsetFrac = 0; }
+        } else {
+            this._marksFor(spec, rec);
+        }
         if (opts.offsetFrac) opts.offset = opts.offsetFrac * rec.dur;
-        const startAt = opts.offset ? Math.min(opts.offset, rec.dur - 0.5)
+        const startAt = opts.offset ? Math.min(opts.offset, (rec.dur || spec.dur || 1e9) - 0.5)
             : opts.offsetFromEnd ? Math.max(0, rec.dur - opts.offsetFromEnd) : 0;
         // play() can be refused for a moment (audio focus, the WebView waking up):
         // try again before giving up instead of stopping the book
@@ -644,6 +660,38 @@ export class Player extends EventTarget {
         this._prefetchedFor = null;
     }
 
+    // Start time of every sentence of a passage in its audio (see align.js), worked out
+    // once and kept with the cached audio. Sentences that are not read (notes) start
+    // where the next spoken one starts. wait: ms to wait for it, otherwise in background.
+    _marksFor(spec, rec, wait = 0) {
+        const n = spec.s1 - spec.s0;
+        if (rec.marks?.length === n) { spec.marks = rec.marks; return Promise.resolve(rec.marks); }
+        this._marking = this._marking || new Map();
+        let p = this._marking.get(spec.key);
+        if (!p) {
+            const m = this.model(spec.c);
+            const spoken = [];
+            for (let i = spec.s0; i < spec.s1; i++) if (m.sentences[i].speak) spoken.push(i);
+            p = (async () => {
+                const t = await sentenceMarks(rec.blob, spoken.map((i) => m.sentences[i].speak.length));
+                if (!t || t.length !== spoken.length) return null;
+                const marks = new Array(n);
+                let k = spoken.length - 1;
+                for (let i = spec.s1 - 1; i >= spec.s0; i--) {
+                    if (k >= 0 && spoken[k] === i) { marks[i - spec.s0] = t[k]; k--; }
+                    else marks[i - spec.s0] = i + 1 < spec.s1 ? marks[i + 1 - spec.s0] : (rec.dur || t[t.length - 1]);
+                }
+                rec.marks = marks;
+                db.audioPut(rec).catch(() => {});
+                return marks;
+            })().catch(() => null).finally(() => this._marking.delete(spec.key));
+            this._marking.set(spec.key, p);
+        }
+        p.then((marks) => { if (marks) spec.marks = marks; });
+        if (!wait) return p;
+        return Promise.race([p, new Promise((r) => setTimeout(() => r(null), wait))]);
+    }
+
     // Just-in-time: synthesize the next chunk only when the current one is about
     // to end (with a margin based on how long synthesis really takes), so pausing
     // or stopping never leaves paid-for audio nobody asked for.
@@ -657,7 +705,7 @@ export class Player extends EventTarget {
         for (let i = 0; i < depth; i++) {
             const next = await this._specAfter(cur);
             if (!next || session !== this.session) return;
-            try { await this._ensure(next, { remoteOnly: remoteOnly && i > 0 }); } catch { return; }
+            try { this._marksFor(next, await this._ensure(next, { remoteOnly: remoteOnly && i > 0 })); } catch { return; }
             if (session !== this.session) return;
             cur = next;
         }
@@ -680,15 +728,21 @@ export class Player extends EventTarget {
             if (!this.current || !this.playing) return;
             const dur = this.current.dur || a.duration;
             if (!dur) return;
-            // Estimate the sentence being spoken from elapsed time vs character length
-            const frac = Math.min(1, a.currentTime / dur);
             const m = this.model(this.current.c);
-            const target = frac * this.current.chars;
-            let acc = 0, s = this.current.s0;
-            for (let i = this.current.s0; i < this.current.s1; i++) {
-                acc += m.sentences[i].speak.length + 1;
-                s = i;
-                if (acc >= target) break;
+            let s = this.current.s0;
+            const marks = this.current.marks;
+            if (marks) {
+                // The real start of each sentence, found in the audio (align.js)
+                for (let i = 0; i < marks.length; i++) if (marks[i] <= a.currentTime + 0.05) s = this.current.s0 + i;
+            } else {
+                // Until then: elapsed time vs character length
+                const target = Math.min(1, a.currentTime / dur) * this.current.chars;
+                let acc = 0;
+                for (let i = this.current.s0; i < this.current.s1; i++) {
+                    acc += m.sentences[i].speak.length + 1;
+                    s = i;
+                    if (acc >= target) break;
+                }
             }
             if (s !== this.pos.s || this.current.c !== this.pos.c) {
                 this.pos = { c: this.current.c, s };
@@ -702,36 +756,45 @@ export class Player extends EventTarget {
             }
             this._emit('time');
         });
-        a.addEventListener('ended', async () => {
+        a.addEventListener('ended', () => {
             if (unlockClip() || !this.playing || !this.current) return;
-            const done = this.current;
-            this.history.push(done);
-            if (this.history.length > 30) this.history.shift();
-            const session = ++this.session;
-            let next;
-            const slow = setTimeout(() => { if (session === this.session) { this.loading = true; this._emit('state'); } }, 400);
-            try { next = await this._specAfter(done); } catch (e) { clearTimeout(slow); if (session === this.session) this._fail(e); return; }
-            clearTimeout(slow);
-            if (session !== this.session) return;
-            if (!next) return this._finished();
-            if (next.c !== done.c) {
-                this._emit('chapter');
-                if (this.sleepAtChapterEnd) {
-                    this.sleepAtChapterEnd = false;
-                    this.pos = { c: next.c, s: 0 };
-                    this.pause();
-                    this._emit('position');
-                    this._emit('sleep');
-                    return;
-                }
-            }
-            this.pos = { c: next.c, s: next.s0 };
-            this._emit('position');
-            this._emit('save');
-            this._playSpec(next, session);
+            this._advance();
         });
         // The silent clip used to unlock audio on the first tap is not playback
         const unlockClip = () => (a.currentSrc || a.src || '').startsWith('data:');
+        this._bindAudioState(a, unlockClip);
+    }
+
+    // The passage has been heard to the end: go on with the next one.
+    async _advance() {
+        const done = this.current;
+        this.history.push(done);
+        if (this.history.length > 30) this.history.shift();
+        const session = ++this.session;
+        let next;
+        const slow = setTimeout(() => { if (session === this.session) { this.loading = true; this._emit('state'); } }, 400);
+        try { next = await this._specAfter(done); } catch (e) { clearTimeout(slow); if (session === this.session) this._fail(e); return; }
+        clearTimeout(slow);
+        if (session !== this.session) return;
+        if (!next) return this._finished();
+        if (next.c !== done.c) {
+            this._emit('chapter');
+            if (this.sleepAtChapterEnd) {
+                this.sleepAtChapterEnd = false;
+                this.pos = { c: next.c, s: 0 };
+                this.pause();
+                this._emit('position');
+                this._emit('sleep');
+                return;
+            }
+        }
+        this.pos = { c: next.c, s: next.s0 };
+        this._emit('position');
+        this._emit('save');
+        this._playSpec(next, session);
+    }
+
+    _bindAudioState(a, unlockClip) {
         // The 'pause' event comes just before 'ended' at the end of every passage. With
         // MP3 the reported duration is an estimate, so a.ended can still be false then;
         // treating that as "paused by the user" stopped the book at a join.
@@ -788,8 +851,10 @@ export class Player extends EventTarget {
             if (a.paused || a.ended || t === lastT) still++;
             else still = 0;
             lastT = t;
-            // ~6 s standing still while it should play (well past any join between passages)
-            if (still >= 3 && Date.now() - (this._started || 0) > 4000) {
+            // Only a clear stall: 10 s ended/paused while it should play, 16 s with the
+            // clock standing still. A join between passages takes well under a second.
+            const limit = a.paused || a.ended ? 5 : 8;
+            if (still >= limit && Date.now() - (this._started || 0) > 4000) {
                 still = 0;
                 this._recover(a.ended ? 'следващият откъс не тръгна' : a.paused ? 'аудиото спря без пауза от вас' : 'аудиото замръзна');
             }
@@ -799,13 +864,20 @@ export class Player extends EventTarget {
     _recover(why) {
         if (Date.now() - (this._lastRecover || 0) < 8000) return;
         this._lastRecover = Date.now();
-        const { c, s } = this.pos;
-        diag(`възстановяване: ${why} (глава ${c + 1}, изречение ${s + 1})`);
+        const a = this.audio;
+        const spec = this.current;
+        const t = a.currentTime || 0;
+        const dur = spec?.dur || a.duration || 0;
+        diag(`възстановяване: ${why} (откъс ${spec ? `гл. ${spec.c + 1}, изр. ${spec.s0 + 1}–${spec.s1}` : '—'}, ${t.toFixed(1)}/${dur.toFixed(1)} сек., ${a.paused ? 'пауза' : 'свири'}${a.ended ? ', край' : ''}${a.isNative ? ', Android' : ''})`);
         // loading first: the 'pause' this causes must not count as a pause by the listener
         this.loading = true;
         this._emit('state');
-        this.audio.pause();
-        this._startAt(c, s);
+        a.pause();
+        if (!spec) { this.loading = false; this._startAt(this.pos.c, this.pos.s); return; }
+        // Continue exactly where the sound stopped — never from the estimated sentence,
+        // which could be ahead of the voice and skip text
+        if (a.ended || (dur && t >= dur - 0.3)) { this.loading = false; this._advance(); return; }
+        this._playSpec(spec, ++this.session, { offset: Math.max(0.01, t - 0.5) });
     }
 
     _releaseUrl() {
@@ -1044,7 +1116,11 @@ function blobDuration(blob) {
     return new Promise((resolve) => {
         const a = new Audio();
         const url = URL.createObjectURL(blob);
-        const done = (d) => { URL.revokeObjectURL(url); resolve(d); };
+        let finished = false;
+        const done = (d) => { if (finished) return; finished = true; clearTimeout(timer); URL.revokeObjectURL(url); a.removeAttribute('src'); resolve(d); };
+        // Never wait forever: a passage without a known length still plays (and the
+        // player takes the length from the playing audio)
+        const timer = setTimeout(() => done(0), 5000);
         a.preload = 'metadata';
         a.onloadedmetadata = () => {
             if (a.duration === Infinity || isNaN(a.duration)) {

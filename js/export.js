@@ -5,6 +5,7 @@
 import * as db from './db.js';
 import { OpusWriter } from './opus.js';
 import { sharedHasAudio } from './shared.js';
+import { loadScript, JSZIP_URL } from './parsers.js';
 
 const RATE = 24000;
 const CHAPTER_GAP = 0.8; // seconds of silence at the start of each chapter file
@@ -81,13 +82,7 @@ export async function exportChapters(player, chapters, { onProgress, isCancelled
 // Single chapter → the .ogg itself; several → a ZIP (stored, audio is already compressed)
 export async function packageFiles(book, files) {
     if (files.length === 1) return { name: `${safeFileName(book.title)} - ${files[0].name}`, blob: files[0].blob };
-    const JSZip = window.JSZip || await new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js';
-        s.onload = () => resolve(window.JSZip);
-        s.onerror = () => reject(new Error('Няма връзка за създаване на архива.'));
-        document.head.appendChild(s);
-    });
+    const JSZip = await loadScript(JSZIP_URL, 'JSZip');
     const zip = new JSZip();
     const folder = zip.folder(safeFileName(book.title));
     for (const f of files) folder.file(f.name, f.blob);

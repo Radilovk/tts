@@ -3,10 +3,11 @@
 
 import { normalizeSpace, detectLang, NOTE_MARK } from './text.js';
 
-const JSZIP_URL = 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js';
-// Legacy build: works in older Chromium-based browsers (Opera, Huawei WebView)
-const PDFJS_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.2.67/legacy/build/pdf.min.mjs';
-const PDFJS_WORKER = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.2.67/legacy/build/pdf.worker.min.mjs';
+// Bundled with the app (js/vendor), so books open without internet — in the Android app
+// too. JSZip 3.10.1; pdf.js 4.2.67 legacy build (works in older Chromium-based browsers).
+export const JSZIP_URL = new URL('./vendor/jszip.min.js', import.meta.url).href;
+const PDFJS_URL = new URL('./vendor/pdf.min.mjs', import.meta.url).href;
+const PDFJS_WORKER = new URL('./vendor/pdf.worker.min.mjs', import.meta.url).href;
 
 if (typeof Promise.withResolvers !== 'function') {
     Promise.withResolvers = function () {
@@ -60,13 +61,13 @@ export function bookFromHtmlChapters({ title, author, chapters }) {
 
 // ---------- helpers ----------
 
-function loadScript(src, globalName) {
+export function loadScript(src, globalName) {
     if (window[globalName]) return Promise.resolve(window[globalName]);
     return new Promise((resolve, reject) => {
         const s = document.createElement('script');
         s.src = src;
         s.onload = () => resolve(window[globalName]);
-        s.onerror = () => reject(new Error('Няма връзка за зареждане на четеца на файлове.'));
+        s.onerror = () => reject(new Error('Четецът на файлове не се зареди.'));
         document.head.appendChild(s);
     });
 }
@@ -369,12 +370,18 @@ async function parsePdf(file, onProgress) {
             if (l) edgeCount[key(l.text)] = (edgeCount[key(l.text)] || 0) + 1;
         });
     });
-    const repeatLimit = Math.max(3, pages.length * 0.25);
+    // A running header/footer is on most pages; chapter headings ("Глава 1", "Глава 2"…)
+    // also repeat once the numbers are ignored, but far less often and in larger type.
+    const repeatLimit = Math.max(3, pages.length * 0.5);
+    const allH = pages.flat().map((l) => l.big || l.h).sort((a, b) => a - b);
+    const bodySize = allH[Math.floor(allH.length / 2)] || 10;
     const isNoise = (l, idx, lines) => {
         const t = l.text.trim();
         if (/^[-–—\s]*\d{1,4}[-–—\s]*$/.test(t)) return true;
+        if ((l.big || l.h) > bodySize * 1.15) return false;
+        // Running headers are short (title, author, chapter name)
         const edge = idx < 2 || idx >= lines.length - 2;
-        return edge && edgeCount[key(t)] >= repeatLimit;
+        return edge && t.length <= 70 && edgeCount[key(t)] >= repeatLimit;
     };
 
     // Join lines into paragraphs
