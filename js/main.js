@@ -25,7 +25,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.11';
+export const APP_VERSION = '2.12';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
@@ -763,6 +763,8 @@ function updatePlayerUI() {
 
 function updatePlayState() {
     const playing = player.playing;
+    // "↻ Наново" only where there is narrated audio to redo
+    $('#chipRedo').classList.toggle('hidden', settings.engine === 'device' || !player.current);
     const loading = player.loading && playing;
     for (const btn of [$('#btnPlay'), $('#miniPlay')]) {
         btn.querySelector('use').setAttribute('href', playing ? '#i-pause' : '#i-play');
@@ -1081,6 +1083,27 @@ function updateSleepChip() {
 }
 
 // ---------- Book menu ----------
+
+// A passage that sounded wrong is narrated again (a new performance)
+function openRedo() {
+    if (!player.current) return;
+    const hasPrev = player.history.length > 0;
+    openSheet('Прочети откъса наново', (body) => {
+        body.innerHTML = `
+            <p class="hint" style="margin:0 0 10px">Ако гласът е пропуснал думи, засъскал или прочел нещо странно — откъсът се прави отново и се пуска от началото си.${settings.engine === 'cloud' ? ' Използва безплатни знаци на Google HD.' : ''}</p>
+            <div class="group list">
+                <button class="list-item" data-r="current"><span class="grow">Текущия откъс<small>Този, който звучи сега</small></span></button>
+                ${hasPrev ? '<button class="list-item" data-r="previous"><span class="grow">Предишния откъс<small>Ако грешката беше малко преди това</small></span></button>' : ''}
+            </div>`;
+        body.onclick = async (e) => {
+            const b = e.target.closest('[data-r]');
+            if (!b) return;
+            closeSheet();
+            const ok = await player.redoPassage(b.dataset.r);
+            toast(ok ? 'Чета откъса наново…' : 'Няма откъс за повторение.');
+        };
+    });
+}
 
 function openBookMenu() {
     if (!currentBook) return;
@@ -1999,6 +2022,7 @@ function bindEvents() {
     $('#chipSpeed').onclick = openSpeed;
     $('#chipVoice').onclick = openSettings;
     $('#chipSleep').onclick = openSleep;
+    $('#chipRedo').onclick = openRedo;
     $('#chipText').onclick = () => {
         settings.view = settings.view === 'text' ? 'cover' : 'text';
         saveSettings();

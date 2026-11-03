@@ -360,7 +360,14 @@ export function speechExtent(pcm, rate) {
     let tail = 0;
     for (let f = Math.max(0, frames - 4); f < frames; f++) tail += e[f];
     const cutOff = loud > 0 && tail / Math.min(4, frames) > loud * 0.25;
-    return { start: first * 0.01, end: (last + 1) * 0.01, speech: Math.max(0, last + 1 - first) * 0.01, cutOff };
+    // Longest stretch inside the speech that is far quieter than the voice: silence,
+    // hiss or faint strange sounds where words should be (a sentence pause is < 1.5 s)
+    const quiet = loud * 0.12;
+    let gap = 0, run = 0;
+    for (let f = first; f <= last; f++) {
+        if (e[f] < quiet) { run++; if (run > gap) gap = run; } else run = 0;
+    }
+    return { start: first * 0.01, end: (last + 1) * 0.01, speech: Math.max(0, last + 1 - first) * 0.01, cutOff, gap: gap * 0.01 };
 }
 
 function paceList(voice) {
@@ -386,6 +393,7 @@ export function passageProblem(pcm, rate, chars, voice) {
     const x = speechExtent(pcm, rate);
     if (x.speech < 0.3) return 'няма реч';
     if (x.cutOff) return 'прекъснато насред дума';
+    if (x.gap > 1.8) return `${x.gap.toFixed(1)} сек. тишина или шум вместо глас`;
     const pace = voicePace(voice);
     if (pace) {
         const expected = chars / pace;

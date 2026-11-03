@@ -422,16 +422,17 @@ export class Player extends EventTarget {
 
     // Get (from cache or by synthesis) the audio record for a chunk.
     // remoteOnly: take it from the cache or the server, never pay for a new synthesis
+    // spec.fresh: the listener asked for it again — ignore every stored copy
     _ensure(spec, { remoteOnly = false } = {}) {
         if (this.queue.has(spec.key)) return this.queue.get(spec.key);
         const book = this.book;
         const p = (async () => {
-            const cached = await db.audioGet(spec.key);
+            const cached = spec.fresh ? null : await db.audioGet(spec.key);
             if (cached) return cached;
             const shared = !!book.shared;
             // Public-domain book: someone may already have had this part narrated.
             // A book sent to the night studio: the server has narrated it
-            if (shared || book.factory) {
+            if ((shared || book.factory) && !spec.fresh) {
                 const remote = await sharedGetAudio(spec.key);
                 if (remote) {
                     const rec = { key: spec.key, blob: remote.blob, dur: remote.dur || await blobDuration(remote.blob), chars: spec.chars, bookId: book.id };
@@ -661,6 +662,31 @@ export class Player extends EventTarget {
         this._emit('state');
         this._updateMediaSession();
         this._prefetchedFor = null;
+    }
+
+    // The listener heard a bad passage (a skipped word, noise, an odd reading): forget it
+    // and narrate it again — every request is a new performance. which: 'current' or
+    // 'previous'. Plays the new version from its beginning.
+    async redoPassage(which = 'current') {
+        const spec = which === 'previous' ? this.history[this.history.length - 1] : this.current;
+        if (!spec || this.engine === 'device') return false;
+        diag(`по ваша молба откъсът се чете наново (гл. ${spec.c + 1}, изр. ${spec.s0 + 1}–${spec.s1})`);
+        const session = ++this.session;
+        // loading first: this pause is ours, not the listener's
+        this.loading = true;
+        this._emit('state');
+        this.audio.pause();
+        this.queue.delete(spec.key);
+        this._marking?.delete(spec.key);
+        await db.del('audio', spec.key).catch(() => {});
+        if (session !== this.session) return false;
+        if (which === 'previous') this.history.pop();
+        this.playing = true;
+        this.pos = { c: spec.c, s: spec.s0 };
+        this._emit('position');
+        const fresh = { ...spec, marks: null, dur: 0, fresh: true };
+        this._playSpec(fresh, session);
+        return true;
     }
 
     // Start time of every sentence of a passage in its audio (see align.js), worked out
