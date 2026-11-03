@@ -72,6 +72,11 @@ public class RazkazvachPlugin extends Plugin {
 
     @Override
     protected void handleOnDestroy() {
+        if (narration != null) {
+            NarrationPlayer n = narration;
+            n.post(n::stop);
+            narration = null;
+        }
         if (tts != null) {
             tts.shutdown();
             tts = null;
@@ -276,6 +281,88 @@ public class RazkazvachPlugin extends Plugin {
             try { getContext().startActivity(i); } catch (Exception ignored) { }
         }
         call.resolve();
+    }
+
+    // ------------------------------------------------------- narration audio
+
+    private NarrationPlayer narration;
+
+    private NarrationPlayer narration() {
+        if (narration == null) {
+            narration = new NarrationPlayer(getContext(), (type, time, duration, detail) -> {
+                JSObject data = new JSObject();
+                data.put("type", type);
+                data.put("time", time);
+                data.put("duration", duration);
+                data.put("detail", detail);
+                notifyListeners("audio", data);
+            });
+        }
+        return narration;
+    }
+
+    /** Write a passage (base64) to the app cache and prepare it; resolves { duration }. */
+    @PluginMethod
+    public void audioLoad(PluginCall call) {
+        NarrationPlayer n = narration();
+        File f = n.nextFile();
+        try (OutputStream os = new FileOutputStream(f, false)) {
+            os.write(Base64.decode(call.getString("data", ""), Base64.DEFAULT));
+        } catch (Exception e) {
+            call.reject("Аудиото не можа да се запише: " + e.getMessage());
+            return;
+        }
+        n.post(() -> {
+            try {
+                double d = n.load(f);
+                JSObject ret = new JSObject();
+                ret.put("duration", d);
+                call.resolve(ret);
+            } catch (Exception e) {
+                call.reject("Аудиото не може да се възпроизведе: " + e.getMessage(), "NotSupportedError");
+            }
+        });
+    }
+
+    @PluginMethod
+    public void audioPlay(PluginCall call) {
+        NarrationPlayer n = narration();
+        n.post(() -> {
+            try { n.play(); call.resolve(); } catch (Exception e) { call.reject(e.getMessage(), "NotAllowedError"); }
+        });
+    }
+
+    @PluginMethod
+    public void audioPause(PluginCall call) {
+        NarrationPlayer n = narration();
+        n.post(() -> { n.pause(null); call.resolve(); });
+    }
+
+    @PluginMethod
+    public void audioSeek(PluginCall call) {
+        NarrationPlayer n = narration();
+        double t = call.getDouble("time", 0.0);
+        n.post(() -> { n.seek(t); call.resolve(); });
+    }
+
+    @PluginMethod
+    public void audioRate(PluginCall call) {
+        NarrationPlayer n = narration();
+        float r = call.getFloat("rate", 1f);
+        n.post(() -> { n.setRate(r); call.resolve(); });
+    }
+
+    @PluginMethod
+    public void audioVolume(PluginCall call) {
+        NarrationPlayer n = narration();
+        float v = call.getFloat("volume", 1f);
+        n.post(() -> { n.setVolume(v); call.resolve(); });
+    }
+
+    @PluginMethod
+    public void audioStop(PluginCall call) {
+        NarrationPlayer n = narration();
+        n.post(() -> { n.stop(); call.resolve(); });
     }
 
     // ------------------------------------------------------- playback service

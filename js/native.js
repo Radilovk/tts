@@ -46,3 +46,132 @@ export function nativeVoiceLabel(v, index) {
     parts.push(v.network ? 'онлайн' : 'офлайн');
     return parts.join(' · ');
 }
+
+// ---------- narration audio (Android MediaPlayer) ----------
+//
+// Stands in for the <audio> element in the Android app: the same properties and
+// events the player uses, but the sound comes from Android's MediaPlayer. The WebView
+// element could lose its audio output (audio focus, Bluetooth/speaker switch, screen
+// off) and keep "playing" into silence — the text moved on while nothing was heard.
+
+function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(String(r.result).slice(String(r.result).indexOf(',') + 1));
+        r.onerror = () => reject(r.error);
+        r.readAsDataURL(blob);
+    });
+}
+
+export class NativeAudio extends EventTarget {
+    constructor() {
+        super();
+        this.isNative = true;
+        this.src = '';
+        this.currentSrc = '';
+        this.paused = true;
+        this.ended = false;
+        this.duration = NaN;
+        this.error = null;
+        this.preload = 'auto';
+        this._t = 0;
+        this._rate = 1;
+        this._volume = 1;
+        this._loadId = 0;
+        Native.addListener('audio', (e) => this._onNative(e));
+    }
+
+    _onNative({ type, time, duration, detail }) {
+        if (duration > 0) this.duration = duration;
+        if (type === 'time') {
+            this._t = time;
+            this.dispatchEvent(new Event('timeupdate'));
+        } else if (type === 'play') {
+            this._t = time;
+            this.paused = false;
+            this.dispatchEvent(new Event('play'));
+        } else if (type.startsWith('pause:')) {
+            // Paused by Android: a call / another app took the sound, headphones unplugged
+            this._t = time;
+            this.paused = true;
+            this.pausedBy = type.slice(6);
+            this.dispatchEvent(new Event('pause'));
+        } else if (type === 'ended') {
+            this._t = this.duration || time;
+            this.paused = true;
+            this.ended = true;
+            this.dispatchEvent(new Event('ended'));
+        } else if (type === 'error') {
+            this.paused = true;
+            this.error = { code: 3, message: detail };
+            this.dispatchEvent(new Event('error'));
+        }
+    }
+
+    // Load a passage; resolves when Android has it ready to play.
+    async loadBlob(blob) {
+        const id = ++this._loadId;
+        this.paused = true;
+        this.ended = false;
+        this.error = null;
+        this._t = 0;
+        this.duration = NaN;
+        this.src = 'native:' + id;
+        this.currentSrc = this.src;
+        const data = await blobToBase64(blob);
+        if (id !== this._loadId) throw new DOMException('Replaced', 'AbortError');
+        try {
+            const { duration } = await Native.audioLoad({ data });
+            if (id !== this._loadId) throw new DOMException('Replaced', 'AbortError');
+            this.duration = duration;
+        } catch (e) {
+            if (e?.name === 'AbortError') throw e;
+            throw new DOMException(e?.message || 'Аудиото не може да се възпроизведе.', 'NotSupportedError');
+        }
+        this.dispatchEvent(new Event('loadedmetadata'));
+    }
+
+    async play() {
+        try {
+            await Native.audioPlay();
+        } catch (e) {
+            throw new DOMException(e?.message || 'Звукът не тръгна.', 'NotAllowedError');
+        }
+        this.paused = false;
+        this.ended = false;
+    }
+
+    pause() {
+        const was = !this.paused;
+        this.paused = true;
+        this.pausedBy = 'app';
+        Native.audioPause().catch(() => {});
+        if (was) this.dispatchEvent(new Event('pause'));
+    }
+
+    stopAll() {
+        ++this._loadId;
+        this.paused = true;
+        this.src = '';
+        Native.audioStop().catch(() => {});
+    }
+
+    get currentTime() { return this._t; }
+    set currentTime(t) {
+        this._t = Math.max(0, t);
+        this.ended = false;
+        Native.audioSeek({ time: this._t }).catch(() => {});
+    }
+
+    get playbackRate() { return this._rate; }
+    set playbackRate(r) {
+        this._rate = r;
+        Native.audioRate({ rate: r }).catch(() => {});
+    }
+
+    get volume() { return this._volume; }
+    set volume(v) {
+        this._volume = v;
+        Native.audioVolume({ volume: v }).catch(() => {});
+    }
+}

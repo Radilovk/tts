@@ -9,7 +9,7 @@ import { cloudSynthesize, cloudBilledChars, geminiSynthesize, geminiCost, cloudT
 import { pendingKeys } from './batch.js';
 import { sharedGetAudio, sharedPutAudio } from './shared.js';
 import { recordUsage, monthlyGeminiUsd, cloudReserve, cloudRelease, reportCloudUsage } from './usage.js';
-import { Native } from './native.js';
+import { Native, NativeAudio } from './native.js';
 
 const CHUNK_CHARS = { cloud: 1400, gemini: 1500 };
 const FAST_START_CHARS = 320;
@@ -60,7 +60,8 @@ export class Player extends EventTarget {
             const v = this.book?.factory?.voice;
             return v ? { ...st, ...v, engine: 'gemini' } : st;
         };
-        this.audio = new Audio();
+        // Android app: the sound comes from Android's MediaPlayer (see NativeAudio)
+        this.audio = Native ? new NativeAudio() : new Audio();
         this.audio.preload = 'auto';
         this.book = null;       // metadata record
         this.chapters = null;   // [{ title, paras }]
@@ -593,8 +594,24 @@ export class Player extends EventTarget {
         spec.dur = rec.dur;
         if (rec.dur > 0) this._learnRate(rec.chars, rec.dur);
         this._releaseUrl();
-        this._url = URL.createObjectURL(rec.blob);
-        this.audio.src = this._url;
+        const badAudio = async (e) => {
+            diag(`откъсът не може да се възпроизведе (${e.message || e.name}) — взимам го наново`);
+            this.queue.delete(spec.key);
+            await db.del('audio', spec.key).catch(() => {});
+            if (session !== this.session) return;
+            if (opts.refetched) return this._fail(e);
+            return this._playSpec(spec, session, { ...opts, refetched: true });
+        };
+        if (this.audio.isNative) {
+            try { await this.audio.loadBlob(rec.blob); } catch (e) {
+                if (session !== this.session || !this.playing || e.name === 'AbortError') return;
+                return badAudio(e);
+            }
+            if (session !== this.session || !this.playing) { this.loading = false; this._emit('state'); return; }
+        } else {
+            this._url = URL.createObjectURL(rec.blob);
+            this.audio.src = this._url;
+        }
         this.audio.playbackRate = this.rate;
         if (opts.offsetFrac) opts.offset = opts.offsetFrac * rec.dur;
         const startAt = opts.offset ? Math.min(opts.offset, rec.dur - 0.5)
@@ -604,7 +621,7 @@ export class Player extends EventTarget {
         for (let attempt = 0; ; attempt++) {
             try {
                 if (startAt > 0 && attempt === 0) {
-                    await new Promise((r) => { this.audio.addEventListener('loadedmetadata', r, { once: true }); });
+                    if (!this.audio.isNative) await new Promise((r) => { this.audio.addEventListener('loadedmetadata', r, { once: true }); });
                     this.audio.currentTime = startAt;
                 }
                 await this.audio.play();
@@ -614,12 +631,7 @@ export class Player extends EventTarget {
                 diag(`play() отказа (${e.name || ''} ${e.message || ''}), опит ${attempt + 1}`);
                 // The passage itself cannot be decoded (damaged in the cache or a cut-off
                 // download): throw it away and get it once more instead of stopping
-                if (e.name === 'NotSupportedError' && !opts.refetched) {
-                    this.queue.delete(spec.key);
-                    await db.del('audio', spec.key).catch(() => {});
-                    if (session !== this.session) return;
-                    return this._playSpec(spec, session, { ...opts, refetched: true });
-                }
+                if (e.name === 'NotSupportedError') return badAudio(e);
                 if (attempt >= 3) { this._fail(e); return; }
                 await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
                 if (session !== this.session || !this.playing) return;
@@ -728,7 +740,7 @@ export class Player extends EventTarget {
             if (unlockClip()) return;
             // Paused externally (headphones unplugged, lock screen)
             if (this.playing && !atEnd() && this.engine !== 'device' && !this.loading) {
-                diag(`спряно отвън на ${a.currentTime.toFixed(1)} от ${(a.duration || 0).toFixed(1)} сек.`);
+                diag(`спряно отвън${a.pausedBy === 'focus' ? ' (Android даде звука на друго — разговор, навигация)' : a.pausedBy === 'noisy' ? ' (слушалките са изключени)' : ''} на ${a.currentTime.toFixed(1)} от ${(a.duration || 0).toFixed(1)} сек.`);
                 this.playing = false;
                 this._emit('state');
                 this._emit('save');

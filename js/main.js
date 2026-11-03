@@ -25,12 +25,12 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.8';
+export const APP_VERSION = '2.9';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
     engine: null, apiKey: '', cloudVoice: '', geminiVoice: 'Charon', geminiModel: '', geminiEconomy: true, geminiFreeKey: '',
-    style: 'intriguing', customStyle: '', deviceVoice: '', lang: 'auto', rate: 1, lookahead: 2,
+    style: 'intriguing', customStyle: '', deviceVoice: '', lang: 'auto', rate: 1,
     cacheMB: 500, theme: 'system', readerSize: 19, view: 'cover', cloudReady: false, autoTranslate: 'bg',
     geminiCapUsd: 2, cloudPausedMonth: '',
 };
@@ -793,7 +793,7 @@ function updateMini() {
 
 async function startPlayback() {
     if (!currentBook) return;
-    if (!player.current) unlockAudio(player.audio);
+    if (!player.current && !player.audio.isNative) unlockAudio(player.audio);
     const st = effectiveSettings();
     if (st.engine === 'cloud' && (!st.apiKey || !settings.cloudReady)) {
         openCloudSetup({ thenPlay: true });
