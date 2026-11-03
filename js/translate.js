@@ -171,6 +171,3 @@ export function translationCost(chars) {
     return inTok / 1e6 * 0.1 + outTok / 1e6 * 0.4;
 }
 
-export function langPairLabel(from, to) {
-    return `${LANG_NAMES[from] || from} → ${LANG_NAMES[to] || to}`;
-}
