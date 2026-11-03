@@ -104,10 +104,16 @@ const HEADING = /^h[1-3]$/;
 const NOTE_TYPE = /footnote|endnote|rearnote|\bnote\b/i;
 const NOTE_CLASS = /footnote|endnote|fnote|\bftn|^fn\d|^note[_-]?\d|^notes?$|бележк/i;
 
+// Inline elements (span, a, sup…) are notes only when the book says so explicitly: an
+// anchor such as <span id="note-3"> around a sentence of the text made that sentence a
+// "note", and it was never read.
+const INLINE_TAGS = new Set(['a', 'span', 'sup', 'sub', 'em', 'i', 'b', 'strong', 'small', 'u', 'font', 'abbr', 'cite', 'q', 'mark']);
+
 function isNoteNode(n, tag) {
     if (tag === 'aside') return true;
     const type = `${n.getAttribute('epub:type') || ''} ${n.getAttribute('role') || ''} ${n.getAttribute('type') || ''}`;
     if (NOTE_TYPE.test(type) && !/noteref/i.test(type)) return true;
+    if (INLINE_TAGS.has(tag)) return false;
     const cls = (n.getAttribute('class') || '').split(/\s+/);
     return cls.some((c) => NOTE_CLASS.test(c)) || NOTE_CLASS.test(n.getAttribute('id') || '');
 }

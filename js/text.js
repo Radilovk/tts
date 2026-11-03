@@ -2,7 +2,7 @@
 // Chunk boundaries are fixed per chapter, so cached audio is reused
 // whenever the same part of the book is played again.
 
-const ABBREVIATIONS = /(?:^|\s)(?:т\.е|т\.нар|напр|г-н|г-жа|г-ца|д-р|проф|ул|бул|гр|с|стр|вж|др|св|ок|мин|сек|млн|млрд|хил|Mr|Mrs|Ms|Dr|Prof|St|Jr|Sr|vs|etc|e\.g|i\.e|No)\.$/i;
+const ABBREVIATIONS = /(?:^|\s)(?:т\.е|т\.нар|напр|г-н|г-жа|г-ца|д-р|проф|ул|бул|гр|с|стр|вж|срв|др|сътр|изд|цит|бел|св|ок|мин|сек|млн|млрд|хил|т|Mr|Mrs|Ms|Dr|Prof|St|Jr|Sr|vs|etc|e\.g|i\.e|No|al|ed|eds|vol|pp?|cf|ibid|op|cit|fig|ch|Inc|Ltd|Co)\.$/i;
 
 const segmenterCache = {};
 
@@ -31,21 +31,64 @@ export function normalizeSpace(s) {
 export const NOTE_MARK = '\u2063';
 const NOTE_START = /^\s*(?:\[\s*(?:\d{1,3}|\*{1,3})\s*\]|\{\d{1,3}\}|[¹²³⁴⁵⁶⁷⁸⁹⁰]+|\*{1,3}(?=\s*\p{L}))/u;
 const NUMBER_START = /^\s*\d{1,3}\s*[.)]?\s+\S/;
-const NOTE_WORDS = /(?:^|[\s(—–-])(?:бел\.|б\.\s?пр|б\.\s?а|б\.\s?ред|прев\.|пак там|цит\.|вж\.|срв\.|прим\.|изд\.|стр\.\s?\d|с\.\s?\d|т\.\s?\d|ibid|op\.\s?cit|cf\.|see\s|pp?\.\s?\d|vol\.|note\b|trans\.)/i;
+// Words that only a note has ("бел. пр.", "Пак там", "Ibid."). Ordinary words such as
+// "стр. 5", "т. 2" or "вж." also appear in normal text and silenced whole paragraphs.
+const NOTE_WORDS = /(?:^|[\s(—–-])(?:бел\.\s?(?:пр|ред|авт|а)|б\.\s?(?:пр|ред|а)\b|пак там|цит\.\s?(?:съч|по)|ibid|op\.\s?cit|loc\.\s?cit)/i;
 
-export function isNotePara(t) {
+// ---------- references (citations, bibliography) ----------
+// Books translated into Bulgarian often keep their references in English: "(Smith et
+// al., 2019)", "[12, 14–16]", reference lists at the end of a chapter. A Bulgarian
+// voice given English citations stumbles: it garbles them and skips the words around
+// them. They stay on screen but are never read.
+const YEAR = '(?:1[5-9]\\d\\d|20\\d\\d)[a-z]?';
+const LATIN = /[A-Za-z]/;
+const CITE_WORDS = /\bet\s?al\b|\bibid\b|\bop\.\s?cit|\bpp?\.\s?\d|\bvol\.\s?\d|\bdoi\b|\bISBN\b|\bJournal\b|\bPress\b|\bUniversity\b|\bProceedings\b|\bReview\b|\bQuarterly\b|\b[Ee]ds?\.|\bIn:\s|\bRetrieved\b/;
+const CITE_YEAR = new RegExp(`(?:^|[\\s(,;])${YEAR}(?=[\\s),.;:]|$)`);
+
+function latinShare(t) {
+    const lat = (t.match(/[A-Za-z]/g) || []).length;
+    const cyr = (t.match(/[\u0400-\u04FF]/g) || []).length;
+    return lat + cyr ? lat / (lat + cyr) : 0;
+}
+
+// A whole paragraph that is a reference-list entry (English in a Bulgarian book)
+function isReferenceEntry(t, lang) {
+    if (lang === 'en' || t.length > 700) return false;
+    if (latinShare(t) < 0.75) return false;
+    return CITE_WORDS.test(t) || (CITE_YEAR.test(t) && /\p{Lu}[\p{L}'’-]+,\s?(?:\p{Lu}\.|&|and\b)/u.test(t));
+}
+
+// Citations inside a sentence: "(Smith, 2019)", "(Smith & Lee 2019; Kim et al., 2020, p. 5)",
+// "[12]", "[3, 7–9]", "Smith (2019)" → the year group only
+function stripCitations(s, lang) {
+    const yearGroup = new RegExp(`\\s*[(\\[]([^()\\[\\]]*${YEAR}[^()\\[\\]]*)[)\\]]`, 'g');
+    return s
+        .replace(/\s*\[\s*\d{1,3}(?:\s*[,–—-]\s*\d{1,3})*\s*\]/g, '')
+        .replace(yearGroup, (m, inner) => {
+            if (lang === 'en' && !CITE_WORDS.test(inner)) return m;
+            // Latin text with a year, or "и др."/"и сътр." with a year: a citation
+            if (LATIN.test(inner) || /и\s(?:др|сътр)\.|,\s?(?:с|стр)\.\s?\d/.test(inner)) return '';
+            return m;
+        })
+        .replace(/\s*[(\[][^()\[\]]*\bet\s?al\b[^()\[\]]*[)\]]/g, '')
+        // "Kahneman (2011) пише…" → "Kahneman пише…"
+        .replace(new RegExp(`([A-Za-z][A-Za-z'’.-]*)\\s*\\(\\s*${YEAR}\\s*\\)`, 'g'), lang === 'en' ? '$&' : '$1');
+}
+
+export function isNotePara(t, lang = 'bg') {
     if (!t) return false;
     if (t[0] === NOTE_MARK) return true;
     if (t.length > 900) return false;
     if (NOTE_START.test(t)) return true;
-    return NUMBER_START.test(t) && t.length < 500 && NOTE_WORDS.test(t);
+    if (isReferenceEntry(t, lang)) return true;
+    return NUMBER_START.test(t) && t.length < 400 && (NOTE_WORDS.test(t) || (LATIN.test(t) && CITE_WORDS.test(t)));
 }
 
 export function noteText(t) {
     return t && t[0] === NOTE_MARK ? t.slice(1) : t;
 }
 
-const NOTES_TITLE = /^\s*(бележки|бележки на преводача|бележки под линия|забележки|примечания|сноски|notes|endnotes|footnotes|anmerkungen|notes de bas de page)\s*\.?\s*$/i;
+const NOTES_TITLE = /^\s*(бележки|бележки на преводача|бележки под линия|забележки|примечания|сноски|литература|използвана литература|цитирана литература|библиография|източници|препратки|notes|endnotes|footnotes|references|bibliography|works cited|sources|literature|anmerkungen|literatur|notes de bas de page)\s*\.?\s*$/i;
 
 export function isNotesTitle(title) {
     return NOTES_TITLE.test(title || '');
@@ -53,9 +96,13 @@ export function isNotesTitle(title) {
 
 // Remove things a narrator should not read and that cost money: footnote
 // markers, URLs, decorative separators.
-export function cleanForSpeech(s) {
-    return s
+export function cleanForSpeech(s, lang = 'bg') {
+    // A sentence that is an English reference in a Bulgarian book is not read at all
+    if (lang !== 'en' && latinShare(s) > 0.75 && (CITE_WORDS.test(s) || CITE_YEAR.test(s))) return '';
+    return stripCitations(s, lang)
         .replace(/https?:\/\/\S+/g, '')
+        .replace(/\bwww\.\S+/g, '')
+        .replace(/\bdoi:\s?\S+/gi, '')
         .replace(/\[\s*(?:\d{1,3}|\*{1,3})\s*\]|\{\d{1,3}\}/g, '')
         .replace(/[¹²³⁴⁵⁶⁷⁸⁹⁰]+/g, '')
         // "(бел. пр.)", "— Б. пр.", "(Note)": the marker of an inline note
@@ -83,7 +130,8 @@ export function splitSentences(text, lang, maxLen = 450) {
         const t = p.trim();
         if (!t) continue;
         const prev = merged[merged.length - 1];
-        if (prev && (ABBREVIATIONS.test(prev) || /(?:^|\s)[A-ZА-Я]\.$/.test(prev) || t.length < 3)) {
+        const open = prev ? (prev.match(/[(\[]/g) || []).length - (prev.match(/[)\]]/g) || []).length : 0;
+        if (prev && (ABBREVIATIONS.test(prev) || /(?:^|\s)[A-ZА-Я]\.$/.test(prev) || t.length < 3 || (open > 0 && prev.length < 600))) {
             merged[merged.length - 1] = prev + ' ' + t;
         } else {
             merged.push(t);
@@ -118,9 +166,9 @@ export function buildChapterModel(chapter, lang) {
     blocks.forEach((b) => {
         const pIndex = paras.length;
         const first = sentences.length;
-        const note = !!b.note || (!b.h && (allNotes || isNotePara(b.t)));
+        const note = !!b.note || (!b.h && (allNotes || isNotePara(b.t, lang)));
         for (const s of splitSentences(noteText(b.t), lang)) {
-            const speak = note ? '' : cleanForSpeech(s);
+            const speak = note ? '' : cleanForSpeech(s, lang);
             sentences.push({ t: s, speak, p: pIndex });
         }
         paras.push({ first, last: sentences.length, h: !!b.h, note });
