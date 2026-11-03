@@ -5,10 +5,10 @@
 
 import * as db from './db.js';
 import { buildChapterModel, chunkBoundaries, nextBoundary, chunkText, charLen, LOCALES } from './text.js';
-import { cloudSynthesize, geminiSynthesize, geminiCost, cloudTier, deviceVoices, PRICES } from './engines.js';
+import { cloudSynthesize, cloudBilledChars, geminiSynthesize, geminiCost, cloudTier, deviceVoices } from './engines.js';
 import { pendingKeys } from './batch.js';
 import { sharedGetAudio, sharedPutAudio } from './shared.js';
-import { recordUsage, monthlyCloudChars, monthlyGeminiUsd } from './usage.js';
+import { recordUsage, monthlyGeminiUsd, cloudReserve, cloudRelease, reportCloudUsage } from './usage.js';
 import { Native } from './native.js';
 
 const CHUNK_CHARS = { cloud: 1400, gemini: 1500 };
@@ -22,6 +22,23 @@ const FAST_START_V2 = { min: 450, max: 1100 };
 const CHUNK_V3 = { ...CHUNK_V2, cloud: { max: 2000, para: 0.6 } };
 // Network hiccups during playback are retried instead of stopping the book
 const PLAY_RETRIES = [3, 6, 12, 20, 30];
+
+// What happened when playback stalled or recovered — kept on the device (last 60
+// entries) and shown in Settings, so a stop can be traced to its cause.
+const DIAG_KEY = 'rz_diag';
+export function diag(msg) {
+    try {
+        const list = JSON.parse(localStorage.getItem(DIAG_KEY) || '[]');
+        list.push(`${new Date().toLocaleString('bg-BG')} · ${msg}`);
+        localStorage.setItem(DIAG_KEY, JSON.stringify(list.slice(-60)));
+    } catch {}
+}
+export function diagLog() {
+    try { return JSON.parse(localStorage.getItem(DIAG_KEY) || '[]'); } catch { return []; }
+}
+export function diagClear() {
+    try { localStorage.removeItem(DIAG_KEY); } catch {}
+}
 
 async function hash(str) {
     if (crypto.subtle) {
@@ -433,13 +450,6 @@ export class Player extends EventTarget {
     // quotas, so this is what keeps a month of listening inside the budget.
     _checkSpendingCap(st, spec) {
         const capError = (msg) => Object.assign(new Error(msg), { reason: 'APP_CAP' });
-        if (st.engine === 'cloud' && st.freeOnly) {
-            const tier = cloudTier(st.cloudVoice);
-            const free = (PRICES.cloud[tier] || PRICES.cloud.Other).free;
-            if (monthlyCloudChars(tier) + spec.text.length > free * 0.95) {
-                throw capError('Безплатният месечен лимит на Google HD е почти изчерпан — спирам, за да не се таксува.');
-            }
-        }
         if (st.engine === 'gemini' && st.geminiCapUsd > 0 && monthlyGeminiUsd() >= st.geminiCapUsd) {
             throw capError(`Достигнат месечен лимит за Gemini (${st.geminiCapUsd} $).`);
         }
@@ -458,9 +468,26 @@ export class Player extends EventTarget {
         const t0 = performance.now();
         let result;
         if (st.engine === 'cloud') {
+            // Google HD is used only inside the free monthly characters — always. The
+            // characters are reserved before the request leaves, so passages prefetched
+            // at the same time cannot pass the limit together.
+            const tier = cloudTier(st.cloudVoice);
+            const billed = cloudBilledChars(spec.text);
+            if (!cloudReserve(tier, billed)) {
+                diag('Google HD: безплатните знаци за месеца свършиха — спрях преди таксуване');
+                throw Object.assign(new Error('Безплатните знаци на Google HD за този месец свършиха — спрях го, преди да започне да се таксува.'), { reason: 'APP_CAP', cloudCap: true });
+            }
             const locale = st.cloudVoice.split('-').slice(0, 2).join('-') || LOCALES[lang];
-            result = await cloudSynthesize({ apiKey: st.apiKey, text: spec.text, voice: st.cloudVoice, locale });
-            recordUsage({ engine: 'cloud', tier: cloudTier(st.cloudVoice), chars: spec.text.length });
+            try {
+                result = await cloudSynthesize({
+                    apiKey: st.apiKey, text: spec.text, voice: st.cloudVoice, locale,
+                    onSplit: (e) => diag(`Google отказа откъс (${e.message}) — чета го на две части`),
+                });
+            } finally {
+                cloudRelease(tier, billed);
+            }
+            recordUsage({ engine: 'cloud', tier, chars: billed });
+            reportCloudUsage(st.apiKey, tier, billed);
         } else {
             const req = { model: st.geminiModel, text: spec.text, voice: st.geminiVoice, style: st.style, customStyle: st.customStyle, lang };
             let free = false;
@@ -572,16 +599,33 @@ export class Player extends EventTarget {
         if (opts.offsetFrac) opts.offset = opts.offsetFrac * rec.dur;
         const startAt = opts.offset ? Math.min(opts.offset, rec.dur - 0.5)
             : opts.offsetFromEnd ? Math.max(0, rec.dur - opts.offsetFromEnd) : 0;
-        try {
-            if (startAt > 0) {
-                await new Promise((r) => { this.audio.addEventListener('loadedmetadata', r, { once: true }); });
-                this.audio.currentTime = startAt;
+        // play() can be refused for a moment (audio focus, the WebView waking up):
+        // try again before giving up instead of stopping the book
+        for (let attempt = 0; ; attempt++) {
+            try {
+                if (startAt > 0 && attempt === 0) {
+                    await new Promise((r) => { this.audio.addEventListener('loadedmetadata', r, { once: true }); });
+                    this.audio.currentTime = startAt;
+                }
+                await this.audio.play();
+                break;
+            } catch (e) {
+                if (session !== this.session || !this.playing) return;
+                diag(`play() отказа (${e.name || ''} ${e.message || ''}), опит ${attempt + 1}`);
+                // The passage itself cannot be decoded (damaged in the cache or a cut-off
+                // download): throw it away and get it once more instead of stopping
+                if (e.name === 'NotSupportedError' && !opts.refetched) {
+                    this.queue.delete(spec.key);
+                    await db.del('audio', spec.key).catch(() => {});
+                    if (session !== this.session) return;
+                    return this._playSpec(spec, session, { ...opts, refetched: true });
+                }
+                if (attempt >= 3) { this._fail(e); return; }
+                await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+                if (session !== this.session || !this.playing) return;
             }
-            await this.audio.play();
-        } catch (e) {
-            if (session === this.session) this._fail(e);
-            return;
         }
+        this._started = Date.now();
         this.loading = false;
         this._emit('state');
         this._updateMediaSession();
@@ -676,10 +720,15 @@ export class Player extends EventTarget {
         });
         // The silent clip used to unlock audio on the first tap is not playback
         const unlockClip = () => (a.currentSrc || a.src || '').startsWith('data:');
+        // The 'pause' event comes just before 'ended' at the end of every passage. With
+        // MP3 the reported duration is an estimate, so a.ended can still be false then;
+        // treating that as "paused by the user" stopped the book at a join.
+        const atEnd = () => a.ended || (a.duration > 0 && a.currentTime >= a.duration - 0.35);
         a.addEventListener('pause', () => {
             if (unlockClip()) return;
             // Paused externally (headphones unplugged, lock screen)
-            if (this.playing && !a.ended && this.engine !== 'device' && !this.loading) {
+            if (this.playing && !atEnd() && this.engine !== 'device' && !this.loading) {
+                diag(`спряно отвън на ${a.currentTime.toFixed(1)} от ${(a.duration || 0).toFixed(1)} сек.`);
                 this.playing = false;
                 this._emit('state');
                 this._emit('save');
@@ -689,6 +738,62 @@ export class Player extends EventTarget {
             if (unlockClip()) return;
             if (!this.playing) { this.playing = true; this._emit('state'); }
         });
+        // A passage that cannot be decoded (damaged in the cache, cut-off download) gave
+        // no 'ended' and no error, just silence. Drop it and narrate the place again.
+        a.addEventListener('error', () => {
+            if (unlockClip() || !this.playing || !this.current || this.loading) return;
+            const bad = this.current;
+            diag(`аудиото на откъса не се възпроизвежда (код ${a.error?.code || '?'}) — взимам го наново`);
+            this.queue.delete(bad.key);
+            db.del('audio', bad.key).catch(() => {});
+            this._recover('грешка в аудиото');
+        });
+        this._watchdog();
+    }
+
+    // Self-healing: whatever the cause (audio focus, the WebView paused with the screen
+    // off, an event that never came), if the book should be playing but the audio
+    // stands still, playback restarts from the sentence being read. Cached audio is
+    // reused, so this costs nothing.
+    _watchdog() {
+        let lastT = -1, still = 0, loadingSince = 0;
+        setInterval(() => {
+            if (!this.playing || this.engine === 'device' || this._seekTimer || !this.book) { still = 0; lastT = -1; loadingSince = 0; return; }
+            const a = this.audio;
+            if (this.loading) {
+                // Synthesis with retries has its own limits; only a load that never ends
+                loadingSince = loadingSince || Date.now();
+                if (Date.now() - loadingSince > 240000) {
+                    loadingSince = 0;
+                    this._recover('зареждането не приключи');
+                }
+                still = 0;
+                return;
+            }
+            loadingSince = 0;
+            if (!this.current) return;
+            const t = a.currentTime;
+            if (a.paused || a.ended || t === lastT) still++;
+            else still = 0;
+            lastT = t;
+            // ~6 s standing still while it should play (well past any join between passages)
+            if (still >= 3 && Date.now() - (this._started || 0) > 4000) {
+                still = 0;
+                this._recover(a.ended ? 'следващият откъс не тръгна' : a.paused ? 'аудиото спря без пауза от вас' : 'аудиото замръзна');
+            }
+        }, 2000);
+    }
+
+    _recover(why) {
+        if (Date.now() - (this._lastRecover || 0) < 8000) return;
+        this._lastRecover = Date.now();
+        const { c, s } = this.pos;
+        diag(`възстановяване: ${why} (глава ${c + 1}, изречение ${s + 1})`);
+        // loading first: the 'pause' this causes must not count as a pause by the listener
+        this.loading = true;
+        this._emit('state');
+        this.audio.pause();
+        this._startAt(c, s);
     }
 
     _releaseUrl() {

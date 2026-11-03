@@ -1,12 +1,20 @@
 // Monthly usage counter and cost estimate (stored locally).
 
 import { PRICES, geminiPrice } from './engines.js';
+import { libraryApi } from './shared.js';
 
 const KEY = 'rz_usage';
 
-function monthKey() {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+// Google bills by calendar month in Pacific time; counting by the same month means
+// the free characters never "renew" here hours before they renew at Google.
+export function monthKey(d = new Date()) {
+    try {
+        const p = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit' }).formatToParts(d);
+        return `${p.find((x) => x.type === 'year').value}-${p.find((x) => x.type === 'month').value}`;
+    } catch {
+        const t = new Date(d.getTime() - 8 * 3600_000);
+        return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}`;
+    }
 }
 
 function load() {
@@ -42,7 +50,10 @@ export function usageSummary() {
     const u = load();
     const rows = [];
     let total = 0;
-    for (const [tier, chars] of Object.entries(u.cloud)) {
+    // Google HD: the larger of this device's count and the worker's total for the key
+    const tiers = new Set([...Object.keys(u.cloud), ...Object.keys(serverCount())]);
+    for (const tier of tiers) {
+        const chars = cloudUsedChars(tier);
         const p = PRICES.cloud[tier] || PRICES.cloud.Other;
         const billable = Math.max(0, chars - p.free);
         const cost = billable / 1e6 * p.per1M;
@@ -72,6 +83,73 @@ export function monthlyCloudChars(tier) {
     return load().cloud[tier] || 0;
 }
 
+// ---------- Google HD: never past the free characters ----------
+//
+// Google has no monthly limit of its own (only per-minute quotas), so the app stops
+// Google HD itself. Three things keep the count on the safe side:
+//   • a margin: it stops at 90% of the free characters;
+//   • passages being synthesized right now are reserved before the request goes out,
+//     so prefetching several passages at once cannot slip past the limit together;
+//   • the worker keeps a per-key total for the month, so the phone app, the browser and
+//     other devices with the same key add up (the larger of the two counts is used).
+export const CLOUD_SAFE_SHARE = 0.9;
+const SERVER_KEY = 'rz_cloud_server';
+const reserved = {};
+
+function serverCount() {
+    try {
+        const s = JSON.parse(localStorage.getItem(SERVER_KEY) || '{}');
+        return s.month === monthKey() ? s.cloud || {} : {};
+    } catch { return {}; }
+}
+
+function saveServer(data) {
+    if (!data || data.month !== monthKey() || typeof data.cloud !== 'object') return;
+    try { localStorage.setItem(SERVER_KEY, JSON.stringify({ month: data.month, cloud: data.cloud })); } catch {}
+}
+
+export function cloudUsedChars(tier) {
+    return Math.max(monthlyCloudChars(tier), serverCount()[tier] || 0);
+}
+
+export function cloudLimitChars(tier) {
+    return Math.floor((PRICES.cloud[tier] || PRICES.cloud.Other).free * CLOUD_SAFE_SHARE);
+}
+
+// Reserve the characters of a request; returns false (and reserves nothing) if they
+// do not fit in what is left of the free characters.
+export function cloudReserve(tier, chars) {
+    if (cloudUsedChars(tier) + (reserved[tier] || 0) + chars > cloudLimitChars(tier)) return false;
+    reserved[tier] = (reserved[tier] || 0) + chars;
+    return true;
+}
+
+export function cloudRelease(tier, chars) {
+    reserved[tier] = Math.max(0, (reserved[tier] || 0) - chars);
+}
+
+async function usageCall(apiKey, body) {
+    const base = libraryApi();
+    if (!base || !apiKey) return;
+    try {
+        const r = await fetch(`${base}/usage`, {
+            method: body ? 'POST' : 'GET',
+            headers: { 'X-Rz-Key': apiKey, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+            body: body ? JSON.stringify(body) : undefined,
+            cache: 'no-store',
+        });
+        if (r.ok) saveServer(await r.json());
+    } catch {}
+}
+
+// The month's total for this key from the worker (other devices included).
+export function syncCloudUsage(apiKey) { return usageCall(apiKey, null); }
+
+// Add characters to the worker's total for this key (fire-and-forget).
+export function reportCloudUsage(apiKey, tier, chars) {
+    return usageCall(apiKey, { month: monthKey(), tier, chars });
+}
+
 // Estimated Gemini spend this month in USD.
 export function monthlyGeminiUsd() {
     const g = load().gemini;
@@ -79,8 +157,11 @@ export function monthlyGeminiUsd() {
     return g.inTokens / 1e6 * PRICES.gemini.inPer1M + g.outTokens / 1e6 * PRICES.gemini.outPer1M;
 }
 
+// Clears the local statistics. The Google HD count is kept: it is what stops
+// Google HD before the free characters run out.
 export function resetUsage() {
-    localStorage.removeItem(KEY);
+    const u = load();
+    localStorage.setItem(KEY, JSON.stringify({ month: u.month, cloud: u.cloud, gemini: { inTokens: 0, outTokens: 0 }, cacheHits: 0 }));
 }
 
 // Price of one hour of listening, for the engine cards.

@@ -239,14 +239,53 @@ export function cloudRequestBody({ text, voice, locale }) {
     };
 }
 
-export async function cloudSynthesize({ apiKey, text, voice, locale, signal }) {
-    const data = await withRetry(() => fetchJson(`${CLOUD_BASE}/text:synthesize?key=${encodeURIComponent(apiKey)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(cloudRequestBody({ text, voice, locale })),
-    }, 60000, signal), signal, 5);
-    if (!data?.audioContent) throw new ApiError('Не е получено аудио.', 0, true);
-    return { blob: new Blob([base64ToBytes(data.audioContent)], { type: cloudAudioFormat.mime }), chars: text.length };
+// Characters Google bills for a passage: the text actually sent (whitespace included).
+export function cloudBilledChars(text) {
+    return cloudRequestBody({ text, voice: '', locale: '' }).input.text.length;
+}
+
+// Split a passage in two near the middle: at a paragraph, else a sentence end, else a
+// comma or space. Used when Google refuses a passage (e.g. "sentence too long").
+function splitHalf(text) {
+    const mid = text.length / 2;
+    for (const re of [/\n+/g, /[.!?…]["»”']?\s+/g, /[,;:—–]\s+/g, /\s+/g]) {
+        let best = -1;
+        for (const m of text.matchAll(re)) {
+            const at = m.index + m[0].length;
+            if (at > 0 && at < text.length && (best < 0 || Math.abs(at - mid) < Math.abs(best - mid))) best = at;
+        }
+        if (best > text.length * 0.15 && best < text.length * 0.85) return [text.slice(0, best), text.slice(best)];
+    }
+    return null;
+}
+
+// Google rejects a request (400) for reasons inside the text — a sentence that is too
+// long for the voice, odd characters. Instead of stopping the book, the passage is
+// narrated in halves and the MP3 pieces are joined (MP3 frames simply concatenate).
+const SETUP_REASONS = /^(API_KEY|SERVICE_DISABLED|BILLING_DISABLED)/;
+
+async function cloudSynthesizeBytes({ apiKey, text, voice, locale, signal, onSplit }) {
+    try {
+        const data = await withRetry(() => fetchJson(`${CLOUD_BASE}/text:synthesize?key=${encodeURIComponent(apiKey)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(cloudRequestBody({ text, voice, locale })),
+        }, 60000, signal), signal, 5);
+        if (!data?.audioContent) throw new ApiError('Не е получено аудио.', 0, true);
+        return [base64ToBytes(data.audioContent)];
+    } catch (e) {
+        const halves = e instanceof ApiError && e.status === 400 && !SETUP_REASONS.test(e.reason) && text.length > 200 && splitHalf(text);
+        if (!halves) throw e;
+        onSplit?.(e);
+        const out = [];
+        for (const part of halves) out.push(...await cloudSynthesizeBytes({ apiKey, text: part, voice, locale, signal, onSplit }));
+        return out;
+    }
+}
+
+export async function cloudSynthesize({ apiKey, text, voice, locale, signal, onSplit }) {
+    const parts = await cloudSynthesizeBytes({ apiKey, text, voice, locale, signal, onSplit });
+    return { blob: new Blob(parts, { type: cloudAudioFormat.mime }), chars: text.length };
 }
 
 export const CLOUD_LINKS = {
