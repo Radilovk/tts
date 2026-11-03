@@ -6,18 +6,18 @@ import { Player } from './player.js';
 import { LANG_NAMES, LOCALES, charLen, noteText } from './text.js';
 import {
     GEMINI_VOICES, GEMINI_DEFAULT_MODEL, NARRATION_STYLES, PRICES,
-    cloudVoices, cloudSynthesize, cloudDiagnose, CLOUD_LINKS, geminiSynthesize, geminiModels, deviceVoices, onDeviceVoicesChanged, cloudTier,
+    cloudVoices, cloudSynthesize, cloudBilledChars, cloudDiagnose, CLOUD_LINKS, geminiSynthesize, geminiModels, deviceVoices, onDeviceVoicesChanged, cloudTier,
     cheapestGeminiModel, isVerifiedGeminiModel, geminiCost,
 } from './engines.js';
 import { translateChapter, translationCost, deviceTranslationAvailable, TRANSLATE_DEFAULT_MODEL } from './translate.js';
 import { isNative, Native, nativeFileUrl, loadNativeVoices, nativeEngines } from './native.js';
 import { submitChapter, pollBatches, hasJobs, pendingChapters, batchEstimate } from './batch.js';
-import { usableFreeKey } from './player.js';
+import { usableFreeKey, diagLog, diagClear } from './player.js';
 import { exportPlan, exportChapters, packageFiles, safeFileName } from './export.js';
 import { buildJob, submitJob, jobStatus, cancelJob, downloadBook, studioVoice } from './studio.js';
 import { searchBooks, localizeTitles, SOURCES } from './search.js';
 import { SHELVES, loadShelf, wikisourceWorks, fetchCatalogBook, sourceKey, RIGHTS_LABELS, shareCommunityBook, reportCommunityBook } from './library.js';
-import { usageSummary, resetUsage, hourlyCost, freeHoursPerMonth, recordUsage } from './usage.js';
+import { usageSummary, resetUsage, hourlyCost, freeHoursPerMonth, recordUsage, monthKey, syncCloudUsage, cloudReserve, cloudRelease, reportCloudUsage, CLOUD_SAFE_SHARE } from './usage.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -25,14 +25,14 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.7';
+export const APP_VERSION = '2.8';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
     engine: null, apiKey: '', cloudVoice: '', geminiVoice: 'Charon', geminiModel: '', geminiEconomy: true, geminiFreeKey: '',
     style: 'intriguing', customStyle: '', deviceVoice: '', lang: 'auto', rate: 1, lookahead: 2,
     cacheMB: 500, theme: 'system', readerSize: 19, view: 'cover', cloudReady: false, autoTranslate: 'bg',
-    freeOnly: true, geminiCapUsd: 2,
+    geminiCapUsd: 2, cloudPausedMonth: '',
 };
 
 let settings = loadSettings();
@@ -1354,11 +1354,8 @@ function renderSettings(body) {
         <section class="group">
             <div class="group-title">Икономия</div>
             <div class="row">
-                <span class="row-label">Google HD само безплатно<small>Спира при 95% от безплатния месечен лимит</small></span>
-                <select class="select" id="setFreeOnly">
-                    <option value="1" ${settings.freeOnly ? 'selected' : ''}>Да</option>
-                    <option value="0" ${!settings.freeOnly ? 'selected' : ''}>Не</option>
-                </select>
+                <span class="row-label">Google HD — само безплатно<small>Винаги: спира при ${Math.round(CLOUD_SAFE_SHARE * 100)}% от безплатните знаци за месеца и продължава с гласа на телефона; от 1-во число се връща сам</small></span>
+                <span class="hint" style="margin:0">Винаги</span>
             </div>
             <div class="row">
                 <span class="row-label">Месечен лимит за Gemini<small>Над него четенето минава на гласа на телефона</small></span>
@@ -1382,6 +1379,16 @@ function renderSettings(body) {
         <section class="group">
             <div class="group-title">Разход този месец</div>
             <div class="usage" id="usageBox"></div>
+        </section>
+
+        <section class="group">
+            <div class="group-title">Прекъсвания при четене</div>
+            <p class="hint" style="margin:0 0 8px">Какво се е случило, когато четенето е спирало или се е възстановявало само.</p>
+            <pre class="hint" id="diagBox" style="white-space:pre-wrap;max-height:220px;overflow:auto;margin:0 0 8px;font-size:12px">${esc(diagLog().slice().reverse().join('\n') || 'Няма записани прекъсвания.')}</pre>
+            <div class="field">
+                <button class="btn btn-ghost btn-sm" id="btnCopyDiag">Копирай</button>
+                <button class="btn btn-ghost btn-sm" id="btnClearDiag">Изчисти</button>
+            </div>
         </section>
 
         <section class="group">
@@ -1433,6 +1440,10 @@ function renderSettings(body) {
             rerenderSheet(renderSettings);
         }
         if (e.target.id === 'btnResetUsage') { resetUsage(); renderUsage($('#usageBox', body)); }
+        if (e.target.id === 'btnCopyDiag') {
+            navigator.clipboard?.writeText(diagLog().join('\n')).then(() => toast('Копирано.'), () => toast('Не можа да се копира.', { error: true }));
+        }
+        if (e.target.id === 'btnClearDiag') { diagClear(); $('#diagBox', body).textContent = 'Няма записани прекъсвания.'; }
     };
     $('#setKey', body).onchange = (e) => {
         settings.apiKey = e.target.value.trim();
@@ -1449,7 +1460,6 @@ function renderSettings(body) {
         player.voiceChanged();
         rerenderSheet(renderSettings);
     };
-    $('#setFreeOnly', body).onchange = (e) => { settings.freeOnly = e.target.value === '1'; saveSettings(); };
     $('#setGeminiCap', body).onchange = (e) => { settings.geminiCapUsd = Number(e.target.value); saveSettings(); };
     $('#setCache', body).onchange = (e) => {
         settings.cacheMB = Number(e.target.value);
@@ -1700,8 +1710,16 @@ async function previewVoice(btn) {
         if (!rec) {
             let blob;
             if (st.engine === 'cloud') {
-                ({ blob } = await cloudSynthesize({ apiKey: st.apiKey, text, voice: st.cloudVoice, locale: st.cloudVoice.split('-').slice(0, 2).join('-') }));
-                recordUsage({ engine: 'cloud', tier: cloudTier(st.cloudVoice), chars: text.length });
+                const tier = cloudTier(st.cloudVoice);
+                const billed = cloudBilledChars(text);
+                if (!cloudReserve(tier, billed)) throw new Error('Безплатните знаци на Google HD за този месец свършиха.');
+                try {
+                    ({ blob } = await cloudSynthesize({ apiKey: st.apiKey, text, voice: st.cloudVoice, locale: st.cloudVoice.split('-').slice(0, 2).join('-') }));
+                } finally {
+                    cloudRelease(tier, billed);
+                }
+                recordUsage({ engine: 'cloud', tier, chars: billed });
+                reportCloudUsage(st.apiKey, tier, billed);
             } else {
                 const r = await geminiSynthesize({ apiKey: st.apiKey, model: st.geminiModel, text, voice: st.geminiVoice, style: st.style, customStyle: st.customStyle, lang });
                 blob = r.blob;
@@ -2099,6 +2117,8 @@ function bindEvents() {
             return;
         }
         if (err.reason === 'APP_CAP') {
+            // Google HD comes back by itself when Google's new month begins
+            if (err.cloudCap) settings.cloudPausedMonth = monthKey();
             settings.engine = 'device';
             saveSettings();
             updatePlayerUI();
@@ -2425,7 +2445,25 @@ function initNative() {
     player.addEventListener('position', syncPlaybackNotification);
 }
 
+// Google HD was paused because the month's free characters ran out: switch back when
+// Google's new billing month starts. Also fetch the month's total for the key from the
+// worker, so another device's listening counts against the limit too.
+function checkCloudMonth() {
+    if (settings.apiKey || preconfiguredKey()) syncCloudUsage(settings.apiKey || preconfiguredKey());
+    if (settings.cloudPausedMonth && settings.cloudPausedMonth !== monthKey()) {
+        settings.cloudPausedMonth = '';
+        if (settings.engine === 'device' && settings.cloudVoice) {
+            settings.engine = 'cloud';
+            toast('Нов месец — Google HD отново е безплатен и чете пак.', { duration: 7000 });
+        }
+        saveSettings();
+        if (currentBook) updatePlayerUI();
+    }
+}
+
 async function init() {
+    checkCloudMonth();
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) checkCloudMonth(); });
     applyTheme();
     bindEvents();
     updateSleepChip();

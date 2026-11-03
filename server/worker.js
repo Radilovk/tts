@@ -28,6 +28,12 @@
 //   GET    /jobs/:id/book                → the full job with texts and requests (the runner)
 //   PUT    /jobs/:id                     → update the state (the runner: progress, batches, cost)
 //   DELETE /jobs/:id                     → cancel / forget a job
+//
+// Google HD free characters (the app stops Google HD before they run out):
+//   GET  /usage                          → { month, cloud: { tier: chars } } for the key in X-Rz-Key
+//   POST /usage  { tier, chars }         → add the characters of one request; returns the totals
+// The count is filed under a hash of the key, so the phone app, the browser and other
+// devices that use the same key add up. Months are Google's billing months (Pacific time).
 // The runner (.github/workflows/night-studio.yml) stores finished passages through
 // PUT /audio/:key, so the player finds them by the same keys as any cached passage.
 //
@@ -295,6 +301,36 @@ async function communityRestore(req, env, id) {
     return (await setHidden(env, id, false)) ? json(req, { ok: true }) : json(req, { error: 'not found' }, 404);
 }
 
+// ---------- Google HD usage (free characters per key and month) ----------
+
+const USAGE_TIERS = ['Chirp3-HD', 'Neural2', 'Wavenet', 'Standard', 'Studio', 'Other'];
+
+function billingMonth(d = new Date()) {
+    const p = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit' }).formatToParts(d);
+    return `${p.find((x) => x.type === 'year').value}-${p.find((x) => x.type === 'month').value}`;
+}
+
+async function usage(req, env) {
+    if (!env.AUDIO) return json(req, { error: 'Сървърът няма хранилище (R2).' }, 503);
+    const owner = await studioOwner(req);
+    if (!owner) return json(req, { error: 'Нужен е Google API ключ.' }, 403);
+    const month = billingMonth();
+    const path = `u/${owner}/${month}`;
+    const obj = await env.AUDIO.get(path);
+    const cloud = obj ? (await obj.json()).cloud || {} : {};
+    if (req.method === 'POST') {
+        const body = await req.json().catch(() => ({}));
+        const tier = USAGE_TIERS.includes(body.tier) ? body.tier : 'Other';
+        const chars = Math.floor(Number(body.chars));
+        if (!(chars > 0 && chars <= 20000)) return json(req, { error: 'chars' }, 400);
+        cloud[tier] = (cloud[tier] || 0) + chars;
+        await env.AUDIO.put(path, JSON.stringify({ cloud }), { httpMetadata: { contentType: 'application/json' } });
+    } else if (req.method !== 'GET') {
+        return json(req, { error: 'method' }, 405);
+    }
+    return json(req, { month, cloud });
+}
+
 // ---------- night studio ----------
 
 async function studioOwner(req) {
@@ -442,6 +478,7 @@ export default {
             if (m && !m[2] && req.method === 'GET') return communityGet(req, env, m[1]);
             if (m && m[2] === '/report' && req.method === 'POST') return communityReport(req, env, m[1]);
             if (m && m[2] === '/restore' && req.method === 'POST') return communityRestore(req, env, m[1]);
+            if (path === '/usage') return usage(req, env);
             m = path.match(/^\/jobs(?:\/([0-9a-f]{20})(\/book)?)?$/);
             if (m) return jobs(req, env, m[1], m[2]);
             m = path.match(/^\/trans\/(.+)$/);
