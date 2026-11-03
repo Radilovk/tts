@@ -5,7 +5,7 @@
 
 import * as db from './db.js';
 import { buildChapterModel, chunkBoundaries, nextBoundary, chunkText, charLen, LOCALES } from './text.js';
-import { cloudSynthesize, cloudBilledChars, geminiSynthesize, geminiCost, cloudTier, deviceVoices } from './engines.js';
+import { cloudNarrate, cloudBilledChars, geminiSynthesize, geminiCost, cloudTier, deviceVoices } from './engines.js';
 import { pendingKeys } from './batch.js';
 import { sharedGetAudio, sharedPutAudio } from './shared.js';
 import { recordUsage, monthlyGeminiUsd, cloudReserve, cloudRelease, reportCloudUsage } from './usage.js';
@@ -62,7 +62,9 @@ export class Player extends EventTarget {
             return v ? { ...st, ...v, engine: 'gemini' } : st;
         };
         // Android app: the sound comes from Android's MediaPlayer (see NativeAudio)
-        this.audio = Native ? new NativeAudio() : new Audio();
+        // (Android 10+: MediaPlayer plays Ogg/Opus only from Android 10)
+        const android = Number((navigator.userAgent.match(/Android (\d+)/) || [])[1] || 0);
+        this.audio = Native && android >= 10 ? new NativeAudio() : new Audio();
         this.audio.preload = 'auto';
         this.book = null;       // metadata record
         this.chapters = null;   // [{ title, paras }]
@@ -366,9 +368,9 @@ export class Player extends EventTarget {
     }
 
     _settingsKey(st = this.getSettings()) {
-        // v2: one continuous text per passage. The version is part of the cache key, so
-        // passages narrated with per-paragraph pauses (timbre jumps) are not replayed
-        if (st.engine === 'cloud') return `cloud2|${st.cloudVoice}`;
+        // v3: every passage checked for skipped text and levelled. The version is part
+        // of the cache key, so passages made before (possibly cut short) are not replayed
+        if (st.engine === 'cloud') return `cloud3|${st.cloudVoice}`;
         if (st.engine === 'gemini') return `gemini|${st.geminiModel}|${st.geminiVoice}|${st.style}|${st.style === 'custom' ? st.customStyle : ''}`;
         return 'device';
     }
@@ -477,22 +479,23 @@ export class Player extends EventTarget {
             // characters are reserved before the request leaves, so passages prefetched
             // at the same time cannot pass the limit together.
             const tier = cloudTier(st.cloudVoice);
-            const billed = cloudBilledChars(spec.text);
-            if (!cloudReserve(tier, billed)) {
-                diag('Google HD: безплатните знаци за месеца свършиха — спрях преди таксуване');
-                throw Object.assign(new Error('Безплатните знаци на Google HD за този месец свършиха — спрях го, преди да започне да се таксува.'), { reason: 'APP_CAP', cloudCap: true });
-            }
             const locale = st.cloudVoice.split('-').slice(0, 2).join('-') || LOCALES[lang];
-            try {
-                result = await cloudSynthesize({
-                    apiKey: st.apiKey, text: spec.text, voice: st.cloudVoice, locale,
-                    onSplit: (e) => diag(`Google отказа откъс (${e.message}) — чета го на две части`),
-                });
-            } finally {
-                cloudRelease(tier, billed);
-            }
-            recordUsage({ engine: 'cloud', tier, chars: billed });
-            reportCloudUsage(st.apiKey, tier, billed);
+            // Every request of the passage (a retry, two halves) is reserved first
+            const beforeRequest = (billed) => {
+                if (!cloudReserve(tier, billed)) {
+                    diag('Google HD: безплатните знаци за месеца свършиха — спрях преди таксуване');
+                    throw Object.assign(new Error('Безплатните знаци на Google HD за този месец свършиха — спрях го, преди да започне да се таксува.'), { reason: 'APP_CAP', cloudCap: true });
+                }
+                return () => cloudRelease(tier, billed);
+            };
+            const afterRequest = (billed) => {
+                recordUsage({ engine: 'cloud', tier, chars: billed });
+                reportCloudUsage(st.apiKey, tier, billed);
+            };
+            result = await cloudNarrate({
+                apiKey: st.apiKey, text: spec.text, voice: st.cloudVoice, locale,
+                beforeRequest, afterRequest, onIssue: (m) => diag(`${m} (гл. ${spec.c + 1}, изр. ${spec.s0 + 1}–${spec.s1})`),
+            });
         } else {
             const req = { model: st.geminiModel, text: spec.text, voice: st.geminiVoice, style: st.style, customStyle: st.customStyle, lang };
             let free = false;

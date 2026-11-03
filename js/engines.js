@@ -288,6 +288,190 @@ export async function cloudSynthesize({ apiKey, text, voice, locale, signal, onS
     return { blob: new Blob(parts, { type: cloudAudioFormat.mime }), chars: text.length };
 }
 
+// ---------- Google HD narration: checked passages ----------
+//
+// Chirp 3 HD is a generative model: now and then the audio it returns stops in the
+// middle of a word or leaves part of the text out, and nothing in the answer says so.
+// Played as it is, the book "jumps": the passage ends early and the next one begins,
+// so text is never heard. Every passage is therefore taken as raw PCM and checked
+// before it is accepted:
+//   • it must not end inside a word (sound up to the very last milliseconds);
+//   • its speech must last about as long as the text needs at this voice's own pace
+//     (learned from the passages already accepted) — much shorter means text was
+//     skipped, much longer means something was said twice.
+// A passage that fails is requested once more (each answer is a new performance);
+// if that fails too it is narrated in two halves, each checked the same way.
+// Accepted audio is trimmed, brought to the same loudness as every other passage and
+// stored as Ogg/Opus, so the joins have the same pause and level every time.
+
+const PCM_RATE = 24000;
+const PACE_KEY = 'rz_cloud_pace';
+
+function parseWavPcm(bytes) {
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const tag = (o) => String.fromCharCode(bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]);
+    if (bytes.length < 12 || tag(0) !== 'RIFF') {
+        return { pcm: new Int16Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + (bytes.byteLength & ~1))), rate: PCM_RATE };
+    }
+    let rate = PCM_RATE, o = 12;
+    while (o + 8 <= bytes.length) {
+        const id = tag(o), size = dv.getUint32(o + 4, true);
+        if (id === 'fmt ') rate = dv.getUint32(o + 12, true);
+        if (id === 'data') {
+            const end = Math.min(bytes.length, o + 8 + size);
+            const start = o + 8;
+            return { pcm: new Int16Array(bytes.buffer.slice(bytes.byteOffset + start, bytes.byteOffset + start + ((end - start) & ~1))), rate };
+        }
+        o += 8 + size + (size & 1);
+    }
+    return { pcm: new Int16Array(0), rate };
+}
+
+async function cloudPcmOnce({ apiKey, text, voice, locale, signal }) {
+    const body = cloudRequestBody({ text, voice, locale });
+    body.audioConfig = { audioEncoding: 'LINEAR16', sampleRateHertz: PCM_RATE };
+    const data = await withRetry(() => fetchJson(`${CLOUD_BASE}/text:synthesize?key=${encodeURIComponent(apiKey)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    }, 60000, signal), signal, 5);
+    if (!data?.audioContent) throw new ApiError('Не е получено аудио.', 0, true);
+    return parseWavPcm(base64ToBytes(data.audioContent));
+}
+
+// Where speech starts and ends, and whether the audio stops inside a word.
+export function speechExtent(pcm, rate) {
+    const n = Math.round(rate * 0.01);
+    const frames = Math.floor(pcm.length / n);
+    if (!frames) return { start: 0, end: 0, speech: 0, cutOff: false };
+    const e = new Float64Array(frames);
+    for (let f = 0; f < frames; f++) {
+        let s = 0;
+        for (let i = f * n, end = i + n; i < end; i++) s += pcm[i] * pcm[i];
+        e[f] = s / n;
+    }
+    const sorted = Float64Array.from(e).sort();
+    const loud = sorted[Math.floor(frames * 0.9)] || 0;
+    const silent = Math.max(loud * 0.03, 400);
+    let first = 0, last = frames - 1;
+    while (first < frames && e[first] < silent) first++;
+    while (last > first && e[last] < silent) last--;
+    // The last 40 ms still clearly voiced: the audio was cut off mid-word
+    let tail = 0;
+    for (let f = Math.max(0, frames - 4); f < frames; f++) tail += e[f];
+    const cutOff = loud > 0 && tail / Math.min(4, frames) > loud * 0.25;
+    return { start: first * 0.01, end: (last + 1) * 0.01, speech: Math.max(0, last + 1 - first) * 0.01, cutOff };
+}
+
+function paceList(voice) {
+    try { return (JSON.parse(localStorage.getItem(PACE_KEY) || '{}')[voice] || []).filter((x) => x > 4 && x < 40); } catch { return []; }
+}
+
+function learnPace(voice, cps) {
+    try {
+        const all = JSON.parse(localStorage.getItem(PACE_KEY) || '{}');
+        all[voice] = [...(all[voice] || []), cps].slice(-25);
+        localStorage.setItem(PACE_KEY, JSON.stringify(all));
+    } catch {}
+}
+
+// Characters per second this voice speaks (median of the accepted passages)
+function voicePace(voice) {
+    const l = paceList(voice).sort((a, b) => a - b);
+    return l.length >= 3 ? l[Math.floor(l.length / 2)] : 0;
+}
+
+// '' when the passage sounds complete, otherwise what is wrong with it
+export function passageProblem(pcm, rate, chars, voice) {
+    const x = speechExtent(pcm, rate);
+    if (x.speech < 0.3) return 'няма реч';
+    if (x.cutOff) return 'прекъснато насред дума';
+    const pace = voicePace(voice);
+    if (pace) {
+        const expected = chars / pace;
+        if (x.speech < expected * 0.62) return `твърде кратко (${x.speech.toFixed(1)} от ~${expected.toFixed(0)} сек.) — пропуснат текст`;
+        if (x.speech > expected * 1.8 && chars > 120) return `твърде дълго (${x.speech.toFixed(1)} от ~${expected.toFixed(0)} сек.)`;
+    } else if (chars > 150 && chars / x.speech > 26) {
+        // Before the pace is known: no voice reads 26 characters a second
+        return `твърде кратко (${x.speech.toFixed(1)} сек. за ${chars} знака) — пропуснат текст`;
+    }
+    return '';
+}
+
+function joinPcm(parts, rate) {
+    const gap = Math.round(rate * 0.35);
+    const len = parts.reduce((a, p) => a + p.length, 0) + gap * (parts.length - 1);
+    const out = new Int16Array(len);
+    let o = 0;
+    parts.forEach((p, i) => { out.set(p, o); o += p.length + (i < parts.length - 1 ? gap : 0); });
+    return out;
+}
+
+// beforeRequest(billedChars) → release() — reserves the characters (throws at the
+//   free limit); afterRequest(billedChars) records them. onIssue(message) for the log.
+export async function cloudNarrate({ apiKey, text, voice, locale, signal, beforeRequest, afterRequest, onIssue }) {
+    const once = async (t) => {
+        const billed = cloudBilledChars(t);
+        const release = beforeRequest ? beforeRequest(billed) : () => {};
+        try {
+            const r = await cloudPcmOnce({ apiKey, text: t, voice, locale, signal });
+            afterRequest?.(billed);
+            return r;
+        } finally {
+            release();
+        }
+    };
+    // One piece of text: up to two tries; returns { pcm, rate, problem }
+    const checked = async (t, tries = 2) => {
+        let best = null;
+        for (let i = 0; i < tries; i++) {
+            let r;
+            try {
+                r = await once(t);
+            } catch (e) {
+                // Google refuses the text itself (e.g. a sentence too long): halves
+                if (e instanceof ApiError && e.status === 400 && !SETUP_REASONS.test(e.reason) && t.length > 200) return { refused: e };
+                throw e;
+            }
+            const problem = passageProblem(r.pcm, r.rate, t.length, voice);
+            if (!problem) return { ...r, problem: '' };
+            onIssue?.(`Google HD: ${problem}${i + 1 < tries ? ' — искам откъса наново' : ''}`);
+            if (!best || r.pcm.length > best.pcm.length) best = { ...r, problem };
+        }
+        return best;
+    };
+    let res = await checked(text);
+    if (res.refused || res.problem) {
+        const halves = text.length > 300 && splitHalf(text);
+        if (halves) {
+            onIssue?.(res.refused ? `Google отказа откъса (${res.refused.message}) — чета го на две части` : 'Google HD: чета откъса на две части');
+            const parts = [];
+            for (const h of halves) {
+                const r = await checked(h);
+                if (r.refused) throw r.refused;
+                parts.push(r);
+            }
+            res = { pcm: joinPcm(parts.map((p) => p.pcm), parts[0].rate), rate: parts[0].rate, problem: parts.map((p) => p.problem).filter(Boolean).join('; ') };
+        } else if (res.refused) {
+            throw res.refused;
+        }
+    }
+    if (!res.problem) {
+        const x = speechExtent(res.pcm, res.rate);
+        if (x.speech > 1) learnPace(voice, text.length / x.speech);
+    } else {
+        onIssue?.(`Google HD: откъсът остава със забележка (${res.problem})`);
+    }
+    return packSpeech(res.pcm, res.rate);
+}
+
+// Trim, level and compress narration PCM → { blob, dur }
+export async function packSpeech(pcm, rate) {
+    const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+    const trimmed = levelLoudness(trimSilence(bytes, rate));
+    return { blob: (await encodeOpus(trimmed, rate)) || pcmToWav(trimmed, rate), dur: trimmed.length / rate };
+}
+
 export const CLOUD_LINKS = {
     aiStudioKey: 'https://aistudio.google.com/apikey',
     enableApi: (p) => `https://console.cloud.google.com/apis/library/texttospeech.googleapis.com${p ? '?project=' + p : ''}`,
