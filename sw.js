@@ -1,13 +1,13 @@
 /* Service worker: app shell offline + runtime cache for fonts and parser libraries.
    Voice API calls are never cached here — audio is cached in IndexedDB by the app. */
 
-const CACHE = 'razkazvach-v23';
+const CACHE = 'razkazvach-v24';
 const SHELL = [
     './', './index.html', './css/app.css', './manifest.json',
-    './js/main.js', './js/player.js', './js/engines.js', './js/parsers.js', './js/text.js', './js/db.js', './js/usage.js', './js/translate.js', './js/native.js', './js/batch.js', './js/shared.js', './js/library.js', './js/opus.js', './js/export.js', './js/search.js', './js/studio.js', './js/config.js',
+    './js/main.js', './js/player.js', './js/engines.js', './js/parsers.js', './js/text.js', './js/db.js', './js/usage.js', './js/translate.js', './js/native.js', './js/batch.js', './js/shared.js', './js/library.js', './js/opus.js', './js/export.js', './js/search.js', './js/studio.js', './js/config.js', './js/align.js', './js/vendor/jszip.min.js',
     './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png',
 ];
-const RUNTIME_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com', 'cdn.jsdelivr.net'];
+const RUNTIME_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com'];
 
 self.addEventListener('install', (event) => {
     event.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
