@@ -25,7 +25,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.15';
+export const APP_VERSION = '2.16';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
@@ -764,7 +764,7 @@ function updatePlayerUI() {
 function updatePlayState() {
     const playing = player.playing;
     // "↻ Наново" only where there is narrated audio to redo
-    $('#chipRedo').classList.toggle('hidden', settings.engine === 'device' || !player.current);
+    $('#chipRedo').classList.toggle('hidden', (settings.engine === 'device' && (!isNative || settings.deviceMode === 'live')) || !player.current);
     const loading = player.loading && playing;
     for (const btn of [$('#btnPlay'), $('#miniPlay')]) {
         btn.querySelector('use').setAttribute('href', playing ? '#i-pause' : '#i-play');
@@ -1527,6 +1527,18 @@ function renderVoiceGroup(box, lang) {
                     </select>
                 </div>
                 <div class="row">
+                    <span class="row-label">Режим<small>Студио: гласът записва откъсите предварително, приложението скъсява дългите паузи и пуска записа — без чакане между абзаците, точни паузи, преслушване без нов синтез. На живо: гласът чете текста сам</small></span>
+                    <select class="select" id="setDeviceMode">
+                        <option value="studio" ${settings.deviceMode !== 'live' ? 'selected' : ''}>Студио</option>
+                        <option value="live" ${settings.deviceMode === 'live' ? 'selected' : ''}>На живо</option>
+                    </select>
+                </div>
+                ${settings.deviceMode !== 'live' ? `<div class="row">
+                    <span class="row-label">Най-дълга пауза<small>По-дълга тишина в записа (между абзаци, след заглавие) се скъсява до толкова</small></span>
+                    <select class="select" id="setDeviceMaxPause">
+                        ${[[0.25, '0.25 сек.'], [0.35, '0.35 сек.'], [0.45, '0.45 сек.'], [0.6, '0.6 сек.'], [0.8, '0.8 сек.'], [1.2, '1.2 сек.']].map(([v, l]) => `<option value="${v}" ${(settings.deviceMaxPause ?? 0.45) === v ? 'selected' : ''}>${l}</option>`).join('')}
+                    </select>
+                </div>` : `                <div class="row">
                     <span class="row-label">Четене<small>Непрекъснато: няколко абзаца наведнъж (до ~1200 знака) — гласът ги свързва със собствената си пауза след точка, без забавяне при всеки абзац. „По абзаци“: всеки абзац отделно, с паузата отдолу</small></span>
                     <select class="select" id="setDeviceUnit">
                         <option value="continuous" ${(settings.deviceUnit || 'continuous') === 'continuous' ? 'selected' : ''}>Непрекъснато</option>
@@ -1546,6 +1558,7 @@ function renderVoiceGroup(box, lang) {
                         ${[[200, '0.2 сек.'], [500, '0.5 сек.'], [800, '0.8 сек.'], [1200, '1.2 сек.']].map(([v, l]) => `<option value="${v}" ${(settings.deviceHeadPause ?? 500) === v ? 'selected' : ''}>${l}</option>`).join('')}
                     </select>
                 </div>
+`}
                 <div class="row">
                     <span class="row-label">Височина на гласа</span>
                     <select class="select" id="setDevicePitch">
@@ -1579,6 +1592,9 @@ function renderVoiceGroup(box, lang) {
             if (el) el.onchange = () => { settings[key] = num ? Number(el.value) : el.value; saveSettings(); player.voiceChanged(); };
         };
         bindSel('#setDeviceUnit', 'deviceUnit', false);
+        bindSel('#setDeviceMaxPause', 'deviceMaxPause');
+        const mode = $('#setDeviceMode', box);
+        if (mode) mode.onchange = () => { settings.deviceMode = mode.value; saveSettings(); player.voiceChanged(); renderVoiceGroup(box, lang); };
         bindSel('#setDevicePause', 'devicePause');
         bindSel('#setDeviceHeadPause', 'deviceHeadPause');
         bindSel('#setDevicePitch', 'devicePitch');

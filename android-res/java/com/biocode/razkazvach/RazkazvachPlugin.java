@@ -146,16 +146,19 @@ public class RazkazvachPlugin extends Plugin {
 
         @Override
         public void onDone(String id) {
+            if (finishRender(id, null)) return;
             emit("ttsDone", id);
         }
 
         @Override
         public void onError(String id) {
+            if (finishRender(id, "Гласовият двигател не можа да запише откъса.")) return;
             emit("ttsError", id);
         }
 
         @Override
         public void onError(String id, int errorCode) {
+            if (finishRender(id, "Гласовият двигател не можа да запише откъса (код " + errorCode + ").")) return;
             emit("ttsError", id);
         }
 
@@ -171,6 +174,7 @@ public class RazkazvachPlugin extends Plugin {
 
         @Override
         public void onStop(String id, boolean interrupted) {
+            if (finishRender(id, "Записът беше прекъснат.")) return;
             // Stopped on purpose (pause / seek) — the web side already knows.
         }
 
@@ -293,6 +297,76 @@ public class RazkazvachPlugin extends Plugin {
             if (pauseAfter > 0) tts.playSilentUtterance(pauseAfter, TextToSpeech.QUEUE_ADD, id + ":pause");
             if (r == TextToSpeech.ERROR) call.reject("Грешка при четене.");
             else call.resolve();
+        });
+    }
+
+    // ---- recording a passage to a file ("studio" mode for the phone voice) ----
+    // The engine renders the text into a WAV file instead of speaking it; the web side
+    // trims long silences, levels it and plays it like any narrated passage.
+
+    private final Map<String, PluginCall> renders = new HashMap<>();
+    private final Map<String, File> renderFiles = new HashMap<>();
+
+    private boolean finishRender(String id, String error) {
+        PluginCall call;
+        File f;
+        synchronized (renders) {
+            call = renders.remove(id);
+            f = renderFiles.remove(id);
+        }
+        if (call == null) return false;
+        if (error != null || f == null || !f.exists() || f.length() < 100) {
+            call.reject(error != null ? error : "Гласовият двигател не записа нищо.", "RENDER_FAILED");
+            if (f != null) f.delete();
+            return true;
+        }
+        try (InputStream in = new FileInputStream(f)) {
+            byte[] buf = new byte[(int) f.length()];
+            int off = 0, n;
+            while (off < buf.length && (n = in.read(buf, off, buf.length - off)) > 0) off += n;
+            JSObject ret = new JSObject();
+            ret.put("data", Base64.encodeToString(buf, 0, off, Base64.NO_WRAP));
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("Записът не можа да се прочете: " + e.getMessage(), "RENDER_FAILED");
+        } finally {
+            f.delete();
+        }
+        return true;
+    }
+
+    @PluginMethod
+    public void renderToFile(PluginCall call) {
+        String id = "render-" + System.nanoTime();
+        String text = call.getString("text", "");
+        String voiceName = call.getString("voice", "");
+        String lang = call.getString("lang", "");
+        float pitch = call.getFloat("pitch", 1f);
+        withTts(() -> {
+            if (!ttsReady) {
+                call.reject("Гласовият двигател на телефона не се стартира.", "TTS_INIT");
+                return;
+            }
+            Voice v = voiceName == null ? null : voicesByName.get(voiceName);
+            if (v != null) tts.setVoice(v);
+            else if (lang != null && !lang.isEmpty()) {
+                int lr = tts.setLanguage(Locale.forLanguageTag(lang));
+                if (lr == TextToSpeech.LANG_MISSING_DATA || lr == TextToSpeech.LANG_NOT_SUPPORTED) {
+                        call.reject("Гласовият двигател на телефона няма глас на този език.", "NO_LANG");
+                    return;
+                }
+            }
+            tts.setSpeechRate(1f);
+            tts.setPitch(pitch);
+            File dir = new File(getContext().getCacheDir(), "render");
+            if (!dir.exists()) dir.mkdirs();
+            File f = new File(dir, id + ".wav");
+            synchronized (renders) {
+                renders.put(id, call);
+                renderFiles.put(id, f);
+            }
+            int r = tts.synthesizeToFile(text, new Bundle(), f, id);
+            if (r == TextToSpeech.ERROR) finishRender(id, "Гласовият двигател не може да записва във файл.");
         });
     }
 

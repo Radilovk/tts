@@ -5,7 +5,7 @@
 
 import { LOCALES } from './text.js';
 import { encodeOpus } from './opus.js';
-import { isNative, nativeVoices, nativeVoiceLabel, onNativeVoices } from './native.js';
+import { isNative, Native, nativeVoices, nativeVoiceLabel, onNativeVoices } from './native.js';
 
 export const GEMINI_VOICES = [
     ['Kore', 'жен., уверен'], ['Aoede', 'жен., лек'], ['Leda', 'жен., младежки'], ['Zephyr', 'жен., ярък'],
@@ -521,6 +521,76 @@ function noteCheck(problem) {
     lastKind = kind;
     if (sameKind >= 3) { disabledChecks.add(kind); return true; }
     return false;
+}
+
+// ---------- phone voice in "studio" mode (Android) ----------
+//
+// The engine (Supertonic, Google…) records the passage into a WAV file instead of
+// speaking it live. That gives full control over what is heard: silences longer than
+// maxPause are shortened (engines pause long between paragraphs and at the start/end
+// of every request), the level is evened out, and the passage is played, cached and
+// highlighted like any narrated passage — no waiting between passages, since the next
+// ones are recorded ahead.
+
+function resampleTo(pcm, from, to) {
+    if (from === to || !pcm.length) return pcm;
+    const n = Math.floor(pcm.length * to / from);
+    const out = new Int16Array(n);
+    const step = from / to;
+    for (let i = 0; i < n; i++) {
+        const x = i * step, k = Math.floor(x), f = x - k;
+        const a = pcm[k] || 0, b = pcm[k + 1] ?? a;
+        out[i] = a + (b - a) * f;
+    }
+    return out;
+}
+
+// Shorten every silence inside the speech to at most maxSec (the middle is cut out,
+// so the voice ends and starts naturally on both sides)
+export function capPauses(pcm, rate, maxSec) {
+    const n = Math.round(rate * 0.01);
+    const frames = Math.floor(pcm.length / n);
+    if (frames < 10 || !(maxSec > 0)) return pcm;
+    const e = new Float64Array(frames);
+    for (let f = 0; f < frames; f++) {
+        let s = 0;
+        for (let i = f * n, end = i + n; i < end; i++) s += pcm[i] * pcm[i];
+        e[f] = s / n;
+    }
+    const sorted = Float64Array.from(e).sort();
+    const loud = sorted[Math.floor(frames * 0.9)] || 0;
+    const quiet = Math.max(loud * 0.015, 200);
+    const maxF = Math.round(maxSec * 100);
+    const keep = [];
+    let f = 0, start = 0;
+    while (f < frames) {
+        if (e[f] >= quiet) { f++; continue; }
+        let g = f;
+        while (g < frames && e[g] < quiet) g++;
+        if (g - f > maxF) {
+            const half = Math.floor(maxF / 2);
+            keep.push([start, (f + half) * n]);
+            start = (g - (maxF - half)) * n;
+        }
+        f = g;
+    }
+    keep.push([start, pcm.length]);
+    if (keep.length === 1) return pcm;
+    const len = keep.reduce((a, [x, y]) => a + (y - x), 0);
+    const out = new Int16Array(len);
+    let o = 0;
+    for (const [x, y] of keep) { out.set(pcm.subarray(x, y), o); o += y - x; }
+    return out;
+}
+
+export async function deviceRender({ text, voice, lang, pitch = 1, maxPause = 0.45 }) {
+    const { data } = await Native.renderToFile({ text, voice: voice || '', lang, pitch });
+    const { pcm, rate } = parseWavPcm(base64ToBytes(data));
+    if (pcm.length < rate * 0.2) throw Object.assign(new Error('Гласовият двигател не записа нищо.'), { code: 'RENDER_FAILED' });
+    // Opus takes 8/12/16/24/48 kHz; engines often record at 22.05 or 44.1 kHz
+    const target = [8000, 12000, 16000, 24000, 48000].includes(rate) ? rate : 24000;
+    const even = capPauses(resampleTo(pcm, rate, target), target, maxPause);
+    return packSpeech(even, target);
 }
 
 // Trim, level and compress narration PCM → { blob, dur }

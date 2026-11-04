@@ -5,14 +5,14 @@
 
 import * as db from './db.js';
 import { buildChapterModel, chunkBoundaries, nextBoundary, chunkText, charLen, LOCALES } from './text.js';
-import { cloudNarrate, cloudBilledChars, geminiSynthesize, geminiCost, cloudTier, deviceVoices } from './engines.js';
+import { cloudNarrate, cloudBilledChars, deviceRender, geminiSynthesize, geminiCost, cloudTier, deviceVoices } from './engines.js';
 import { pendingKeys } from './batch.js';
 import { sharedGetAudio, sharedPutAudio } from './shared.js';
 import { recordUsage, monthlyGeminiUsd, cloudReserve, cloudRelease, reportCloudUsage } from './usage.js';
 import { Native, NativeAudio } from './native.js';
 import { sentenceMarks } from './align.js';
 
-const CHUNK_CHARS = { cloud: 1400, gemini: 1500 };
+const CHUNK_CHARS = { cloud: 1400, gemini: 1500, device: 1200 };
 const FAST_START_CHARS = 320;
 // Chunking v2 (new books): longer passages that end at paragraphs, so the joins between
 // separately narrated passages are fewer and fall on natural pauses.
@@ -188,6 +188,15 @@ export class Player extends EventTarget {
 
     get engine() { return this.getSettings().engine; }
 
+    // Phone voice in "studio" mode (Android): the engine records passages to files that
+    // are played like narrated audio. Live mode: the engine speaks the text itself.
+    _render() {
+        const st = this.getSettings();
+        return !!Native && st.engine === 'device' && st.deviceMode !== 'live' && !this._renderBroken;
+    }
+
+    _liveDevice() { return this.engine === 'device' && !this._render(); }
+
     async play() {
         if (!this.book) return;
         if (this.playing) return;
@@ -202,7 +211,7 @@ export class Player extends EventTarget {
             this.loading = false;
             this._emit('state');
         }
-        if (this.engine === 'device') return this._deviceSpeak(++this.session);
+        if (this._liveDevice()) return this._deviceSpeak(++this.session);
         if (this.current && this.audio.src && this.audio.currentTime > 0 && !this.audio.ended) {
             try { await this.audio.play(); } catch (e) { this._fail(e); }
             return;
@@ -214,7 +223,7 @@ export class Player extends EventTarget {
         if (!this.playing) return;
         this.playing = false;
         this.session++;
-        if (this.engine === 'device') this._stopDeviceVoice();
+        if (this._liveDevice()) this._stopDeviceVoice();
         else this.audio.pause();
         this.loading = false;
         this._emit('state');
@@ -262,7 +271,7 @@ export class Player extends EventTarget {
     // Relative skip in seconds; works on sentence units for the device voice.
     async skip(seconds) {
         if (!this.book) return;
-        if (this.engine === 'device' || !this.current) {
+        if (this._liveDevice() || !this.current) {
             const sentences = Math.round(seconds / 4);
             return this._skipSentences(sentences);
         }
@@ -300,7 +309,7 @@ export class Player extends EventTarget {
     setRate(rate) {
         this.rate = rate;
         this.audio.playbackRate = rate;
-        if (this.engine === 'device' && this.playing) {
+        if (this._liveDevice() && this.playing) {
             // Restart the current sentence at the new rate
             this.session++;
             this._stopDeviceVoice();
@@ -375,6 +384,9 @@ export class Player extends EventTarget {
         // of the cache key, so passages made before (possibly cut short) are not replayed
         if (st.engine === 'cloud') return `cloud3|${st.cloudVoice}`;
         if (st.engine === 'gemini') return `gemini|${st.geminiModel}|${st.geminiVoice}|${st.style}|${st.style === 'custom' ? st.customStyle : ''}`;
+        // Studio mode: the recording depends on engine, voice, pitch and pause length
+        // (speed is applied when playing, so it is not part of the key)
+        if (this._render()) return `devr|${st.ttsEngine || ''}|${st.deviceVoice || ''}|${st.devicePitch || 1}|${st.deviceMaxPause ?? 0.45}`;
         return 'device';
     }
 
@@ -468,6 +480,21 @@ export class Player extends EventTarget {
 
     async _synthesize(spec, book = this.book) {
         const st = spec.st || this.getSettings();
+        if (st.engine === 'device') {
+            const lang = spec.lang || this._lang();
+            try {
+                const r = await deviceRender({ text: spec.text, voice: st.deviceVoice, lang: LOCALES[lang] || lang, pitch: st.devicePitch || 1, maxPause: st.deviceMaxPause ?? 0.45 });
+                return { key: spec.key, blob: r.blob, dur: r.dur, chars: spec.chars, bookId: book.id };
+            } catch (e) {
+                // The engine cannot record to a file: read live from now on
+                if (e?.code === 'RENDER_FAILED') {
+                    this._renderBroken = true;
+                    diag(`гласът на телефона: записът във файл не работи (${e.message}) — чета на живо`);
+                    throw Object.assign(new Error(e.message), { reason: 'RENDER_FALLBACK' });
+                }
+                throw e;
+            }
+        }
         const freeKey = st.engine === 'gemini' ? usableFreeKey(st) : '';
         if (!st.apiKey && !freeKey) throw new Error('Добавете Google API ключ в настройките или изберете гласа на устройството.');
         const lang = spec.lang || this._lang();
@@ -593,6 +620,7 @@ export class Player extends EventTarget {
                 break;
             } catch (e) {
                 if (session !== this.session) return;
+                if (e?.reason === 'RENDER_FALLBACK') { this.loading = false; this._deviceSpeak(++this.session); return; }
                 // Lost connection or a busy server: wait and try again instead of stopping
                 const transient = e?.retryable || e?.status === 0 || (typeof navigator !== 'undefined' && navigator.onLine === false);
                 if (!transient || attempt >= PLAY_RETRIES.length || !this.playing || /APP_CAP|BATCH_PENDING/.test(e?.reason || '')) { this._fail(e); return; }
@@ -673,7 +701,7 @@ export class Player extends EventTarget {
     // 'previous'. Plays the new version from its beginning.
     async redoPassage(which = 'current') {
         const spec = which === 'previous' ? this.history[this.history.length - 1] : this.current;
-        if (!spec || this.engine === 'device') return false;
+        if (!spec || this._liveDevice()) return false;
         diag(`по ваша молба откъсът се чете наново (гл. ${spec.c + 1}, изр. ${spec.s0 + 1}–${spec.s1})`);
         const session = ++this.session;
         // loading first: this pause is ours, not the listener's
@@ -746,7 +774,7 @@ export class Player extends EventTarget {
 
     _eagerPrefetch() {
         const st = this.getSettings();
-        return st.engine === 'cloud' || !!this.book?.factory;
+        return st.engine === 'cloud' || !!this.book?.factory || this._render();
     }
 
     _prefetchMargin() {
@@ -835,7 +863,7 @@ export class Player extends EventTarget {
         a.addEventListener('pause', () => {
             if (unlockClip()) return;
             // Paused externally (headphones unplugged, lock screen)
-            if (this.playing && !atEnd() && this.engine !== 'device' && !this.loading) {
+            if (this.playing && !atEnd() && !this._liveDevice() && !this.loading) {
                 diag(`спряно отвън${a.pausedBy === 'focus' ? ' (Android даде звука на друго — разговор, навигация)' : a.pausedBy === 'noisy' ? ' (слушалките са изключени)' : ''} на ${a.currentTime.toFixed(1)} от ${(a.duration || 0).toFixed(1)} сек.`);
                 this.playing = false;
                 this._emit('state');
@@ -866,7 +894,7 @@ export class Player extends EventTarget {
     _watchdog() {
         let lastT = -1, still = 0, loadingSince = 0;
         setInterval(() => {
-            if (!this.playing || this.engine === 'device' || this._seekTimer || !this.book) { still = 0; lastT = -1; loadingSince = 0; return; }
+            if (!this.playing || this._liveDevice() || this._seekTimer || !this.book) { still = 0; lastT = -1; loadingSince = 0; return; }
             const a = this.audio;
             if (this.loading) {
                 // Synthesis with retries has its own limits; only a load that never ends
