@@ -327,16 +327,37 @@ function parseWavPcm(bytes) {
     return { pcm: new Int16Array(0), rate };
 }
 
+// The passage comes as Ogg/Opus (~0.6 MB for two minutes; raw PCM was ~9 MB, too slow
+// on a phone connection) and is decoded on the device for the checks.
+async function decodeToPcm(bytes) {
+    const Ctx = typeof window !== 'undefined' && (window.OfflineAudioContext || window.webkitOfflineAudioContext);
+    if (!Ctx) return null;
+    try {
+        const ctx = new Ctx(1, PCM_RATE, PCM_RATE);
+        const buf = await ctx.decodeAudioData(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+        const f = buf.getChannelData(0);
+        const pcm = new Int16Array(f.length);
+        for (let i = 0; i < f.length; i++) pcm[i] = Math.max(-32768, Math.min(32767, Math.round(f[i] * 32767)));
+        return pcm;
+    } catch {
+        return null;
+    }
+}
+
 async function cloudPcmOnce({ apiKey, text, voice, locale, signal }) {
     const body = cloudRequestBody({ text, voice, locale });
-    body.audioConfig = { audioEncoding: 'LINEAR16', sampleRateHertz: PCM_RATE };
+    body.audioConfig = { audioEncoding: 'OGG_OPUS', sampleRateHertz: PCM_RATE };
     const data = await withRetry(() => fetchJson(`${CLOUD_BASE}/text:synthesize?key=${encodeURIComponent(apiKey)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-    }, 60000, signal), signal, 5);
+    }, 60000, signal), signal, 4);
     if (!data?.audioContent) throw new ApiError('Не е получено аудио.', 0, true);
-    return parseWavPcm(base64ToBytes(data.audioContent));
+    const bytes = base64ToBytes(data.audioContent);
+    const original = new Blob([bytes], { type: 'audio/ogg' });
+    const pcm = await decodeToPcm(bytes);
+    // Cannot decode here: play Google's audio as it is, unchecked
+    return { pcm, rate: PCM_RATE, original };
 }
 
 // Where speech starts and ends, and whether the audio stops inside a word.
@@ -441,8 +462,14 @@ export async function cloudNarrate({ apiKey, text, voice, locale, signal, before
                 if (e instanceof ApiError && e.status === 400 && !SETUP_REASONS.test(e.reason) && t.length > 200) return { refused: e };
                 throw e;
             }
-            const problem = passageProblem(r.pcm, r.rate, t.length, voice);
-            if (!problem) return { ...r, problem: '' };
+            const problem = r.pcm ? passageProblem(r.pcm, r.rate, t.length, voice) : '';
+            if (!problem) { noteCheck(''); return { ...r, problem: '' }; }
+            // The same defect on several passages in a row is the check misjudging this
+            // voice, not the voice failing: stop applying that check for the session
+            if (noteCheck(problem)) {
+                onIssue?.(`Google HD: проверката „${problemKind(problem)}“ се изключва — сработи на много откъси подред`);
+                return { ...r, problem: '' };
+            }
             onIssue?.(`Google HD: ${problem}${i + 1 < tries ? ' — искам откъса наново' : ''}`);
             if (!best || r.pcm.length > best.pcm.length) best = { ...r, problem };
         }
@@ -455,29 +482,56 @@ export async function cloudNarrate({ apiKey, text, voice, locale, signal, before
             onIssue?.(res.refused ? `Google отказа откъса (${res.refused.message}) — чета го на две части` : 'Google HD: чета откъса на две части');
             const parts = [];
             for (const h of halves) {
-                const r = await checked(h);
+                const r = await checked(h, 1);
                 if (r.refused) throw r.refused;
                 parts.push(r);
             }
-            res = { pcm: joinPcm(parts.map((p) => p.pcm), parts[0].rate), rate: parts[0].rate, problem: parts.map((p) => p.problem).filter(Boolean).join('; ') };
+            if (parts.some((p) => !p.pcm)) {
+                // Not decodable here: the halves as Google sent them (chained Ogg)
+                res = { pcm: null, original: new Blob(parts.map((p) => p.original), { type: 'audio/ogg' }), problem: '' };
+            } else {
+                res = { pcm: joinPcm(parts.map((p) => p.pcm), parts[0].rate), rate: parts[0].rate, problem: parts.map((p) => p.problem).filter(Boolean).join('; ') };
+            }
         } else if (res.refused) {
             throw res.refused;
         }
     }
+    if (!res.pcm) return { blob: res.original, dur: 0 };
     if (!res.problem) {
         const x = speechExtent(res.pcm, res.rate);
         if (x.speech > 1) learnPace(voice, text.length / x.speech);
     } else {
         onIssue?.(`Google HD: откъсът остава със забележка (${res.problem})`);
     }
-    return packSpeech(res.pcm, res.rate);
+    return packSpeech(res.pcm, res.rate, res.original);
+}
+
+// Which check fired: one word per kind of defect
+function problemKind(p) {
+    return /насред дума/.test(p) ? 'прекъснато' : /тишина|шум/.test(p) ? 'тишина/шум' : /кратко/.test(p) ? 'твърде кратко' : /дълго/.test(p) ? 'твърде дълго' : p;
+}
+const disabledChecks = new Set();
+let lastKind = '', sameKind = 0;
+// Records a check result; true when that kind of check is (now) switched off
+function noteCheck(problem) {
+    if (!problem) { lastKind = ''; sameKind = 0; return false; }
+    const kind = problemKind(problem);
+    if (disabledChecks.has(kind)) return true;
+    sameKind = kind === lastKind ? sameKind + 1 : 1;
+    lastKind = kind;
+    if (sameKind >= 3) { disabledChecks.add(kind); return true; }
+    return false;
 }
 
 // Trim, level and compress narration PCM → { blob, dur }
-export async function packSpeech(pcm, rate) {
+export async function packSpeech(pcm, rate, original = null) {
     const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
     const trimmed = levelLoudness(trimSilence(bytes, rate));
-    return { blob: (await encodeOpus(trimmed, rate)) || pcmToWav(trimmed, rate), dur: trimmed.length / rate };
+    const opus = await encodeOpus(trimmed, rate);
+    if (opus) return { blob: opus, dur: trimmed.length / rate };
+    // No Opus encoder on this device: Google's own Opus (compact) rather than WAV
+    if (original) return { blob: original, dur: pcm.length / rate };
+    return { blob: pcmToWav(trimmed, rate), dur: trimmed.length / rate };
 }
 
 export const CLOUD_LINKS = {

@@ -593,6 +593,7 @@ export class Player extends EventTarget {
                 // Lost connection or a busy server: wait and try again instead of stopping
                 const transient = e?.retryable || e?.status === 0 || (typeof navigator !== 'undefined' && navigator.onLine === false);
                 if (!transient || attempt >= PLAY_RETRIES.length || !this.playing || /APP_CAP|BATCH_PENDING/.test(e?.reason || '')) { this._fail(e); return; }
+                diag(`опит ${attempt + 1} неуспешен: ${e.message} (код ${e.status ?? '—'}${navigator.onLine === false ? ', телефонът е офлайн' : ''})`);
                 this.dispatchEvent(new CustomEvent('retrying', { detail: { seconds: PLAY_RETRIES[attempt], message: e.message } }));
                 await waitOnline(PLAY_RETRIES[attempt] * 1000);
                 if (session !== this.session || !this.playing) return;

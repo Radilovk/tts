@@ -12,7 +12,7 @@ import {
 import { translateChapter, translationCost, deviceTranslationAvailable, TRANSLATE_DEFAULT_MODEL } from './translate.js';
 import { isNative, Native, nativeFileUrl, loadNativeVoices, nativeEngines } from './native.js';
 import { submitChapter, pollBatches, hasJobs, pendingChapters, batchEstimate } from './batch.js';
-import { usableFreeKey, diagLog, diagClear } from './player.js';
+import { usableFreeKey, diag, diagLog, diagClear } from './player.js';
 import { exportPlan, exportChapters, packageFiles, safeFileName } from './export.js';
 import { buildJob, submitJob, jobStatus, cancelJob, downloadBook, studioVoice } from './studio.js';
 import { searchBooks, localizeTitles, SOURCES } from './search.js';
@@ -25,7 +25,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.12';
+export const APP_VERSION = '2.13';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
@@ -2119,7 +2119,7 @@ function bindEvents() {
     player.addEventListener('save', scheduleSave);
     player.addEventListener('position', savePositionSoon);
     player.addEventListener('position', maybePrepareNext);
-    player.addEventListener('retrying', (e) => { $('#pStatus').textContent = `Връзката прекъсна — опитвам отново след ${e.detail.seconds} сек…`; });
+    player.addEventListener('retrying', (e) => { $('#pStatus').textContent = `${navigator.onLine === false ? 'Няма интернет' : (e.detail.message || 'Временен проблем')} — опитвам отново след ${e.detail.seconds} сек…`; });
     player.addEventListener('translating', (e) => { $('#pStatus').textContent = `Превеждам главата… ${Math.round(e.detail * 100)}%`; });
     player.addEventListener('translated', () => {
         renderedChapter = -1;
@@ -2148,6 +2148,15 @@ function bindEvents() {
             updatePlayerUI();
             toast(err.message + ' Продължавам с гласа на телефона.', { duration: 9000, action: { label: 'Настройки', run: openSettings } });
             player.play();
+            return;
+        }
+        // The phone's speech engine has no Bulgarian voice (common on Huawei without
+        // Google services) or does not start: say what to install / choose
+        if (settings.engine === 'device' && /^(NO_LANG|TTS_INIT)$/.test(err.code || '')) {
+            diag(`гласът на телефона: ${err.message}`);
+            toast(`${err.message} Безплатен естествен български глас: Supertonic TTS (от F-Droid) — после го изберете в Настройки → Гласов двигател.`, {
+                error: true, duration: 15000, action: { label: 'Настройки', run: openSettings },
+            });
             return;
         }
         const offerDevice = settings.engine !== 'device';

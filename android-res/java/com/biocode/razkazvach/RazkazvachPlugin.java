@@ -123,6 +123,19 @@ public class RazkazvachPlugin extends Plugin {
         tts = enginePackage == null
             ? new TextToSpeech(getContext(), listener)
             : new TextToSpeech(getContext(), listener, enginePackage);
+        // An engine that never reports back (broken or missing) must not leave the
+        // reader waiting forever: after 10 s the waiting requests fail with a message
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+            List<Runnable> run;
+            synchronized (pendingTts) {
+                if (!ttsInitializing) return;
+                ttsInitializing = false;
+                ttsReady = false;
+                run = new ArrayList<>(pendingTts);
+                pendingTts.clear();
+            }
+            for (Runnable x : run) x.run();
+        }, 10000);
     }
 
     private final UtteranceProgressListener progressListener = new UtteranceProgressListener() {
@@ -247,12 +260,22 @@ public class RazkazvachPlugin extends Plugin {
         int pauseAfter = call.getInt("pauseAfter", 0);
         withTts(() -> {
             if (!ttsReady) {
-                call.reject("Синтезът на реч не е наличен на това устройство.");
+                call.reject("Гласовият двигател на телефона не се стартира. Изберете друг двигател в Настройки → Гласов двигател.", "TTS_INIT");
                 return;
             }
             Voice v = voiceName == null ? null : voicesByName.get(voiceName);
             if (v != null) tts.setVoice(v);
-            else if (lang != null && !lang.isEmpty()) tts.setLanguage(Locale.forLanguageTag(lang));
+            else if (lang != null && !lang.isEmpty()) {
+                int lr = tts.setLanguage(Locale.forLanguageTag(lang));
+                // The engine has no voice for this language: say so instead of reading
+                // in another language or staying silent
+                if (lr == TextToSpeech.LANG_MISSING_DATA || lr == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    call.reject(lr == TextToSpeech.LANG_MISSING_DATA
+                        ? "Гласът за този език не е изтеглен в гласовия двигател на телефона."
+                        : "Гласовият двигател на телефона няма глас на този език.", "NO_LANG");
+                    return;
+                }
+            }
             tts.setSpeechRate(rate);
             tts.setPitch(pitch);
             Bundle params = new Bundle();

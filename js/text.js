@@ -111,8 +111,15 @@ export function cleanForSpeech(s, lang = 'bg') {
         .replace(/([а-яa-z»"”.,!?])\d{1,3}(?=[\s.,;:!?]|$)/gi, '$1') // trailing footnote digits
         .replace(/^[\s*•·~#=_\-–—]{3,}$/g, '')
         .replace(/[*_#]{2,}/g, '')
+        // Leftovers of what was removed: "()", "сутрин .", ". .", ", ,"
+        .replace(/[(\[]\s*[,;:.\s]*[)\]]/g, '')
+        .replace(/\s+([.,;:!?…])/g, '$1')
+        .replace(/[.,;:](?:\s*[.,;:])+/g, (m) => m.trim().slice(-1))
+        .replace(/^[\s.,;:)\]–—-]+/, '')
         .replace(/\s{2,}/g, ' ')
-        .trim();
+        .trim()
+        // Nothing left to say (only punctuation or symbols): not sent to the voice at all
+        .replace(/^[^\p{L}\p{N}]*$/u, '');
 }
 
 function rawSentences(text, lang) {
