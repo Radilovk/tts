@@ -5,14 +5,18 @@
 
 import * as db from './db.js';
 import { buildChapterModel, chunkBoundaries, nextBoundary, chunkText, charLen, LOCALES } from './text.js';
-import { cloudNarrate, cloudBilledChars, deviceRender, geminiSynthesize, geminiCost, cloudTier, deviceVoices } from './engines.js';
+import { cloudNarrate, cloudBilledChars, deviceRender, lastRenderSpeed, geminiSynthesize, geminiCost, cloudTier, deviceVoices } from './engines.js';
 import { pendingKeys } from './batch.js';
 import { sharedGetAudio, sharedPutAudio } from './shared.js';
 import { recordUsage, monthlyGeminiUsd, cloudReserve, cloudRelease, reportCloudUsage } from './usage.js';
 import { Native, NativeAudio } from './native.js';
 import { sentenceMarks } from './align.js';
 
-const CHUNK_CHARS = { cloud: 1400, gemini: 1500, device: 1200 };
+// Phone voice in studio mode: short, even passages (~200 characters). A passage plays only
+// once all of it is recorded, and the next ones are recorded while it plays — so each
+// only has to be ready faster than the previous one lasts, and the lead grows passage by
+// passage (Supertonic itself generates sentence by sentence, up to 300 characters)
+const CHUNK_CHARS = { cloud: 1400, gemini: 1500, device: 200 };
 const FAST_START_CHARS = 320;
 // Chunking v2 (new books): longer passages that end at paragraphs, so the joins between
 // separately narrated passages are fewer and fall on natural pauses.
@@ -484,6 +488,7 @@ export class Player extends EventTarget {
             const lang = spec.lang || this._lang();
             try {
                 const r = await deviceRender({ text: spec.text, voice: st.deviceVoice, lang: LOCALES[lang] || lang, pitch: st.devicePitch || 1, maxPause: st.deviceMaxPause ?? 0.45 });
+                this._noteRenderSpeed();
                 return { key: spec.key, blob: r.blob, dur: r.dur, chars: spec.chars, bookId: book.id };
             } catch (e) {
                 // The engine cannot record to a file: read live from now on
@@ -562,11 +567,17 @@ export class Player extends EventTarget {
     // Short opening piece of a chunk, so playback starts within seconds. The split
     // point depends only on the text, so the pieces get the same cache keys every time.
     _fastMin() {
+        if (this._render()) return 60;
         return this.book?.chunkV >= 2 ? FAST_START_V2.min : FAST_START_CHARS;
     }
 
     _fastSplit(m, s0, s1) {
         let n = 0, k = s0;
+        // Phone voice: start with one sentence, so the first sound comes in a second or two
+        if (this._render()) {
+            while (k < s1 - 1 && n < 60) { n += m.sentences[k].speak.length + 1; k++; }
+            return Math.max(k, s0 + 1);
+        }
         if (this.book?.chunkV >= 2) {
             // End the opening piece with a paragraph, so the join sounds like a pause
             while (k < s1 - 1 && n < FAST_START_V2.max) {
@@ -696,6 +707,22 @@ export class Player extends EventTarget {
         this._prefetchedFor = null;
     }
 
+    // Supertonic generates sentence by sentence; if it needs nearly as long as the
+    // speech lasts (or longer), no buffering can stay ahead and there are gaps. The usual
+    // cause is a high "Quality" (diffusion steps) in the engine's own app.
+    _noteRenderSpeed() {
+        const r = lastRenderSpeed;
+        if (!r || r.audio < 3) return;
+        const ratio = r.took / r.audio;
+        this._renderRatios = [...(this._renderRatios || []), ratio].slice(-6);
+        const avg = this._renderRatios.reduce((a, b) => a + b, 0) / this._renderRatios.length;
+        diag(`гласът на телефона: ${r.audio.toFixed(1)} сек. реч записани за ${r.took.toFixed(1)} сек. (×${ratio.toFixed(2)})`);
+        if (this._renderRatios.length >= 3 && avg > 0.75 && !this._slowWarned) {
+            this._slowWarned = true;
+            this.dispatchEvent(new CustomEvent('slowengine', { detail: { ratio: avg } }));
+        }
+    }
+
     // The listener heard a bad passage (a skipped word, noise, an odd reading): forget it
     // and narrate it again — every request is a new performance. which: 'current' or
     // 'previous'. Plays the new version from its beginning.
@@ -813,7 +840,7 @@ export class Player extends EventTarget {
             const left = (dur - a.currentTime) / (a.playbackRate || 1);
             if (left < this._prefetchMargin() && this._prefetchedFor !== this.current.key) {
                 this._prefetchedFor = this.current.key;
-                this._prefetch(this.current, this.session, this._eagerPrefetch() ? 2 : 1);
+                this._prefetch(this.current, this.session, this._render() ? 4 : this._eagerPrefetch() ? 2 : 1);
             }
             this._emit('time');
         });

@@ -25,7 +25,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.16';
+export const APP_VERSION = '2.17';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
@@ -2184,6 +2184,11 @@ function bindEvents() {
     });
     player.addEventListener('sleep', () => { sleepTimer = null; updateSleepChip(); toast('Лека нощ. Спрях в края на главата.'); });
     player.addEventListener('finished', () => toast('Краят на книгата. Надявам се, че ви е харесала.'));
+    player.addEventListener('slowengine', (e) => {
+        toast(`Гласовият двигател генерира почти толкова бавно, колкото се чете (×${e.detail.ratio.toFixed(2)}), и не успява да изпревари гласа — затова има паузи. В Supertonic намалете Quality на 4–5 стъпки (сега вероятно е 10).`, {
+            duration: 15000, action: isNative ? { label: 'Отвори Supertonic', run: () => Native.openEngineApp().catch(() => {}) } : null,
+        });
+    });
     player.addEventListener('error', (e) => {
         const err = e.detail;
         console.error(err);

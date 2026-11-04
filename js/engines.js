@@ -583,14 +583,24 @@ export function capPauses(pcm, rate, maxSec) {
     return out;
 }
 
+// How long the engine took to record the last passage vs how long it plays: above ~0.8
+// the engine cannot get ahead of the listener and gaps are unavoidable
+export let lastRenderSpeed = null;
+
 export async function deviceRender({ text, voice, lang, pitch = 1, maxPause = 0.45 }) {
+    const t0 = performance.now();
     const { data } = await Native.renderToFile({ text, voice: voice || '', lang, pitch });
+    const took = (performance.now() - t0) / 1000;
     const { pcm, rate } = parseWavPcm(base64ToBytes(data));
+
     if (pcm.length < rate * 0.2) throw Object.assign(new Error('Гласовият двигател не записа нищо.'), { code: 'RENDER_FAILED' });
     // Opus takes 8/12/16/24/48 kHz; engines often record at 22.05 or 44.1 kHz
     const target = [8000, 12000, 16000, 24000, 48000].includes(rate) ? rate : 24000;
     const even = capPauses(resampleTo(pcm, rate, target), target, maxPause);
-    return packSpeech(even, target);
+    const out = await packSpeech(even, target);
+    // Compared with what is actually heard (after the long silences are cut)
+    lastRenderSpeed = { took, audio: out.dur };
+    return out;
 }
 
 // Trim, level and compress narration PCM → { blob, dur }
