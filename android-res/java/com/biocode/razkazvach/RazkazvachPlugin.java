@@ -159,6 +159,16 @@ public class RazkazvachPlugin extends Plugin {
             emit("ttsError", id);
         }
 
+        // The engine says which part of the text it is speaking (Android 8+): the web side
+        // moves the highlight to that sentence of the paragraph
+        @Override
+        public void onRangeStart(String id, int start, int end, int frame) {
+            JSObject data = new JSObject();
+            data.put("id", id);
+            data.put("start", start);
+            notifyListeners("ttsRange", data);
+        }
+
         @Override
         public void onStop(String id, boolean interrupted) {
             // Stopped on purpose (pause / seek) — the web side already knows.
@@ -284,6 +294,18 @@ public class RazkazvachPlugin extends Plugin {
             if (r == TextToSpeech.ERROR) call.reject("Грешка при четене.");
             else call.resolve();
         });
+    }
+
+    /** Open the speech engine's own app (Supertonic: voice mix, quality, de-esser). */
+    @PluginMethod
+    public void openEngineApp(PluginCall call) {
+        String pkg = enginePackage;
+        if ((pkg == null || pkg.isEmpty()) && tts != null) pkg = tts.getDefaultEngine();
+        Intent i = pkg == null ? null : getContext().getPackageManager().getLaunchIntentForPackage(pkg);
+        if (i == null) { call.reject("Този двигател няма собствени настройки."); return; }
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        getContext().startActivity(i);
+        call.resolve();
     }
 
     @PluginMethod

@@ -25,7 +25,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.13';
+export const APP_VERSION = '2.14';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
@@ -1526,8 +1526,36 @@ function renderVoiceGroup(box, lang) {
                         ${nativeEngines().engines.map((e) => `<option value="${esc(e.name)}" ${e.name === nativeEngines().current ? 'selected' : ''}>${esc(e.label)}</option>`).join('')}
                     </select>
                 </div>
-                <button class="btn btn-ghost btn-sm" id="btnTtsSettings">Изтегли още гласове</button>
-                <p class="hint">Чете и при изгасен екран. „HD“ гласовете звучат най-естествено; „онлайн“ гласовете искат интернет.</p>`
+                <div class="row">
+                    <span class="row-label">Четене<small>Цял абзац наведнъж: невронните гласове (Supertonic) свързват изреченията с естествена интонация и без паузи помежду им</small></span>
+                    <select class="select" id="setDeviceUnit">
+                        <option value="paragraph" ${(settings.deviceUnit || 'paragraph') === 'paragraph' ? 'selected' : ''}>По абзаци</option>
+                        <option value="sentence" ${settings.deviceUnit === 'sentence' ? 'selected' : ''}>По изречения</option>
+                    </select>
+                </div>
+                <div class="row">
+                    <span class="row-label">Пауза между абзаците<small>Добавя се към паузата, която гласът прави сам</small></span>
+                    <select class="select" id="setDevicePause">
+                        ${[[0, 'без'], [100, '0.1 сек.'], [150, '0.15 сек.'], [250, '0.25 сек.'], [400, '0.4 сек.'], [700, '0.7 сек.']].map(([v, l]) => `<option value="${v}" ${(settings.devicePause ?? 150) === v ? 'selected' : ''}>${l}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="row">
+                    <span class="row-label">Пауза след заглавие</span>
+                    <select class="select" id="setDeviceHeadPause">
+                        ${[[200, '0.2 сек.'], [500, '0.5 сек.'], [800, '0.8 сек.'], [1200, '1.2 сек.']].map(([v, l]) => `<option value="${v}" ${(settings.deviceHeadPause ?? 500) === v ? 'selected' : ''}>${l}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="row">
+                    <span class="row-label">Височина на гласа</span>
+                    <select class="select" id="setDevicePitch">
+                        ${[0.85, 0.9, 0.95, 1, 1.05, 1.1, 1.15].map((v) => `<option value="${v}" ${(settings.devicePitch || 1) === v ? 'selected' : ''}>${v === 1 ? 'нормална' : (v < 1 ? 'по-ниска ' : 'по-висока ') + Math.round(Math.abs(v - 1) * 100) + '%'}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="field">
+                    <button class="btn btn-ghost btn-sm" id="btnEngineApp">Настройки на двигателя</button>
+                    <button class="btn btn-ghost btn-sm" id="btnTtsSettings">Още гласове</button>
+                </div>
+                <p class="hint">Скоростта е бутонът ×1.0 в плейъра. Стил, смесване на гласове и качество (Supertonic: Voice Style, Mix Voices, Quality) се задават в приложението на двигателя — „Настройки на двигателя“; там оставете скоростта 1.0×, за да не се умножава с тази от плейъра.</p>`
             : '<p class="hint">Съвет: в настройките на Android изберете „Речеви услуги от Google“ и изтеглете гласа в най-високо качество.</p>'}`;
         const sel = $('#setDeviceVoice', box);
         if (sel) sel.onchange = () => { settings.deviceVoice = sel.value; saveSettings(); player.voiceChanged(); };
@@ -1542,6 +1570,17 @@ function renderVoiceGroup(box, lang) {
         };
         const ttsSet = $('#btnTtsSettings', box);
         if (ttsSet) ttsSet.onclick = () => Native.openTtsSettings();
+        const engApp = $('#btnEngineApp', box);
+        if (engApp) engApp.onclick = () => Native.openEngineApp().catch((e) => toast(e.message, { error: true }));
+        // Reading options: take effect from the next paragraph handed to the engine
+        const bindSel = (id, key, num = true) => {
+            const el = $(id, box);
+            if (el) el.onchange = () => { settings[key] = num ? Number(el.value) : el.value; saveSettings(); player.voiceChanged(); };
+        };
+        bindSel('#setDeviceUnit', 'deviceUnit', false);
+        bindSel('#setDevicePause', 'devicePause');
+        bindSel('#setDeviceHeadPause', 'deviceHeadPause');
+        bindSel('#setDevicePitch', 'devicePitch');
     } else if (engine === 'cloud') {
         box.innerHTML = `<div class="group-title">Глас</div><p class="hint" id="cloudVoiceMsg">Зареждам гласовете…</p>`;
         if (!effectiveSettings().apiKey || !settings.cloudReady) {
@@ -1711,7 +1750,7 @@ async function previewVoice(btn) {
     if (st.engine !== 'device') unlockAudio(audioEl);
     if (st.engine === 'device' && isNative) {
         const v = deviceVoices(lang).find((x) => x.voiceURI === st.deviceVoice) || deviceVoices(lang)[0];
-        Native.speak({ id: 'preview', text, voice: v?.voiceURI || '', lang: LOCALES[lang] || lang, rate: player.rate, pitch: 1, flush: true }).catch((e) => toast(e.message, { error: true }));
+        Native.speak({ id: 'preview', text, voice: v?.voiceURI || '', lang: LOCALES[lang] || lang, rate: player.rate, pitch: settings.devicePitch || 1, flush: true }).catch((e) => toast(e.message, { error: true }));
         return;
     }
     if (st.engine === 'device') {

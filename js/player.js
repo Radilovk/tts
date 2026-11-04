@@ -85,6 +85,9 @@ export class Player extends EventTarget {
         this.synthSeconds = {};       // engine -> average synthesis time
         this._seekTimer = null;
         this._nq = [];                // native utterance ids queued in Android TTS
+        this._nOffs = new Map();      // utterance id -> [[sentence, char offset]]
+        this._nLen = new Map();
+        this._nStarted = new Map();
         this._bindAudio();
         if (Native) this._bindNative();
     }
@@ -932,12 +935,54 @@ export class Player extends EventTarget {
     // Sentences are queued in the native engine a few at a time, so reading goes
     // on with the screen off even when the WebView is slow to respond.
 
+    // Engines that do not report word positions: move the highlight through the
+    // paragraph by the characters spoken at the learned pace (corrected by every
+    // paragraph's real length)
+    _nEstimate(id, u) {
+        clearInterval(this._nEstTimer);
+        if (this._nRanges) return;
+        const offs = this._nOffs.get(id);
+        if (!offs || offs.length < 2) return;
+        const t0 = Date.now();
+        const cps = (this._nCps || 14) * this.rate;
+        this._nEstTimer = setInterval(() => {
+            if (u.sess !== this.session || !this.playing || this._nRanges) { clearInterval(this._nEstTimer); return; }
+            const at = (Date.now() - t0) / 1000 * cps;
+            let s = offs[0][0];
+            for (const [i, o] of offs) if (o <= at) s = i;
+            if (s !== this.pos.s) { this.pos = { c: u.c, s }; this._emit('position'); }
+        }, 400);
+    }
+
     _nativeStart(session) {
         this._nq = [];
         this._nCursor = { ...this.pos };
         this._nFlush = true;
         this._nStopAtChapter = false;
         this._nativeFill(session);
+    }
+
+    // What to hand to the Android engine next, starting at sentence s of chapter c:
+    // a whole paragraph (up to ~1000 characters, ending at a sentence) or one sentence.
+    // A neural engine (Supertonic, Google HD) shapes the intonation over everything it
+    // gets, so a paragraph sounds connected and has no gaps between its sentences.
+    _nativeUnit(m, s) {
+        const st = this.getSettings();
+        const sent = m.sentences[s];
+        if ((st.deviceUnit || 'paragraph') === 'sentence') return { e: s + 1, text: sent.speak, offs: [[s, 0]] };
+        let text = '', e = s;
+        const offs = [];
+        while (e < m.sentences.length && m.sentences[e].p === sent.p) {
+            const x = m.sentences[e];
+            if (x.speak) {
+                if (text && text.length + x.speak.length > 1000) break;
+                if (text) text += ' ';
+                offs.push([e, text.length]);
+                text += x.speak;
+            }
+            e++;
+        }
+        return { e, text, offs };
     }
 
     async _nativeFill(session) {
@@ -956,20 +1001,27 @@ export class Player extends EventTarget {
                     this._nCursor = { c: c + 1, s: 0 };
                     continue;
                 }
-                this._nCursor = { c, s: s + 1 };
-                const sent = m.sentences[s];
-                if (!sent.speak) continue;
-                const next = m.sentences[s + 1];
-                const pause = !next ? 900 : next.p !== sent.p ? (m.paras[sent.p].h ? 800 : 450) : 0;
-                const id = `${session}|${c}|${s}`;
+                if (!m.sentences[s].speak) { this._nCursor = { c, s: s + 1 }; continue; }
+                const unit = this._nativeUnit(m, s);
+                this._nCursor = { c, s: unit.e };
+                const last = m.sentences[unit.e - 1];
+                const next = m.sentences[unit.e];
                 const st = this.getSettings();
+                const paraPause = st.devicePause ?? 150;
+                const headPause = st.deviceHeadPause ?? 500;
+                // Pause after the unit: none inside a paragraph (the engine pauses at the
+                // full stop itself), short between paragraphs, longer after a heading
+                const pause = !next ? 600 : next.p !== last.p ? (m.paras[last.p].h ? headPause : paraPause) : 0;
+                const id = `${session}|${c}|${s}|${unit.e}`;
                 const lang = this._lang();
+                this._nOffs.set(id, unit.offs);
+                this._nLen.set(id, unit.text.length);
                 this._nq.push(id);
                 await Native.speak({
-                    id, text: sent.speak, voice: st.deviceVoice || '', lang: LOCALES[lang] || lang,
-                    rate: this.rate, pitch: 1, flush: this._nFlush, pauseAfter: Math.round(pause / this.rate),
+                    id, text: unit.text, voice: st.deviceVoice || '', lang: LOCALES[lang] || lang,
+                    rate: this.rate, pitch: st.devicePitch || 1, flush: this._nFlush, pauseAfter: Math.round(pause / this.rate),
                 });
-                // Stopped or another book opened while the sentence was being handed over
+                // Stopped or another book opened while the text was being handed over
                 if (session !== this.session) { if (!this.playing) Native.stopSpeaking().catch(() => {}); return; }
                 this._nFlush = false;
             }
@@ -984,9 +1036,24 @@ export class Player extends EventTarget {
 
     _bindNative() {
         const parse = (id) => {
-            const [sess, c, s] = String(id).split('|').map(Number);
-            return { sess, c, s };
+            const [sess, c, s, e] = String(id).split('|').map(Number);
+            return { sess, c, s, e: e || s + 1 };
         };
+        // The engine says which character it is speaking: the sentence it belongs to
+        Native.addListener('ttsRange', ({ id, start }) => {
+            const u = parse(id);
+            if (u.sess !== this.session || !this.playing) return;
+            const offs = this._nOffs.get(id);
+            if (!offs) return;
+            let s = offs[0][0];
+            for (const [i, o] of offs) if (o <= start) s = i;
+            if (s !== this.pos.s || u.c !== this.pos.c) {
+                this.pos = { c: u.c, s };
+                this._nRanges = true;
+                this._emit('position');
+                this._prefetchTranslation(u.c, s);
+            }
+        });
         Native.addListener('ttsStart', ({ id }) => {
             if (String(id).endsWith(':pause')) return;
             const u = parse(id);
@@ -996,10 +1063,22 @@ export class Player extends EventTarget {
             this._emit('position');
             this._emit('save');
             this._prefetchTranslation(u.c, u.s);
+            this._nStarted.set(id, Date.now());
+            this._nEstimate(id, u);
         });
         Native.addListener('ttsDone', ({ id }) => {
             if (String(id).endsWith(':pause')) return;
             const u = parse(id);
+            clearInterval(this._nEstTimer);
+            // Learn how fast this voice reads (characters per second at speed 1)
+            const t0 = this._nStarted.get(id), len = this._nLen.get(id);
+            if (t0 && len > 60) {
+                const cps = len / ((Date.now() - t0) / 1000) / (this.rate || 1);
+                if (cps > 5 && cps < 40) this._nCps = this._nCps ? this._nCps * 0.7 + cps * 0.3 : cps;
+            }
+            this._nStarted.delete(id);
+            this._nLen.delete(id);
+            this._nOffs.delete(id);
             this._nq = this._nq.filter((x) => x !== id);
             if (u.sess !== this.session || !this.playing) return;
             if (this._nStopAtChapter && !this._nq.length) {
