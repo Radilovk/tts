@@ -25,7 +25,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.14';
+export const APP_VERSION = '2.15';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
@@ -1527,14 +1527,15 @@ function renderVoiceGroup(box, lang) {
                     </select>
                 </div>
                 <div class="row">
-                    <span class="row-label">Четене<small>Цял абзац наведнъж: невронните гласове (Supertonic) свързват изреченията с естествена интонация и без паузи помежду им</small></span>
+                    <span class="row-label">Четене<small>Непрекъснато: няколко абзаца наведнъж (до ~1200 знака) — гласът ги свързва със собствената си пауза след точка, без забавяне при всеки абзац. „По абзаци“: всеки абзац отделно, с паузата отдолу</small></span>
                     <select class="select" id="setDeviceUnit">
-                        <option value="paragraph" ${(settings.deviceUnit || 'paragraph') === 'paragraph' ? 'selected' : ''}>По абзаци</option>
+                        <option value="continuous" ${(settings.deviceUnit || 'continuous') === 'continuous' ? 'selected' : ''}>Непрекъснато</option>
+                        <option value="paragraph" ${settings.deviceUnit === 'paragraph' ? 'selected' : ''}>По абзаци</option>
                         <option value="sentence" ${settings.deviceUnit === 'sentence' ? 'selected' : ''}>По изречения</option>
                     </select>
                 </div>
                 <div class="row">
-                    <span class="row-label">Пауза между абзаците<small>Добавя се към паузата, която гласът прави сам</small></span>
+                    <span class="row-label">Пауза между абзаците<small>Само при „По абзаци“/„По изречения“ и след всеки ~1200 знака; добавя се към паузата на гласа</small></span>
                     <select class="select" id="setDevicePause">
                         ${[[0, 'без'], [100, '0.1 сек.'], [150, '0.15 сек.'], [250, '0.25 сек.'], [400, '0.4 сек.'], [700, '0.7 сек.']].map(([v, l]) => `<option value="${v}" ${(settings.devicePause ?? 150) === v ? 'selected' : ''}>${l}</option>`).join('')}
                     </select>

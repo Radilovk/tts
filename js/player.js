@@ -962,25 +962,40 @@ export class Player extends EventTarget {
         this._nativeFill(session);
     }
 
-    // What to hand to the Android engine next, starting at sentence s of chapter c:
-    // a whole paragraph (up to ~1000 characters, ending at a sentence) or one sentence.
-    // A neural engine (Supertonic, Google HD) shapes the intonation over everything it
-    // gets, so a paragraph sounds connected and has no gaps between its sentences.
+    // What to hand to the Android engine next, starting at sentence s of chapter c.
+    // Every request to an engine costs a fixed gap (its own silence before and after,
+    // and the time to synthesize before it speaks) — with short paragraphs that gap came
+    // after every paragraph. So by default several paragraphs go at once (up to ~1200
+    // characters): the engine joins them with its natural pause after a full stop, and
+    // shapes the intonation over all of it. A heading is always its own request, so the
+    // pause after it stays. Modes: 'continuous' (default), 'paragraph', 'sentence'.
     _nativeUnit(m, s) {
-        const st = this.getSettings();
+        const mode = this.getSettings().deviceUnit || 'continuous';
         const sent = m.sentences[s];
-        if ((st.deviceUnit || 'paragraph') === 'sentence') return { e: s + 1, text: sent.speak, offs: [[s, 0]] };
+        if (mode === 'sentence') return { e: s + 1, text: sent.speak, offs: [[s, 0]] };
+        const isHead = (i) => !!m.paras[m.sentences[i].p]?.h;
+        const limit = mode === 'paragraph' ? 1000 : 1200;
         let text = '', e = s;
         const offs = [];
-        while (e < m.sentences.length && m.sentences[e].p === sent.p) {
+        while (e < m.sentences.length) {
             const x = m.sentences[e];
+            if (e > s) {
+                const newPara = x.p !== m.sentences[e - 1].p;
+                if (newPara && (mode === 'paragraph' || isHead(e) || isHead(e - 1))) break;
+                if (text && x.speak && text.length + x.speak.length > limit) break;
+            }
             if (x.speak) {
-                if (text && text.length + x.speak.length > 1000) break;
-                if (text) text += ' ';
+                if (text) {
+                    // A paragraph that does not end like a sentence gets a full stop, so the
+                    // voice pauses and lowers its tone there instead of running on
+                    if (x.p !== m.sentences[e - 1]?.p) text += (/[.!?…:;»"“”')\]]$/.test(text) ? '' : '.') + '\n';
+                    else text += ' ';
+                }
                 offs.push([e, text.length]);
                 text += x.speak;
             }
             e++;
+            if (isHead(e - 1) && e < m.sentences.length && m.sentences[e].p !== x.p) break;
         }
         return { e, text, offs };
     }
@@ -1011,7 +1026,7 @@ export class Player extends EventTarget {
                 const headPause = st.deviceHeadPause ?? 500;
                 // Pause after the unit: none inside a paragraph (the engine pauses at the
                 // full stop itself), short between paragraphs, longer after a heading
-                const pause = !next ? 600 : next.p !== last.p ? (m.paras[last.p].h ? headPause : paraPause) : 0;
+                const pause = !next ? 600 : next.p !== last.p ? (m.paras[last.p].h || m.paras[next.p]?.h ? headPause : paraPause) : 0;
                 const id = `${session}|${c}|${s}|${unit.e}`;
                 const lang = this._lang();
                 this._nOffs.set(id, unit.offs);
