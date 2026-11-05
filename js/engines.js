@@ -438,13 +438,20 @@ function joinPcm(parts, rate) {
 
 // beforeRequest(billedChars) → release() — reserves the characters (throws at the
 //   free limit); afterRequest(billedChars) records them. onIssue(message) for the log.
-export async function cloudNarrate({ apiKey, text, voice, locale, signal, beforeRequest, afterRequest, onIssue }) {
+export async function cloudNarrate({ apiKey, text, voice, locale, signal, beforeRequest, afterRequest, onIssue, onInfo }) {
     const once = async (t) => {
         const billed = cloudBilledChars(t);
         const release = beforeRequest ? beforeRequest(billed) : () => {};
         try {
+            const t0 = performance.now();
             const r = await cloudPcmOnce({ apiKey, text: t, voice, locale, signal });
             afterRequest?.(billed);
+            // What Google really returned (for the log of the first passages)
+            if (onInfo) {
+                const x = r.pcm ? speechExtent(r.pcm, r.rate) : null;
+                onInfo(`Google HD: ${t.length} знака → ${(r.original.size / 1024).toFixed(0)} KB за ${((performance.now() - t0) / 1000).toFixed(1)} сек.; ` +
+                    (x ? `реч ${x.speech.toFixed(1)} сек. (${(t.length / Math.max(0.1, x.speech)).toFixed(1)} знака/сек.), тишина в началото ${x.start.toFixed(2)}, в края ${(r.pcm.length / r.rate - x.end).toFixed(2)}, най-дълга пауза ${x.gap.toFixed(2)} сек.${x.cutOff ? ', звук до последната милисекунда' : ''}` : 'аудиото не можа да се декодира на телефона (пуска се без проверка)'));
+            }
             return r;
         } finally {
             release();

@@ -542,6 +542,8 @@ export class Player extends EventTarget {
             result = await cloudNarrate({
                 apiKey: st.apiKey, text: spec.text, voice: st.cloudVoice, locale,
                 beforeRequest, afterRequest, onIssue: (m) => diag(`${m} (гл. ${spec.c + 1}, изр. ${spec.s0 + 1}–${spec.s1})`),
+                // The first passages of each session: what Google really returned, for the log
+                onInfo: (this._cloudInfo = (this._cloudInfo || 0) + 1) <= 4 ? (m) => diag(m) : null,
             });
         } else {
             const req = { model: st.geminiModel, text: spec.text, voice: st.geminiVoice, style: st.style, customStyle: st.customStyle, lang };

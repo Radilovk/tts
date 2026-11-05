@@ -30,9 +30,12 @@ public class ReaderService extends Service {
     static final int NOTIFICATION_ID = 7;
     static volatile boolean active = false;
 
+    /** True only while the book is actually being read (not when paused). */
+    static boolean isPlaying() { return active && playing; }
+
     private static String title = "Разказвач";
     private static String subtitle = "";
-    private static boolean playing = false;
+    private static volatile boolean playing = false;
 
     private MediaSessionCompat session;
     private PowerManager.WakeLock wakeLock;
@@ -79,6 +82,8 @@ public class ReaderService extends Service {
         wakeLock.setReferenceCounted(false);
         WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
         if (wm != null) {
+            // Keeps Wi-Fi up with the screen off while the next passages download. Held only
+            // while a book is actually playing (released on pause), never in the background.
             wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "razkazvach:reader");
             wifiLock.setReferenceCounted(false);
         }

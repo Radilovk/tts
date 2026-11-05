@@ -13,7 +13,8 @@ public class MainActivity extends BridgeActivity {
     }
 
     // While a book is being read, keep the WebView running in the background
-    // (screen off / other app in front) so the next part keeps coming.
+    // (screen off / other app in front) so the next part keeps coming. Only while it
+    // is actually playing: paused, the app sleeps like any other (battery).
     @Override
     public void onPause() {
         super.onPause();
@@ -27,7 +28,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void keepWebViewAlive() {
-        if (!ReaderService.active || getBridge() == null) return;
+        if (!ReaderService.isPlaying() || getBridge() == null) return;
         WebView w = getBridge().getWebView();
         if (w == null) return;
         w.onResume();

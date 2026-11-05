@@ -166,13 +166,14 @@ class NarrationPlayer {
         try { mp.setVolume(v, v); } catch (Exception ignored) {}
     }
 
-    // ---- position updates for the text view (4 per second)
+    // ---- position updates for the text view (2 per second: enough for the highlight,
+    // half the wake-ups of the web side with the screen off)
 
     private final Runnable ticker = new Runnable() {
         @Override public void run() {
             if (mp == null || !playing) return;
             emit("time", mp);
-            main.postDelayed(this, 250);
+            main.postDelayed(this, 500);
         }
     };
 
