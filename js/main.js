@@ -7,7 +7,7 @@ import { LANG_NAMES, LOCALES, charLen, noteText } from './text.js';
 import {
     GEMINI_VOICES, GEMINI_DEFAULT_MODEL, NARRATION_STYLES, PRICES,
     cloudVoices, cloudSynthesize, cloudBilledChars, cloudDiagnose, CLOUD_LINKS, geminiSynthesize, geminiModels, deviceVoices, onDeviceVoicesChanged, cloudTier,
-    cheapestGeminiModel, isVerifiedGeminiModel, geminiCost,
+    cheapestGeminiModel, isVerifiedGeminiModel, geminiCost, LOCAL_VOICE, localNarrate,
 } from './engines.js';
 import { translateChapter, translationCost, deviceTranslationAvailable, TRANSLATE_DEFAULT_MODEL } from './translate.js';
 import { isNative, Native, nativeFileUrl, loadNativeVoices, nativeEngines } from './native.js';
@@ -25,7 +25,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.17';
+export const APP_VERSION = '2.18';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
@@ -178,6 +178,7 @@ function bookProgress(book) {
 }
 
 function engineLabel(s = settings) {
+    if (s.engine === 'local') return `Офлайн · глас ${(s.localVoice ?? 0) + 1}`;
     if (s.engine === 'device') {
         const v = deviceVoices(currentLang()).find((x) => x.voiceURI === s.deviceVoice) || deviceVoices(currentLang())[0];
         return v ? v.name.replace(/^(Google|Microsoft)\s*/, '').split(/[(-]/)[0].trim() || 'Устройство' : 'Устройство';
@@ -801,13 +802,22 @@ async function startPlayback() {
         openCloudSetup({ thenPlay: true });
         return;
     }
-    if (st.engine !== 'device' && !st.apiKey) {
+    if (st.engine !== 'device' && st.engine !== 'local' && !st.apiKey) {
         toast('За естествените гласове е нужен Google API ключ. Засега чета с гласа на устройството.', {
             action: { label: 'Настройки', run: openSettings },
         });
         settings.engine = 'device';
         saveSettings();
         updatePlayerUI();
+    }
+    if (settings.engine === 'local') {
+        let st = null;
+        try { st = await Native.localVoiceStatus(); } catch {}
+        if (!st?.installed) {
+            toast('Първо изтеглете офлайн гласа (веднъж, ~' + LOCAL_VOICE.sizeMB + ' MB).', { action: { label: 'Изтегли', run: openSettings } });
+            openSettings();
+            return;
+        }
     }
     if (settings.engine === 'cloud' && !settings.cloudVoice) {
         const ok = await pickDefaultCloudVoice();
@@ -1337,6 +1347,7 @@ function renderSettings(body) {
     const freeHrs = Math.round(freeHoursPerMonth('Chirp3-HD'));
     const engines = [
         ['gemini', 'Gemini разказвач', 'Най-жива интонация: разказвачът „играе“ текста според избран стил и езика на книгата.', geminiCardPrice(), settings.geminiEconomy ? 'до −50% с пестелив режим' : 'плаща се само чутото'],
+        ...(isNative ? [['local', 'Офлайн глас (Supertonic)', 'Естествен невронен глас, който работи в самото приложение: без интернет и без друго приложение. Изтегля се веднъж (~123 MB).', '0 $', 'завинаги']] : []),
         ['device', 'Гласът на телефона', 'Безплатно и офлайн. Качеството зависи от устройството.', '0 $', 'завинаги'],
         ['cloud', 'Google HD гласове', `Chirp 3 HD. ~${freeHrs} ч месечно безплатно, но на български звучат по-слабо от разказвача.`, 'безплатно', `после ~${hourlyCost('cloud').toFixed(2)} $/ч`],
     ];
@@ -1507,8 +1518,58 @@ function renderUsage(box) {
         <button class="btn btn-ghost btn-sm" id="btnResetUsage" style="justify-self:start">Нулирай брояча</button>`;
 }
 
+// The offline voice: download once, then voice / quality / pauses
+async function renderLocalVoice(box) {
+    box.innerHTML = '<div class="group-title">Офлайн глас</div><p class="hint">Проверявам…</p>';
+    let st = { available: false };
+    try { st = await Native.localVoiceStatus(); } catch {}
+    if (!st.available) {
+        box.innerHTML = '<div class="group-title">Офлайн глас</div><p class="hint">Тази версия на приложението няма офлайн глас — обновете APK-то.</p>';
+        return;
+    }
+    if (!st.installed) {
+        box.innerHTML = `<div class="group-title">Офлайн глас</div>
+            <p class="hint" style="margin:0 0 8px">Гласът (Supertonic 3, ~${LOCAL_VOICE.sizeMB} MB) се изтегля веднъж и после работи без интернет. Препоръчва се Wi-Fi.</p>
+            <button class="btn btn-primary btn-sm" id="btnLocalGet" ${st.installing ? 'disabled' : ''}>${st.installing ? 'Изтегля се…' : 'Изтегли гласа'}</button>
+            <div class="progress-track" style="margin-top:10px"><i id="localProg" style="width:0%"></i></div>
+            <p class="hint" id="localMsg"></p>`;
+        $('#btnLocalGet', box).onclick = () => {
+            $('#btnLocalGet', box).disabled = true;
+            $('#localMsg', box).textContent = 'Свързвам се…';
+            Native.localVoiceInstall({ url: LOCAL_VOICE.url }).catch((e) => { $('#localMsg', box).textContent = e.message; });
+        };
+        return;
+    }
+    const sel = (id, list, cur) => `<select class="select" id="${id}">${list.map(([v, l]) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+    box.innerHTML = `<div class="group-title">Офлайн глас</div>
+        <div class="field">
+            ${sel('setLocalVoice', Array.from({ length: LOCAL_VOICE.voices }, (_, i) => [i, `Глас ${i + 1}`]), settings.localVoice ?? 0)}
+            <button class="btn btn-ghost btn-sm" data-preview>Чуй</button>
+        </div>
+        <div class="row">
+            <span class="row-label">Качество<small>Стъпки на модела: повече — малко по-гладко, но по-бавно. 5 е балансът; ако има паузи, сложете 4</small></span>
+            ${sel('setLocalSteps', [[3, '3 (най-бързо)'], [4, '4'], [5, '5'], [6, '6'], [8, '8 (най-гладко)']], settings.localSteps ?? 5)}
+        </div>
+        <div class="row">
+            <span class="row-label">Най-дълга пауза<small>По-дълга тишина се скъсява до толкова</small></span>
+            ${sel('setLocalPause', [[0.25, '0.25 сек.'], [0.4, '0.4 сек.'], [0.6, '0.6 сек.'], [0.9, '0.9 сек.']], settings.localMaxPause ?? 0.4)}
+        </div>
+        <p class="hint">Изтеглен: ${(st.bytes / 1048576).toFixed(0)} MB. Откъсите се правят напред, докато слушате, и се пазят — преслушването е мигновено. <a href="#" id="localDel">Изтрий гласа</a></p>`;
+    const bind = (id, key) => { $(id, box).onchange = (e) => { settings[key] = Number(e.target.value); saveSettings(); player.voiceChanged(); }; };
+    bind('#setLocalVoice', 'localVoice');
+    bind('#setLocalSteps', 'localSteps');
+    bind('#setLocalPause', 'localMaxPause');
+    $('#localDel', box).onclick = async (e) => {
+        e.preventDefault();
+        if (!confirm('Да изтрия ли офлайн гласа от телефона?')) return;
+        await Native.localVoiceDelete();
+        renderLocalVoice(box);
+    };
+}
+
 function renderVoiceGroup(box, lang) {
     const engine = settings.engine;
+    if (engine === 'local') return renderLocalVoice(box);
     if (engine === 'device') {
         const voices = deviceVoices(lang);
         box.innerHTML = `
@@ -1765,6 +1826,24 @@ async function previewVoice(btn) {
     // Created and unlocked inside the tap, filled when the audio arrives
     const audioEl = new Audio();
     if (st.engine !== 'device') unlockAudio(audioEl);
+    if (st.engine === 'local') {
+        const old = btn.textContent;
+        btn.textContent = '…';
+        btn.disabled = true;
+        try {
+            const r = await localNarrate({ text, sid: settings.localVoice ?? 0, steps: settings.localSteps ?? 5, lang, maxPause: settings.localMaxPause ?? 0.4 });
+            previewAudio = audioEl;
+            previewAudio.src = URL.createObjectURL(r.blob);
+            previewAudio.playbackRate = player.rate;
+            await previewAudio.play();
+        } catch (e) {
+            toast(e.message, { error: true });
+        } finally {
+            btn.textContent = old;
+            btn.disabled = false;
+        }
+        return;
+    }
     if (st.engine === 'device' && isNative) {
         const v = deviceVoices(lang).find((x) => x.voiceURI === st.deviceVoice) || deviceVoices(lang)[0];
         Native.speak({ id: 'preview', text, voice: v?.voiceURI || '', lang: LOCALES[lang] || lang, rate: player.rate, pitch: settings.devicePitch || 1, flush: true }).catch((e) => toast(e.message, { error: true }));
@@ -2185,6 +2264,10 @@ function bindEvents() {
     player.addEventListener('sleep', () => { sleepTimer = null; updateSleepChip(); toast('Лека нощ. Спрях в края на главата.'); });
     player.addEventListener('finished', () => toast('Краят на книгата. Надявам се, че ви е харесала.'));
     player.addEventListener('slowengine', (e) => {
+        if (settings.engine === 'local') {
+            toast(`Офлайн гласът генерира почти толкова бавно, колкото се чете (×${e.detail.ratio.toFixed(2)}) — затова може да има паузи. Намалете „Качество“ (напр. на 4).`, { duration: 15000, action: { label: 'Настройки', run: openSettings } });
+            return;
+        }
         toast(`Гласовият двигател генерира почти толкова бавно, колкото се чете (×${e.detail.ratio.toFixed(2)}), и не успява да изпревари гласа — затова има паузи. В Supertonic намалете Quality на 4–5 стъпки (сега вероятно е 10).`, {
             duration: 15000, action: isNative ? { label: 'Отвори Supertonic', run: () => Native.openEngineApp().catch(() => {}) } : null,
         });
@@ -2529,6 +2612,25 @@ function initNative() {
         else if (action === 'pause') player.pause();
         else if (action === 'forward' || action === 'next') player.skip(30);
         else if (action === 'back' || action === 'prev') player.skip(-15);
+    });
+    // Offline voice download: progress in the settings, a message when it is ready
+    Native.addListener('localVoice', ({ phase, done, total, error }) => {
+        const prog = $('#localProg'), msg = $('#localMsg');
+        if (phase === 'download') {
+            if (prog && total > 0) prog.style.width = `${Math.min(100, done / total * 100).toFixed(1)}%`;
+            if (msg) msg.textContent = `Изтеглям… ${(done / 1048576).toFixed(0)}${total > 0 ? ' от ' + (total / 1048576).toFixed(0) : ''} MB`;
+        } else if (phase === 'unpack') {
+            if (prog) prog.style.width = '100%';
+            if (msg) msg.textContent = 'Разопаковам… (до минута)';
+        } else if (phase === 'ready') {
+            toast('Офлайн гласът е готов.');
+            const box = $('#voiceGroup');
+            if (box && settings.engine === 'local') renderLocalVoice(box);
+        } else if (phase === 'error') {
+            if (msg) msg.textContent = 'Грешка: ' + error + ' — опитайте пак (изтеглянето продължава оттам, докъдето е стигнало).';
+            const b = $('#btnLocalGet'); if (b) { b.disabled = false; b.textContent = 'Опитай пак'; }
+            diag(`офлайн глас: изтеглянето не успя (${error})`);
+        }
     });
     Native.addListener('sharedFile', ({ file, error }) => {
         if (error) return toast('Споделеният файл не можа да се прочете.', { error: true });

@@ -603,6 +603,34 @@ export async function deviceRender({ text, voice, lang, pitch = 1, maxPause = 0.
     return out;
 }
 
+// ---------- offline voice inside the app (Supertonic 3 through sherpa-onnx, Android) ----------
+//
+// The same Supertonic model as the Supertonic app, but run by Разказвач itself: quality
+// steps, voice and threads are set here, the passages are generated ahead in the
+// background and played like narrated audio, long silences are cut. No separate app.
+
+export const LOCAL_VOICE = {
+    url: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-supertonic-3-tts-int8-2026-05-11.tar.bz2',
+    sizeMB: 123,
+    voices: 10,
+};
+
+export async function localNarrate({ text, sid = 0, steps = 5, lang = 'bg', maxPause = 0.45 }) {
+    const t0 = performance.now();
+    let data;
+    try {
+        ({ data } = await Native.localVoiceSynthesize({ text, sid, steps, speed: 1, lang }));
+    } catch (e) {
+        throw Object.assign(new Error(e?.message || 'Офлайн гласът не можа да прочете откъса.'), { code: 'LOCAL_VOICE', retryable: false });
+    }
+    const took = (performance.now() - t0) / 1000;
+    const { pcm, rate } = parseWavPcm(base64ToBytes(data));
+    if (pcm.length < rate * 0.2) throw Object.assign(new Error('Офлайн гласът не върна звук.'), { code: 'LOCAL_VOICE' });
+    const out = await packSpeech(capPauses(pcm, rate, maxPause), rate);
+    lastRenderSpeed = { took, audio: out.dur };
+    return out;
+}
+
 // Trim, level and compress narration PCM → { blob, dur }
 export async function packSpeech(pcm, rate, original = null) {
     const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);

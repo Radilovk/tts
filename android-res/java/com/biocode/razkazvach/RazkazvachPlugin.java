@@ -402,6 +402,71 @@ public class RazkazvachPlugin extends Plugin {
         call.resolve();
     }
 
+    // ------------------------------------------------------- offline voice (Supertonic 3)
+
+    private LocalVoice localVoice;
+
+    private LocalVoice localVoice() {
+        if (localVoice == null) localVoice = new LocalVoice(getContext());
+        return localVoice;
+    }
+
+    @PluginMethod
+    public void localVoiceStatus(PluginCall call) {
+        JSObject ret = new JSObject();
+        boolean ok;
+        try {
+            Class.forName("com.k2fsa.sherpa.onnx.OfflineTts");
+            ok = true;
+        } catch (Throwable e) {
+            ok = false;
+        }
+        ret.put("available", ok);
+        ret.put("installed", ok && localVoice().installed());
+        ret.put("installing", ok && localVoice().isInstalling());
+        ret.put("bytes", ok ? localVoice().size() : 0);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void localVoiceInstall(PluginCall call) {
+        String url = call.getString("url", "");
+        localVoice().install(url, (phase, done, total, error) -> {
+            JSObject d = new JSObject();
+            d.put("phase", phase);
+            d.put("done", done);
+            d.put("total", total);
+            if (error != null) d.put("error", error);
+            notifyListeners("localVoice", d);
+        });
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void localVoiceDelete(PluginCall call) {
+        localVoice().delete();
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void localVoiceSynthesize(PluginCall call) {
+        String text = call.getString("text", "");
+        int sid = call.getInt("sid", 0);
+        int steps = call.getInt("steps", 5);
+        float speed = call.getFloat("speed", 1f);
+        String lang = call.getString("lang", "bg");
+        try {
+            localVoice().synthesize(text, sid, steps, speed, lang, (data, error) -> {
+                if (error != null) { call.reject(error, "LOCAL_VOICE"); return; }
+                JSObject ret = new JSObject();
+                ret.put("data", data);
+                call.resolve(ret);
+            });
+        } catch (Throwable e) {
+            call.reject("Офлайн гласът не е наличен в тази версия: " + e.getMessage(), "LOCAL_VOICE");
+        }
+    }
+
     // ------------------------------------------------------- narration audio
 
     private NarrationPlayer narration;

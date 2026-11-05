@@ -5,7 +5,7 @@
 
 import * as db from './db.js';
 import { buildChapterModel, chunkBoundaries, nextBoundary, chunkText, charLen, LOCALES } from './text.js';
-import { cloudNarrate, cloudBilledChars, deviceRender, lastRenderSpeed, geminiSynthesize, geminiCost, cloudTier, deviceVoices } from './engines.js';
+import { cloudNarrate, cloudBilledChars, deviceRender, localNarrate, lastRenderSpeed, geminiSynthesize, geminiCost, cloudTier, deviceVoices } from './engines.js';
 import { pendingKeys } from './batch.js';
 import { sharedGetAudio, sharedPutAudio } from './shared.js';
 import { recordUsage, monthlyGeminiUsd, cloudReserve, cloudRelease, reportCloudUsage } from './usage.js';
@@ -16,7 +16,7 @@ import { sentenceMarks } from './align.js';
 // once all of it is recorded, and the next ones are recorded while it plays — so each
 // only has to be ready faster than the previous one lasts, and the lead grows passage by
 // passage (Supertonic itself generates sentence by sentence, up to 300 characters)
-const CHUNK_CHARS = { cloud: 1400, gemini: 1500, device: 200 };
+const CHUNK_CHARS = { cloud: 1400, gemini: 1500, device: 200, local: 260 };
 const FAST_START_CHARS = 320;
 // Chunking v2 (new books): longer passages that end at paragraphs, so the joins between
 // separately narrated passages are fewer and fall on natural pauses.
@@ -200,6 +200,10 @@ export class Player extends EventTarget {
     }
 
     _liveDevice() { return this.engine === 'device' && !this._render(); }
+
+    // Passages generated on the phone (studio phone voice or the offline voice):
+    // start with one sentence, keep several passages ahead
+    _rendered() { return this._render() || this.engine === 'local'; }
 
     async play() {
         if (!this.book) return;
@@ -388,6 +392,7 @@ export class Player extends EventTarget {
         // of the cache key, so passages made before (possibly cut short) are not replayed
         if (st.engine === 'cloud') return `cloud3|${st.cloudVoice}`;
         if (st.engine === 'gemini') return `gemini|${st.geminiModel}|${st.geminiVoice}|${st.style}|${st.style === 'custom' ? st.customStyle : ''}`;
+        if (st.engine === 'local') return `local|st3|${st.localVoice ?? 0}|${st.localSteps ?? 5}|${st.localMaxPause ?? 0.4}`;
         // Studio mode: the recording depends on engine, voice, pitch and pause length
         // (speed is applied when playing, so it is not part of the key)
         if (this._render()) return `devr|${st.ttsEngine || ''}|${st.deviceVoice || ''}|${st.devicePitch || 1}|${st.deviceMaxPause ?? 0.45}`;
@@ -484,6 +489,12 @@ export class Player extends EventTarget {
 
     async _synthesize(spec, book = this.book) {
         const st = spec.st || this.getSettings();
+        if (st.engine === 'local') {
+            const lang = spec.lang || this._lang();
+            const r = await localNarrate({ text: spec.text, sid: st.localVoice ?? 0, steps: st.localSteps ?? 5, lang, maxPause: st.localMaxPause ?? 0.4 });
+            this._noteRenderSpeed();
+            return { key: spec.key, blob: r.blob, dur: r.dur, chars: spec.chars, bookId: book.id };
+        }
         if (st.engine === 'device') {
             const lang = spec.lang || this._lang();
             try {
@@ -567,14 +578,14 @@ export class Player extends EventTarget {
     // Short opening piece of a chunk, so playback starts within seconds. The split
     // point depends only on the text, so the pieces get the same cache keys every time.
     _fastMin() {
-        if (this._render()) return 60;
+        if (this._rendered()) return 60;
         return this.book?.chunkV >= 2 ? FAST_START_V2.min : FAST_START_CHARS;
     }
 
     _fastSplit(m, s0, s1) {
         let n = 0, k = s0;
         // Phone voice: start with one sentence, so the first sound comes in a second or two
-        if (this._render()) {
+        if (this._rendered()) {
             while (k < s1 - 1 && n < 60) { n += m.sentences[k].speak.length + 1; k++; }
             return Math.max(k, s0 + 1);
         }
@@ -716,7 +727,7 @@ export class Player extends EventTarget {
         const ratio = r.took / r.audio;
         this._renderRatios = [...(this._renderRatios || []), ratio].slice(-6);
         const avg = this._renderRatios.reduce((a, b) => a + b, 0) / this._renderRatios.length;
-        diag(`гласът на телефона: ${r.audio.toFixed(1)} сек. реч записани за ${r.took.toFixed(1)} сек. (×${ratio.toFixed(2)})`);
+        diag(`${this.engine === 'local' ? 'офлайн гласът' : 'гласът на телефона'}: ${r.audio.toFixed(1)} сек. реч за ${r.took.toFixed(1)} сек. (×${ratio.toFixed(2)})`);
         if (this._renderRatios.length >= 3 && avg > 0.75 && !this._slowWarned) {
             this._slowWarned = true;
             this.dispatchEvent(new CustomEvent('slowengine', { detail: { ratio: avg } }));
@@ -801,7 +812,7 @@ export class Player extends EventTarget {
 
     _eagerPrefetch() {
         const st = this.getSettings();
-        return st.engine === 'cloud' || !!this.book?.factory || this._render();
+        return st.engine === 'cloud' || !!this.book?.factory || this._rendered();
     }
 
     _prefetchMargin() {
@@ -840,7 +851,7 @@ export class Player extends EventTarget {
             const left = (dur - a.currentTime) / (a.playbackRate || 1);
             if (left < this._prefetchMargin() && this._prefetchedFor !== this.current.key) {
                 this._prefetchedFor = this.current.key;
-                this._prefetch(this.current, this.session, this._render() ? 4 : this._eagerPrefetch() ? 2 : 1);
+                this._prefetch(this.current, this.session, this._rendered() ? 4 : this._eagerPrefetch() ? 2 : 1);
             }
             this._emit('time');
         });

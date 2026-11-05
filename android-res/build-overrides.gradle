@@ -28,6 +28,25 @@ android {
     }
 }
 
+// Offline voice (Supertonic 3 through sherpa-onnx). The model itself (~130 MB) is not in
+// the APK: it is downloaded once, when the listener chooses the offline voice.
+repositories {
+    maven { url 'https://jitpack.io' }
+}
+
+android {
+    packagingOptions {
+        jniLibs {
+            // Phones only (no emulator builds) and only the library the Java bridge loads
+            excludes += ['lib/x86/**', 'lib/x86_64/**', 'lib/*/libsherpa-onnx-c-api.so', 'lib/*/libsherpa-onnx-cxx-api.so']
+        }
+    }
+}
+
 dependencies {
     implementation 'androidx.media:media:1.7.0'
+    implementation 'com.github.k2-fsa:sherpa-onnx:v1.13.4'
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.0.21'
+    // .tar.bz2 of the voice model
+    implementation 'org.apache.commons:commons-compress:1.27.1'
 }
