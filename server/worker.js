@@ -373,7 +373,7 @@ async function isRunner(req) {
     }
 }
 
-const STATE_FIELDS = ['status', 'done', 'failed', 'failedKeys', 'batches', 'freeDay', 'costUsd', 'usage', 'error', 'log'];
+const STATE_FIELDS = ['status', 'done', 'failed', 'failedKeys', 'batches', 'freeDay', 'costUsd', 'usage', 'error', 'log', 'spent', 'readyKeys', 'freeOnlyKeys', 'note'];
 
 async function jobState(env, id, owner) {
     const obj = await env.AUDIO.get(`j/s/${owner}/${id}`);
@@ -417,6 +417,8 @@ async function jobCreate(req, env, owner) {
         engine: d.engine, model: cleanStr(d.model, 80), voice: cleanStr(d.voice, 80), mode: cleanStr(d.mode, 20) || 'batch',
         total: d.items.length, chars: d.items.reduce((n, it) => n + String(it.text).length, 0),
         status: 'queued', done: 0, failed: 0, batches: [], costUsd: 0, error: '', log: '',
+        // auto mode: the free daily quota first, then Batch (½ price) up to this much a month
+        budgetUsd: Math.max(0, Math.min(20, Number(d.budgetUsd) || 0)),
     };
     await env.AUDIO.put(`j/b/${owner}/${id}`, JSON.stringify(d), { httpMetadata: { contentType: 'application/json' } });
     await env.AUDIO.put(`j/s/${owner}/${id}`, JSON.stringify(state), { httpMetadata: { contentType: 'application/json' } });

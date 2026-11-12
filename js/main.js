@@ -12,7 +12,7 @@ import {
 import { translateChapter, translationCost, deviceTranslationAvailable, TRANSLATE_DEFAULT_MODEL } from './translate.js';
 import { isNative, Native, nativeFileUrl, loadNativeVoices, nativeEngines } from './native.js';
 import { submitChapter, pollBatches, hasJobs, pendingChapters, batchEstimate } from './batch.js';
-import { usableFreeKey, diagLog, diagClear } from './player.js';
+import { usableFreeKey, diagLog, diagClear, bookPlanner } from './player.js';
 import { exportPlan, exportChapters, packageFiles, safeFileName } from './export.js';
 import { buildJob, submitJob, jobStatus, cancelJob, downloadBook, studioVoice } from './studio.js';
 import { searchBooks, localizeTitles, SOURCES } from './search.js';
@@ -26,11 +26,11 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.16';
+export const APP_VERSION = '2.17';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
-    engine: null, apiKey: '', cloudVoice: '', geminiVoice: 'Charon', geminiModel: '', geminiEconomy: true, geminiFreeKey: '', geminiFreeOnly: true, geminiPassage: 6000,
+    engine: null, apiKey: '', cloudVoice: '', geminiVoice: 'Charon', geminiModel: '', geminiEconomy: true, geminiFreeKey: '', geminiFreeOnly: true, geminiPassage: 6000, studioBudgetUsd: 1,
     style: 'intriguing', customStyle: '', deviceVoice: '', lang: 'auto', rate: 1,
     cacheMB: 500, theme: 'system', readerSize: 19, view: 'cover', cloudReady: false, autoTranslate: 'bg',
     geminiCapUsd: 2, cloudPausedMonth: '',
@@ -1242,6 +1242,47 @@ function openBookMenu() {
     });
 }
 
+// Menu of a book in the library (long press)
+function openLibraryBookMenu(meta) {
+    const book = player.book?.id === meta.id ? currentBook : meta;
+    openSheet(book.title, (body) => {
+        body.innerHTML = `
+            <div class="group list">
+                <button class="list-item" data-a="dl"><span class="grow">${book.factory ? 'Изтегля се за слушане — виж докъде е' : 'Изтегли за слушане (на заден план)'}<small>Gemini разказвачът записва цялата книга на сървъра, без да я отваряте: всеки ден безплатният лимит, после ½ цена до ${settings.studioBudgetUsd} $/мес. Бележки и препратки не се четат.</small></span></button>
+                <button class="list-item" data-a="open"><span class="grow">Отвори</span></button>
+                <button class="list-item" data-a="del"><span class="grow">Премахни</span></button>
+            </div>`;
+        body.onclick = async (e) => {
+            const a = e.target.closest('[data-a]')?.dataset.a;
+            if (!a) return;
+            if (a === 'open') { closeSheet(); openBook(book.id, false); return; }
+            if (a === 'del') { closeSheet(); if (confirm(`Да премахна ли „${book.title}“?`)) deleteBook(book.id); return; }
+            if (a === 'dl') {
+                if (book.factory) {
+                    try {
+                        const j = await jobStatus(studioKey(), book.factory.jobId);
+                        toast(`${book.title}: ${j.done} от ${j.total} откъса готови${j.status === 'done' ? ' — цялата книга е готова.' : '.'}`, { duration: 7000 });
+                    } catch (err) { toast(err.message, { error: true }); }
+                    return;
+                }
+                const btn = e.target.closest('[data-a]');
+                btn.disabled = true;
+                btn.querySelector('.grow').firstChild.textContent = 'Подготвям текста…';
+                try {
+                    await sendBookToStudio(book, 'auto', (p) => { btn.querySelector('.grow').firstChild.textContent = `Подготвям текста: ${Math.round(p * 100)}%`; });
+                    closeSheet();
+                    renderLibrary();
+                    toast(`„${book.title}“ ще се изтегля всеки ден на заден план. Можете да затворите приложението.`, { duration: 8000 });
+                } catch (err) {
+                    btn.disabled = false;
+                    btn.querySelector('.grow').firstChild.textContent = 'Изтегли за слушане (на заден план)';
+                    toast(err.message, { error: true, duration: 8000, action: /ключ/.test(err.message) ? { label: 'Настройки', run: openSettings } : null });
+                }
+            }
+        };
+    });
+}
+
 // ---------- Night studio (whole book narrated on the server) ----------
 
 function studioVoiceLabel(st) {
@@ -1252,13 +1293,46 @@ function studioVoiceLabel(st) {
 // The app's own key: it files the book on the server (only its hash is the owner id)
 // and pays for the narration there — nothing else to set up.
 function studioKey() {
-    return effectiveSettings().apiKey;
+    return effectiveSettings().apiKey || settings.geminiFreeKey;
+}
+
+// Send a book to the night studio. The book does not have to be open: its passages are
+// planned exactly as the player plans them (same texts — notes and references left
+// out — and the same cache keys), so listening later simply finds the audio.
+async function sendBookToStudio(book, mode, onProgress) {
+    const key = studioKey();
+    if (!key) throw new Error('Нужен е Google API ключ (или безплатен ключ в Настройки → Gemini).');
+    const st = recordingSettings();
+    if ((mode === 'free' || mode === 'auto') && !st.geminiFreeKey) throw new Error('Въведете безплатен ключ в Настройки → Gemini → „Безплатен ключ“.');
+    let planner = player;
+    if (player.book?.id !== book.id) {
+        const content = await db.get('contents', book.id);
+        if (!content) throw new Error('Книгата не е намерена.');
+        planner = bookPlanner(book, content.chapters, () => ({ ...effectiveSettings(), engine: 'gemini' }), (c, chapter, onP) => translateChapter({
+            bookId: book.id, c, chapter, from: book.lang, to: book.translateTo,
+            apiKey: effectiveSettings().apiKey, model: settings.translateModel || TRANSLATE_DEFAULT_MODEL, onProgress: onP,
+            sharedKey: book.shared ? book.sourceKey : '',
+        }));
+    }
+    // Nothing narrated yet: the longest narrator passages (most audio per free request)
+    if (!book.factory && !book.shared && !(await db.audioCountBook(book.id).catch(() => 1))) {
+        book.chunkV = Math.max(book.chunkV || 0, 4);
+        book.geminiMax = settings.geminiPassage;
+        planner.models?.clear?.();
+    }
+    // Batch needs the main key (a project with billing); with only a free key it stays free
+    const budget = effectiveSettings().apiKey ? settings.studioBudgetUsd : 0;
+    const job = await submitJob(key, await buildJob(planner, st, mode, onProgress, budget));
+    book.factory = { jobId: job.id, at: Date.now(), voice: studioVoice(st) };
+    persistBook(book);
+    if (player.book?.id === book.id) player.voiceChanged();
+    return job;
 }
 
 function openStudio() {
     if (!currentBook) return;
     const book = currentBook;
-    let mode = 'batch';
+    let mode = 'auto';
     let job = null;
     let busy = '';
     const isOpen = () => $('#sheetTitle').textContent === 'Нощно студио' && !$('#sheet').classList.contains('hidden');
@@ -1268,9 +1342,10 @@ function openStudio() {
         if (book.factory && job) {
             const pct = job.total ? Math.round(job.done / job.total * 100) : 0;
             const statusText = job.status === 'done' ? 'Готово — пуснете книгата, аудиото идва от сървъра.'
-                : job.status === 'queued' ? 'Чака реда си — сървърът проверява на всеки час.'
+                : job.status === 'queued' ? 'Чака реда си — сървърът започва всеки ден в ~10–11 ч. (когато безплатният лимит се поднови) и проверява още 3 пъти.'
                 : job.mode === 'batch' && job.batches?.length ? `Google озвучава (${job.batches.length} партиди на ½ цена) — обикновено до няколко часа.`
                 : job.mode === 'free' ? 'Озвучава се с безплатния дневен лимит — всеки ден по малко.'
+                : job.mode === 'auto' ? `Всеки ден първо безплатно, после ½ цена до ${job.budgetUsd || 0} $ на месец.${job.batches?.length ? ` Сега ${job.batches.length} партиди при Google.` : ''}`
                 : 'Озвучава се.';
             body.innerHTML = `
                 <div class="usage">
@@ -1291,6 +1366,7 @@ function openStudio() {
             body.innerHTML = '<p class="hint">Проверявам докъде е стигнал сървърът…</p>';
         } else {
             const modes = [
+                ['auto', settings.studioBudgetUsd && effectiveSettings().apiKey ? 'Авто: безплатно + ½ цена' : 'Авто: само безплатно', settings.studioBudgetUsd && effectiveSettings().apiKey ? `до ${settings.studioBudgetUsd} $/мес.` : '0 $', `Всеки ден първо безплатният лимит; останалото на ½ цена, докато разходът за месеца е под ${settings.studioBudgetUsd} $ — после чака следващия безплатен ден. Голяма книга се събира за няколко дни.`],
                 ['batch', '½ цена (Batch)', approxUsd(batchEstimate(st.geminiModel, book.totalChars)), 'Google озвучава в тихите си часове — обикновено готово за няколко часа.'],
                 ['free', 'Безплатно, бавно', '0 $', st.geminiFreeKey ? 'Само безплатният дневен лимит на безплатния ключ. Голяма книга отнема дни.' : 'Нужен е безплатен ключ (Настройки → Gemini → „Безплатен ключ“). Голяма книга отнема дни.'],
             ];
@@ -1317,20 +1393,15 @@ function openStudio() {
             const st = recordingSettings();
             if (act === 'send') {
                 if (!key) return toast('Нужен е Google API ключ.', { error: true, action: { label: 'Настройки', run: openSettings } });
-                if (mode === 'free' && !st.geminiFreeKey) return toast('Въведете безплатен ключ в Настройки → Gemini.', { error: true, action: { label: 'Настройки', run: openSettings } });
                 busy = 'send';
                 rerenderSheet(render);
                 try {
-                    const j = await buildJob(player, st, mode, (p) => { $('#pStatus').textContent = `Подготвям текста: ${Math.round(p * 100)}%`; });
+                    job = await sendBookToStudio(book, mode, (p) => { $('#pStatus').textContent = `Подготвям текста: ${Math.round(p * 100)}%`; });
                     $('#pStatus').textContent = '';
-                    job = await submitJob(key, j);
-                    book.factory = { jobId: job.id, at: Date.now(), voice: studioVoice(st) };
-                    persistBook(book);
-                    player.voiceChanged();
-                    toast('Изпратено. Сървърът започва до час — можете да затворите приложението.', { duration: 8000 });
+                    toast('Изпратено. Сървърът започва при следващото си пускане — можете да затворите приложението.', { duration: 8000 });
                 } catch (err) {
                     $('#pStatus').textContent = '';
-                    toast(err.message, { error: true, duration: 8000 });
+                    toast(err.message, { error: true, duration: 8000, action: /ключ/.test(err.message) ? { label: 'Настройки', run: openSettings } : null });
                 }
                 busy = '';
                 if (isOpen()) rerenderSheet(render);
@@ -1441,6 +1512,12 @@ function renderSettings(body) {
             </div>
 
             <div class="row">
+                <span class="row-label">Изтегляне на заден план: ½ цена до<small>Нощното студио всеки ден първо използва безплатния лимит на Gemini; над него — Batch на ½ цена, но не повече от тази сума на месец. Важи за книгите, изпратени след промяната.</small></span>
+                <select class="select" id="setStudioBudget">
+                    ${[[0, 'Само безплатно'], [0.5, '0.5 $'], [1, '1 $'], [2, '2 $'], [5, '5 $']].map(([v, l]) => `<option value="${v}" ${settings.studioBudgetUsd === v ? 'selected' : ''}>${l}</option>`).join('')}
+                </select>
+            </div>
+            <div class="row">
                 <span class="row-label">Пазене на аудио<small id="cacheInfo">…</small></span>
                 <select class="select" id="setCache">
                     ${[200, 500, 1000, 2000, 4000].map((n) => `<option value="${n}" ${settings.cacheMB === n ? 'selected' : ''}>${n >= 1000 ? n / 1000 + ' GB' : n + ' MB'}</option>`).join('')}
@@ -1537,6 +1614,7 @@ function renderSettings(body) {
         rerenderSheet(renderSettings);
     };
     $('#setGeminiCap', body).onchange = (e) => { settings.geminiCapUsd = Number(e.target.value); saveSettings(); };
+    $('#setStudioBudget', body).onchange = (e) => { settings.studioBudgetUsd = Number(e.target.value); saveSettings(); };
     $('#setCache', body).onchange = (e) => {
         settings.cacheMB = Number(e.target.value);
         saveSettings();
@@ -2161,20 +2239,23 @@ function bindEvents() {
         const card = e.target.closest('.shelf-card');
         if (card) openCatalogItem(shelfData[card.dataset.shelfId].items[Number(card.dataset.i)]);
     });
+    let longPressAt = 0;
     $('#bookGrid').addEventListener('click', (e) => {
         const b = e.target.closest('.book');
+        if (Date.now() - longPressAt < 800) return; // the menu opened by a long press
         if (b) openBook(b.dataset.id, false);
     });
 
-    // Long-press a book to remove it
+    // Long-press a book: download it for listening (without opening it) or remove it
     let pressTimer = null;
     $('#bookGrid').addEventListener('pointerdown', (e) => {
         const b = e.target.closest('.book');
         if (!b) return;
         pressTimer = setTimeout(async () => {
             pressTimer = 'fired';
+            longPressAt = Date.now();
             const meta = await db.get('books', b.dataset.id);
-            if (meta && confirm(`Да премахна ли „${meta.title}“?`)) deleteBook(meta.id);
+            if (meta) openLibraryBookMenu(meta);
         }, 650);
     });
     ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => $('#bookGrid').addEventListener(ev, () => {

@@ -1265,3 +1265,15 @@ function blobDuration(blob) {
         a.src = url;
     });
 }
+
+// The passages of a book that is not open (to send it to the night studio straight
+// from the library): the player's own planning code, without audio or events, so the
+// texts and cache keys are exactly the ones the player uses when the book is played.
+export function bookPlanner(book, chapters, getSettings, translator) {
+    const p = Object.create(Player.prototype);
+    Object.assign(p, {
+        getSettings, book, chapters, translator, models: new Map(), translated: new Map(), translating: new Map(),
+        pos: { c: -1, s: 0 }, gen: 1, dispatchEvent() {},
+    });
+    return p;
+}

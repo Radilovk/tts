@@ -4,8 +4,14 @@ name: Night studio (whole books narrated on the server)
 # the phone is off. No secrets: the worker trusts this workflow through the OIDC token
 # GitHub signs for every run, and each book carries the key that pays for it.
 on:
+  # Gemini's free quota renews once a day, at midnight Pacific time (by 08:00 UTC all
+  # year): the first run uses it right away. The others collect Batch answers and retry;
+  # a run with nothing to do stops after one request to the worker.
   schedule:
-    - cron: '17 * * * *'
+    - cron: '23 8 * * *'
+    - cron: '23 12 * * *'
+    - cron: '23 17 * * *'
+    - cron: '23 22 * * *'
   workflow_dispatch:
 
 concurrency:
