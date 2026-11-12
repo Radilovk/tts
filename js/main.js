@@ -34,7 +34,7 @@ const DEFAULTS = {
     style: 'intriguing', customStyle: '', deviceVoice: '', lang: 'auto', rate: 1,
     cacheMB: 500, theme: 'system', readerSize: 19, view: 'cover', cloudReady: false, autoTranslate: 'bg',
     geminiCapUsd: 2, cloudPausedMonth: '',
-    azureKey: '', azureRegion: 'westeurope', azureVoice: '', azurePausedMonth: '',
+    azureKey: '', azureRegion: 'westeurope', azureVoice: '', azurePausedMonth: '', freeFrom: '',
 };
 
 let settings = loadSettings();
@@ -1743,7 +1743,7 @@ function renderAzureGroup(box, lang) {
                 <li>Region: <b>West Europe</b>, Pricing tier: <b>Free F0</b> — 500 000 знака месечно, <b>никога не се таксува</b>.</li>
                 <li>След създаването: „Keys and Endpoint“ → копирайте <b>Key 1</b> тук и изберете същия регион.</li>
             </ol>
-            Ключът остава само на това устройство. Когато безплатните знаци за месеца свършат, четенето продължава с гласа на телефона и от 1-во число се връща само.
+            Ключът остава само на това устройство. Когато безплатните знаци за месеца свършат, четенето продължава с Google HD (ако е свързан — още ~20 ч безплатно), после с гласа на телефона, и от 1-во число се връща само. <b>Нищо не се плаща.</b>
         </details>`;
     const keyEl = $('#setAzureKey', box);
     const regEl = $('#setAzureRegion', box);
@@ -2303,10 +2303,14 @@ function bindEvents() {
             // Google HD comes back by itself when Google's new month begins
             if (err.cloudCap) settings.cloudPausedMonth = monthKey();
             if (err.azureCap) settings.azurePausedMonth = monthKey();
-            settings.engine = 'device';
+            // Free hours one after another: Microsoft → Google HD → the phone's voice
+            if ((err.cloudCap || err.azureCap) && !settings.freeFrom) settings.freeFrom = settings.engine;
+            const next = nextFreeEngine();
+            settings.engine = next;
             saveSettings();
             updatePlayerUI();
-            toast(err.message + ' Продължавам с гласа на телефона.', { duration: 9000, action: { label: 'Настройки', run: openSettings } });
+            const then = next === 'azure' ? 'Microsoft гласовете (безплатно)' : next === 'cloud' ? 'Google HD (безплатно)' : 'гласа на телефона';
+            toast(`${err.message} Продължавам с ${then}.`, { duration: 9000, action: { label: 'Настройки', run: openSettings } });
             player.play();
             return;
         }
@@ -2636,11 +2640,24 @@ function initNative() {
 // Google HD was paused because the month's free characters ran out: switch back when
 // Google's new billing month starts. Also fetch the month's total for the key from the
 // worker, so another device's listening counts against the limit too.
+// A free voice that still has free characters this month, else the phone's voice
+function azureUsable() {
+    return !!(settings.azureKey && settings.azureRegion && settings.azurePausedMonth !== monthKey() && azureFreeLeft() > 5000);
+}
+function cloudUsable() {
+    return !!(settings.cloudReady && settings.cloudVoice && effectiveSettings().apiKey && settings.cloudPausedMonth !== monthKey());
+}
+function nextFreeEngine() {
+    if (azureUsable()) return 'azure';
+    if (cloudUsable()) return 'cloud';
+    return 'device';
+}
+
 function checkCloudMonth() {
     if (settings.apiKey || preconfiguredKey()) syncCloudUsage(settings.apiKey || preconfiguredKey());
     if (settings.cloudPausedMonth && settings.cloudPausedMonth !== monthKey()) {
         settings.cloudPausedMonth = '';
-        if (settings.engine === 'device' && settings.cloudVoice) {
+        if (!settings.freeFrom && settings.engine === 'device' && settings.cloudVoice) {
             settings.engine = 'cloud';
             toast('Нов месец — Google HD отново е безплатен и чете пак.', { duration: 7000 });
         }
@@ -2649,12 +2666,19 @@ function checkCloudMonth() {
     }
     if (settings.azurePausedMonth && settings.azurePausedMonth !== monthKey()) {
         settings.azurePausedMonth = '';
-        if (settings.engine === 'device' && settings.azureKey) {
-            settings.engine = 'azure';
-            toast('Нов месец — Microsoft гласовете отново са безплатни.', { duration: 7000 });
-        }
         saveSettings();
+    }
+    // New month: back to the voice that was chosen before the free characters ran out
+    const from = settings.freeFrom;
+    if (from && settings.engine !== from && (from === 'azure' ? azureUsable() : from === 'cloud' ? cloudUsable() : false)) {
+        settings.engine = from;
+        settings.freeFrom = '';
+        saveSettings();
+        toast(`Нов месец — ${from === 'azure' ? 'Microsoft гласовете' : 'Google HD'} отново са безплатни и четат пак.`, { duration: 7000 });
         if (currentBook) updatePlayerUI();
+    } else if (from && settings.engine === from) {
+        settings.freeFrom = '';
+        saveSettings();
     }
 }
 
