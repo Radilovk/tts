@@ -26,7 +26,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.14';
+export const APP_VERSION = '2.15';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
@@ -34,7 +34,7 @@ const DEFAULTS = {
     style: 'intriguing', customStyle: '', deviceVoice: '', lang: 'auto', rate: 1,
     cacheMB: 500, theme: 'system', readerSize: 19, view: 'cover', cloudReady: false, autoTranslate: 'bg',
     geminiCapUsd: 2, cloudPausedMonth: '',
-    azureKey: '', azureRegion: 'westeurope', azureVoice: '', azurePausedMonth: '', freeFrom: '',
+    azureKey: '', azureRegion: 'westeurope', azureVoice: '', azurePausedMonth: '', freeFrom: '', wavenetVoice: '', wavenetPausedMonth: '',
 };
 
 let settings = loadSettings();
@@ -189,6 +189,9 @@ function engineLabel(s = settings) {
         const name = s.cloudVoice ? s.cloudVoice.split('-').slice(-1)[0] : 'Google';
         return `${name} · ${PRICES.cloud[cloudTier(s.cloudVoice)]?.label === 'Chirp 3 HD' ? 'HD' : PRICES.cloud[cloudTier(s.cloudVoice)]?.label || ''}`;
     }
+    if (s.engine === 'wavenet') {
+        return `${(s.wavenetVoice || 'Google').split('-').slice(-1)[0]} · ${cloudTier(s.wavenetVoice) === 'Wavenet' ? 'WaveNet' : 'Google'}`;
+    }
     if (s.engine === 'azure') {
         const name = (s.azureVoice || 'Microsoft').split('-').slice(-1)[0].replace(/(Multilingual)?Neural$/, '');
         return `${name || 'Microsoft'} · Microsoft`;
@@ -287,7 +290,8 @@ async function saveImported(parsed, { fileName = '', source = null, translateTo,
             // Narration is shared only for books every listener may legally receive
             shared: !!source && source.shareable !== false,
             originalTitle: parsed.title,
-            chunkV: 3,
+            // Shared catalog books keep v3, so their passages match what others narrated
+            chunkV: source && source.shareable !== false ? 3 : 4,
         };
         if (displayTitle) meta.title = displayTitle;
         await db.put('contents', { id, chapters: parsed.chapters });
@@ -607,7 +611,7 @@ async function openBook(id, autoplay) {
     }
     meta.lastOpened = Date.now();
     // Nothing narrated yet: switch to the longer, paragraph-aligned passages
-    if ((meta.chunkV || 0) < 3 && !meta.factory && !(await db.audioCountBook(id).catch(() => 1))) meta.chunkV = 3;
+    if ((meta.chunkV || 0) < (meta.shared ? 3 : 4) && !meta.factory && !(await db.audioCountBook(id).catch(() => 1))) meta.chunkV = meta.shared ? 3 : 4;
     if (seq !== openSeq) return;
     if (meta.cover && !coverUrls.has(id)) coverUrls.set(id, URL.createObjectURL(meta.cover));
     meta.coverUrl = coverUrls.get(id) || '';
@@ -1588,6 +1592,10 @@ function renderVoiceGroup(box, lang) {
     } else if (engine === 'azure') {
         renderAzureGroup(box, lang);
         return;
+    } else if (engine === 'wavenet') {
+        box.innerHTML = `<div class="group-title">Глас</div>
+            <p class="hint">Сега чете <b>${esc(engineLabel())}</b> — безплатният резервен глас на Google (4 млн. знака месечно). По-горните гласове изчерпаха безплатното си за деня/месеца и ще се върнат сами. Изберете глас отгоре, за да смените сега.</p>`;
+        return;
     } else if (engine === 'cloud') {
         box.innerHTML = `<div class="group-title">Глас</div><p class="hint" id="cloudVoiceMsg">Зареждам гласовете…</p>`;
         if (!effectiveSettings().apiKey || !settings.cloudReady) {
@@ -2310,22 +2318,11 @@ function bindEvents() {
             return;
         }
         if (err.reason === 'APP_CAP') {
-            // Google HD comes back by itself when Google's new month begins
-            if (err.cloudCap) settings.cloudPausedMonth = monthKey();
-            if (err.azureCap) settings.azurePausedMonth = monthKey();
-            // Free hours one after another: Microsoft → Google HD → the phone's voice
-            if ((err.cloudCap || err.azureCap || err.geminiFreeCap) && !settings.freeFrom) settings.freeFrom = settings.engine;
-            const next = nextFreeEngine();
-            settings.engine = next;
-            saveSettings();
-            updatePlayerUI();
-            const then = next === 'gemini' ? 'Gemini разказвача' : next === 'azure' ? 'Microsoft гласовете (безплатно)' : next === 'cloud' ? 'Google HD (безплатно)' : 'гласа на телефона';
-            toast(`${err.message} Продължавам с ${then}.`, { duration: 9000, action: { label: 'Настройки', run: openSettings } });
-            player.play();
+            freeHandover(err);
             return;
         }
         const offerDevice = settings.engine !== 'device';
-        const setupIssue = settings.engine === 'cloud' && /^(API_KEY|SERVICE_DISABLED|BILLING_DISABLED)/.test(err.reason || '');
+        const setupIssue = (settings.engine === 'cloud' || settings.engine === 'wavenet') && /^(API_KEY|SERVICE_DISABLED|BILLING_DISABLED)/.test(err.reason || '');
         if (setupIssue) {
             settings.cloudReady = false;
             saveSettings();
@@ -2650,6 +2647,45 @@ function initNative() {
 // Google HD was paused because the month's free characters ran out: switch back when
 // Google's new billing month starts. Also fetch the month's total for the key from the
 // worker, so another device's listening counts against the limit too.
+// A free voice ran out: go on with the next free one (the chosen voice comes back
+// by itself on the next day / month)
+async function freeHandover(err) {
+    // Google HD comes back by itself when Google's new month begins
+    if (err.cloudCap) {
+        if (!err.tier || err.tier === 'Chirp3-HD') settings.cloudPausedMonth = monthKey();
+        else settings.wavenetPausedMonth = monthKey();
+    }
+    if (err.azureCap) settings.azurePausedMonth = monthKey();
+    if ((err.cloudCap || err.azureCap || err.geminiFreeCap) && !settings.freeFrom) settings.freeFrom = settings.engine;
+    let next = nextFreeEngine();
+    if (next === 'wavenet' && !settings.wavenetVoice && !(await pickWavenetVoice())) {
+        settings.wavenetPausedMonth = monthKey();
+        next = nextFreeEngine();
+    }
+    settings.engine = next;
+    saveSettings();
+    updatePlayerUI();
+    const then = { gemini: 'Gemini разказвача', cloud: 'Google HD (безплатно)', wavenet: 'Google WaveNet (безплатно)', azure: 'Microsoft гласовете (безплатно)' }[next] || 'гласа на телефона';
+    toast(`${err.message} Продължавам с ${then}.`, { duration: 9000, action: { label: 'Настройки', run: openSettings } });
+    player.play();
+}
+
+// Plan C voice: Google WaveNet (or Standard) for the language — 4M free characters a month
+async function pickWavenetVoice() {
+    try {
+        const voices = await loadCloudVoices(currentLang());
+        const v = voices.find((x) => x.tier === 'Wavenet') || voices.find((x) => x.tier === 'Standard');
+        if (!v) return false;
+        settings.wavenetVoice = v.name;
+        saveSettings();
+        return true;
+    } catch { return false; }
+}
+
+function wavenetUsable() {
+    return !!(settings.cloudReady && effectiveSettings().apiKey && settings.wavenetPausedMonth !== monthKey());
+}
+
 // A free voice that still has free characters this month, else the phone's voice
 function azureUsable() {
     return !!(settings.azureKey && settings.azureRegion && settings.azurePausedMonth !== monthKey() && azureFreeLeft() > 5000);
@@ -2664,6 +2700,7 @@ function geminiFreeUsable() {
 function nextFreeEngine() {
     if (settings.engine !== 'gemini' && geminiFreeUsable() && settings.geminiFreeOnly) return 'gemini';
     if (settings.engine !== 'cloud' && cloudUsable()) return 'cloud';
+    if (settings.engine !== 'wavenet' && wavenetUsable()) return 'wavenet';
     if (settings.engine !== 'azure' && azureUsable()) return 'azure';
     return 'device';
 }
@@ -2683,9 +2720,15 @@ function checkCloudMonth() {
         settings.azurePausedMonth = '';
         saveSettings();
     }
+    if (settings.wavenetPausedMonth && settings.wavenetPausedMonth !== monthKey()) {
+        settings.wavenetPausedMonth = '';
+        saveSettings();
+    }
+    // Back up the chain too: a plan-B voice that has free characters again takes over
+    // from a later one (e.g. Google HD from the phone's voice) at the new month
     // New month: back to the voice that was chosen before the free characters ran out
     const from = settings.freeFrom;
-    if (from && settings.engine !== from && (from === 'azure' ? azureUsable() : from === 'cloud' ? cloudUsable() : from === 'gemini' ? geminiFreeUsable() : false)) {
+    if (from && settings.engine !== from && (from === 'azure' ? azureUsable() : from === 'cloud' ? cloudUsable() : from === 'wavenet' ? wavenetUsable() : from === 'gemini' ? geminiFreeUsable() : false)) {
         settings.engine = from;
         settings.freeFrom = '';
         saveSettings();

@@ -105,6 +105,7 @@ class ApiError extends Error {
         this.reason = info.reason || '';
         this.project = info.project || '';
         this.fixUrl = info.fixUrl || '';
+        this.raw = info.raw || '';
     }
 }
 
@@ -141,7 +142,7 @@ async function fetchJson(url, options, timeoutMs, signal) {
         try { data = await res.json(); } catch {}
         if (!res.ok) {
             const msg = data?.error?.message || `HTTP ${res.status}`;
-            const info = errorInfo(data);
+            const info = { ...errorInfo(data), raw: msg + ' ' + JSON.stringify(data?.error?.details || []) };
             throw new ApiError(friendlyError(res.status, msg, info.reason), res.status, res.status === 429 || res.status >= 500, info);
         }
         return data;
@@ -634,6 +635,15 @@ export async function geminiParseAudio(data) {
 }
 
 // retry429=false lets the caller switch keys at once when a free daily quota runs out.
+// A 429 from the free tier: the day's quota (comes back tomorrow) or only the per-minute
+// one (comes back in seconds). → { daily, wait } with wait in seconds
+export function quotaKind(e) {
+    const raw = e?.raw || '';
+    const daily = /PerDay/i.test(raw);
+    const m = raw.match(/retry in ([\d.]+)\s*s/i) || raw.match(/"retryDelay":\s*"([\d.]+)s"/);
+    return { daily, wait: m ? Math.ceil(Number(m[1])) : 0 };
+}
+
 export async function geminiSynthesize({ apiKey, model, text, voice, style, customStyle, lang, signal, retry429 = true }) {
     const send = async (steady) => {
         const body = geminiRequestBody({ text, voice, style, customStyle, lang, steady });
