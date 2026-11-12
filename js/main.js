@@ -7,7 +7,7 @@ import { LANG_NAMES, LOCALES, charLen, noteText } from './text.js';
 import {
     GEMINI_VOICES, GEMINI_DEFAULT_MODEL, NARRATION_STYLES, PRICES,
     cloudVoices, cloudSynthesize, cloudBilledChars, cloudDiagnose, CLOUD_LINKS, geminiSynthesize, geminiModels, deviceVoices, onDeviceVoicesChanged, cloudTier,
-    cheapestGeminiModel, isVerifiedGeminiModel, geminiCost,
+    cheapestGeminiModel, isVerifiedGeminiModel, geminiCost, azureVoices, azureSynthesize, azureBilledChars, AZURE_FREE_CHARS,
 } from './engines.js';
 import { translateChapter, translationCost, deviceTranslationAvailable, TRANSLATE_DEFAULT_MODEL } from './translate.js';
 import { isNative, Native, nativeFileUrl, loadNativeVoices, nativeEngines } from './native.js';
@@ -17,6 +17,7 @@ import { exportPlan, exportChapters, packageFiles, safeFileName } from './export
 import { buildJob, submitJob, jobStatus, cancelJob, downloadBook, studioVoice } from './studio.js';
 import { searchBooks, localizeTitles, SOURCES } from './search.js';
 import { SHELVES, loadShelf, wikisourceWorks, fetchCatalogBook, sourceKey, RIGHTS_LABELS, shareCommunityBook, reportCommunityBook } from './library.js';
+import { azureFreeLeft, monthlyAzureChars } from './usage.js';
 import { usageSummary, resetUsage, hourlyCost, freeHoursPerMonth, recordUsage, monthKey, syncCloudUsage, cloudReserve, cloudRelease, reportCloudUsage, CLOUD_SAFE_SHARE } from './usage.js';
 
 const $ = (s, root = document) => root.querySelector(s);
@@ -25,7 +26,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.12';
+export const APP_VERSION = '2.13';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
@@ -33,6 +34,7 @@ const DEFAULTS = {
     style: 'intriguing', customStyle: '', deviceVoice: '', lang: 'auto', rate: 1,
     cacheMB: 500, theme: 'system', readerSize: 19, view: 'cover', cloudReady: false, autoTranslate: 'bg',
     geminiCapUsd: 2, cloudPausedMonth: '',
+    azureKey: '', azureRegion: 'westeurope', azureVoice: '', azurePausedMonth: '',
 };
 
 let settings = loadSettings();
@@ -185,6 +187,10 @@ function engineLabel(s = settings) {
     if (s.engine === 'cloud') {
         const name = s.cloudVoice ? s.cloudVoice.split('-').slice(-1)[0] : 'Google';
         return `${name} · ${PRICES.cloud[cloudTier(s.cloudVoice)]?.label === 'Chirp 3 HD' ? 'HD' : PRICES.cloud[cloudTier(s.cloudVoice)]?.label || ''}`;
+    }
+    if (s.engine === 'azure') {
+        const name = (s.azureVoice || 'Microsoft').split('-').slice(-1)[0].replace(/(Multilingual)?Neural$/, '');
+        return `${name || 'Microsoft'} · Microsoft`;
     }
     return `${s.geminiVoice} · AI`;
 }
@@ -801,7 +807,16 @@ async function startPlayback() {
         openCloudSetup({ thenPlay: true });
         return;
     }
-    if (st.engine !== 'device' && !st.apiKey) {
+    if (st.engine === 'azure' && (!settings.azureKey || !settings.azureRegion)) {
+        toast('Добавете ключ за Microsoft гласовете — отнема 2 минути.', { duration: 7000 });
+        openSettings();
+        return;
+    }
+    if (st.engine === 'azure' && !settings.azureVoice) {
+        const ok = await pickDefaultAzureVoice();
+        if (!ok) return;
+    }
+    if (st.engine !== 'device' && st.engine !== 'azure' && !st.apiKey) {
         toast('За естествените гласове е нужен Google API ключ. Засега чета с гласа на устройството.', {
             action: { label: 'Настройки', run: openSettings },
         });
@@ -830,6 +845,32 @@ async function pickDefaultCloudVoice() {
         return true;
     } catch (e) {
         toast(e.message, { error: true, duration: 7000, action: { label: 'Настройки', run: openSettings } });
+        return false;
+    }
+}
+
+const azureVoiceCache = {};
+async function loadAzureVoices(lang) {
+    const k = `${settings.azureRegion}|${lang}`;
+    if (azureVoiceCache[k]) return azureVoiceCache[k];
+    const voices = await azureVoices(settings.azureKey, settings.azureRegion, lang);
+    azureVoiceCache[k] = voices;
+    return voices;
+}
+
+async function pickDefaultAzureVoice() {
+    try {
+        const voices = await loadAzureVoices(currentLang());
+        if (!voices.length) {
+            toast(`Microsoft няма гласове за ${LANG_NAMES[currentLang()] || currentLang()}.`, { error: true });
+            return false;
+        }
+        settings.azureVoice = voices[0].name;
+        saveSettings();
+        updatePlayerUI();
+        return true;
+    } catch (e) {
+        toast(e.message, { error: true, duration: 8000, action: { label: 'Настройки', run: openSettings } });
         return false;
     }
 }
@@ -1338,6 +1379,7 @@ function renderSettings(body) {
     const engines = [
         ['gemini', 'Gemini разказвач', 'Най-жива интонация: разказвачът „играе“ текста според избран стил и езика на книгата.', geminiCardPrice(), settings.geminiEconomy ? 'до −50% с пестелив режим' : 'плаща се само чутото'],
         ['device', 'Гласът на телефона', 'Безплатно и офлайн. Качеството зависи от устройството.', '0 $', 'завинаги'],
+        ['azure', 'Microsoft гласове', 'Калина и Борислав — естествени невронни гласове. Чете цели откъси наведнъж: гладко, без паузи след всяко изречение. Работи на всеки телефон, и на Huawei.', 'безплатно', '~10 ч/месец · никога не се таксува'],
         ['cloud', 'Google HD гласове', `Chirp 3 HD. ~${freeHrs} ч месечно безплатно, но на български звучат по-слабо от разказвача.`, 'безплатно', `после ~${hourlyCost('cloud').toFixed(2)} $/ч`],
     ];
     body.innerHTML = `
@@ -1542,6 +1584,9 @@ function renderVoiceGroup(box, lang) {
         };
         const ttsSet = $('#btnTtsSettings', box);
         if (ttsSet) ttsSet.onclick = () => Native.openTtsSettings();
+    } else if (engine === 'azure') {
+        renderAzureGroup(box, lang);
+        return;
     } else if (engine === 'cloud') {
         box.innerHTML = `<div class="group-title">Глас</div><p class="hint" id="cloudVoiceMsg">Зареждам гласовете…</p>`;
         if (!effectiveSettings().apiKey || !settings.cloudReady) {
@@ -1665,6 +1710,90 @@ function renderVoiceGroup(box, lang) {
     if (prev) prev.onclick = () => previewVoice(prev);
 }
 
+const AZURE_REGIONS = [
+    ['westeurope', 'West Europe (Нидерландия)'], ['northeurope', 'North Europe (Ирландия)'],
+    ['germanywestcentral', 'Germany West Central'], ['francecentral', 'France Central'], ['swedencentral', 'Sweden Central'],
+    ['switzerlandnorth', 'Switzerland North'], ['uksouth', 'UK South'], ['italynorth', 'Italy North'], ['polandcentral', 'Poland Central'],
+    ['eastus', 'East US'], ['eastus2', 'East US 2'], ['westus2', 'West US 2'], ['centralindia', 'Central India'], ['southeastasia', 'Southeast Asia'],
+];
+
+function renderAzureGroup(box, lang) {
+    const regions = AZURE_REGIONS.some(([r]) => r === settings.azureRegion) ? AZURE_REGIONS : [[settings.azureRegion, settings.azureRegion], ...AZURE_REGIONS];
+    const used = monthlyAzureChars();
+    const hoursLeft = azureFreeLeft() / (14 * 3600);
+    box.innerHTML = `
+        <div class="group-title">Microsoft гласове</div>
+        <div id="azureVoiceRow"><p class="hint">${settings.azureKey ? 'Зареждам гласовете…' : 'Първо въведете ключ и регион.'}</p></div>
+        <div class="group-title" style="margin-top:14px">Ключ на Azure Speech</div>
+        <div class="field">
+            <input class="input" id="setAzureKey" type="password" autocomplete="off" spellcheck="false" placeholder="Key 1 от ресурса Speech" value="${esc(settings.azureKey)}">
+            <button class="btn btn-ghost btn-sm" id="btnAzureTest">Провери</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+            <span class="row-label">Регион<small>Същият като „Location/Region“ на ресурса</small></span>
+            <select class="select" id="setAzureRegion">
+                ${regions.map(([r, l]) => `<option value="${esc(r)}" ${r === settings.azureRegion ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+            </select>
+        </div>
+        <p class="hint" id="azureStatus">${used ? `Този месец: ${Math.round(used / 1000)} хил. от ${AZURE_FREE_CHARS / 1000} хил. безплатни знака · остават ~${hoursLeft.toFixed(1)} ч.` : ''}</p>
+        <details class="hint">
+            <summary><b>Как да взема безплатен ключ (2–3 мин.)</b></summary>
+            <ol style="padding-left:18px;margin:8px 0">
+                <li>Влезте в <a href="https://portal.azure.com/#create/Microsoft.CognitiveServicesSpeechServices" target="_blank" rel="noopener">portal.azure.com → Speech service → Create</a> (безплатен акаунт в Microsoft Azure).</li>
+                <li>Region: <b>West Europe</b>, Pricing tier: <b>Free F0</b> — 500 000 знака месечно, <b>никога не се таксува</b>.</li>
+                <li>След създаването: „Keys and Endpoint“ → копирайте <b>Key 1</b> тук и изберете същия регион.</li>
+            </ol>
+            Ключът остава само на това устройство. Когато безплатните знаци за месеца свършат, четенето продължава с гласа на телефона и от 1-во число се връща само.
+        </details>`;
+    const keyEl = $('#setAzureKey', box);
+    const regEl = $('#setAzureRegion', box);
+    const status = $('#azureStatus', box);
+    const fillVoices = async () => {
+        const row = $('#azureVoiceRow', box);
+        if (!settings.azureKey) { row.innerHTML = '<p class="hint">Първо въведете ключ и регион.</p>'; return false; }
+        row.innerHTML = '<p class="hint">Зареждам гласовете…</p>';
+        try {
+            const voices = await loadAzureVoices(lang);
+            if (!voices.length) { row.innerHTML = `<p class="hint">Microsoft няма гласове за ${esc(LANG_NAMES[lang] || lang)}.</p>`; return false; }
+            if (!voices.some((v) => v.name === settings.azureVoice)) { settings.azureVoice = voices[0].name; saveSettings(); player.voiceChanged(); }
+            const own = voices.filter((v) => !v.multilingual), multi = voices.filter((v) => v.multilingual);
+            const opt = (v) => `<option value="${esc(v.name)}" ${v.name === settings.azureVoice ? 'selected' : ''}>${esc(v.label)} · ${v.gender === 'Female' ? 'жен.' : v.gender === 'Male' ? 'мъж.' : ''}</option>`;
+            row.innerHTML = `
+                <div class="field">
+                    <select class="select" id="setAzureVoice">
+                        ${own.length ? `<optgroup label="${esc(LANG_NAMES[lang] || lang)}">${own.map(opt).join('')}</optgroup>` : ''}
+                        ${multi.length ? `<optgroup label="Многоезични · по-живи, възможен лек акцент">${multi.map(opt).join('')}</optgroup>` : ''}
+                    </select>
+                    <button class="btn btn-ghost btn-sm" data-preview>Чуй</button>
+                </div>`;
+            const sel = $('#setAzureVoice', row);
+            sel.onchange = () => { settings.azureVoice = sel.value; saveSettings(); player.voiceChanged(); updatePlayerUI(); };
+            const prev = $('[data-preview]', row);
+            prev.onclick = () => previewVoice(prev);
+            return true;
+        } catch (e) {
+            row.innerHTML = `<p class="hint" style="color:var(--danger, #c0392b)">${esc(e.message)}</p>`;
+            return false;
+        }
+    };
+    const changed = () => {
+        settings.azureKey = keyEl.value.trim();
+        settings.azureRegion = regEl.value;
+        saveSettings();
+        player.voiceChanged();
+        return fillVoices();
+    };
+    keyEl.onchange = changed;
+    regEl.onchange = changed;
+    $('#btnAzureTest', box).onclick = async () => {
+        Object.keys(azureVoiceCache).forEach((k) => delete azureVoiceCache[k]);
+        status.textContent = 'Проверявам…';
+        const ok = await changed();
+        status.textContent = ok ? '✓ Ключът работи. Натиснете „Чуй“ за мостра.' : '';
+    };
+    if (settings.azureKey) fillVoices();
+}
+
 function voiceTitle(v) {
     const short = v.name.split('-').slice(-1)[0];
     const g = v.gender === 'FEMALE' ? 'жен.' : v.gender === 'MALE' ? 'мъж.' : '';
@@ -1723,6 +1852,10 @@ async function previewVoice(btn) {
         speechSynthesis.speak(u);
         return;
     }
+    if (st.engine === 'azure') {
+        if (!st.azureKey || !st.azureVoice) return toast('Въведете ключ и изберете глас.', { error: true });
+        return previewAzure(btn, audioEl, text, lang, st);
+    }
     if (!st.apiKey) return toast('Нужен е API ключ.', { error: true });
     const key = st.engine === 'cloud' ? `preview|${st.cloudVoice}|${lang}` : `preview|${st.geminiModel}|${st.geminiVoice}|${st.style}|${st.customStyle}|${lang}`;
     const old = btn.textContent;
@@ -1749,6 +1882,32 @@ async function previewVoice(btn) {
                 recordUsage({ engine: 'gemini', inTokens: r.inTokens, outTokens: r.outTokens });
             }
             rec = { key, blob, dur: 0, chars: text.length, bookId: '_preview' };
+            await db.audioPut(rec);
+        }
+        previewAudio = audioEl;
+        previewAudio.src = URL.createObjectURL(rec.blob);
+        previewAudio.playbackRate = player.rate;
+        await playOrReport(previewAudio);
+    } catch (e) {
+        toast(e.message, { error: true, duration: 7000 });
+    } finally {
+        btn.textContent = old;
+        btn.disabled = false;
+    }
+}
+
+async function previewAzure(btn, audioEl, text, lang, st) {
+    const key = `preview|azure|${st.azureVoice}|${lang}`;
+    const old = btn.textContent;
+    btn.textContent = '…';
+    btn.disabled = true;
+    try {
+        let rec = await db.audioGet(key);
+        if (!rec) {
+            if (azureFreeLeft() < azureBilledChars(text)) throw new Error('Безплатните знаци на Microsoft гласовете за този месец свършиха.');
+            const r = await azureSynthesize({ key: st.azureKey, region: st.azureRegion, text, voice: st.azureVoice, locale: LOCALES[lang] || lang });
+            recordUsage({ engine: 'azure', chars: r.chars });
+            rec = { key, blob: r.blob, dur: 0, chars: text.length, bookId: '_preview' };
             await db.audioPut(rec);
         }
         previewAudio = audioEl;
@@ -2143,6 +2302,7 @@ function bindEvents() {
         if (err.reason === 'APP_CAP') {
             // Google HD comes back by itself when Google's new month begins
             if (err.cloudCap) settings.cloudPausedMonth = monthKey();
+            if (err.azureCap) settings.azurePausedMonth = monthKey();
             settings.engine = 'device';
             saveSettings();
             updatePlayerUI();
@@ -2155,6 +2315,10 @@ function bindEvents() {
         if (setupIssue) {
             settings.cloudReady = false;
             saveSettings();
+        }
+        if (err.reason === 'AZURE_SETUP') {
+            toast(err.message, { error: true, duration: 8000, action: { label: 'Настройки', run: openSettings } });
+            return;
         }
         toast(err.message || 'Грешка при четене.', {
             error: true, duration: 8000,
@@ -2479,6 +2643,15 @@ function checkCloudMonth() {
         if (settings.engine === 'device' && settings.cloudVoice) {
             settings.engine = 'cloud';
             toast('Нов месец — Google HD отново е безплатен и чете пак.', { duration: 7000 });
+        }
+        saveSettings();
+        if (currentBook) updatePlayerUI();
+    }
+    if (settings.azurePausedMonth && settings.azurePausedMonth !== monthKey()) {
+        settings.azurePausedMonth = '';
+        if (settings.engine === 'device' && settings.azureKey) {
+            settings.engine = 'azure';
+            toast('Нов месец — Microsoft гласовете отново са безплатни.', { duration: 7000 });
         }
         saveSettings();
         if (currentBook) updatePlayerUI();

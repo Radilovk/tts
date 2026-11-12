@@ -2,6 +2,7 @@
 //   device — the phone's own TTS (free, offline)
 //   cloud  — Google Cloud Text-to-Speech, Chirp 3 HD voices (1M free chars/month)
 //   gemini — Gemini TTS, steerable "narrator" intonation (paid per audio token)
+//   azure  — Microsoft neural voices (Azure AI Speech, 0.5M free chars/month)
 
 import { LOCALES } from './text.js';
 import { encodeOpus } from './opus.js';
@@ -738,6 +739,159 @@ function pcmToWav(int16, rate) {
     str(36, 'data'); v.setUint32(40, dataLen, true);
     new Int16Array(buf, 44).set(int16);
     return new Blob([buf], { type: 'audio/wav' });
+}
+
+// ---------- Microsoft neural voices (Azure AI Speech) ----------
+//
+// The official Azure Speech REST API: the same natural neural voices as Microsoft's
+// own apps (Bulgarian: Калина, Борислав). A whole passage is narrated in one request
+// and played as one file, like Google HD, so there is no pause or "restart" between
+// sentences — the phone's own engines read sentence by sentence and stall after each.
+// A free (F0) Speech resource gives 0.5M characters a month (~10 h) and is never
+// billed: past the limit Azure only refuses, and the app switches voices.
+// Azure allows these requests straight from the page (CORS *), so no server is used.
+
+export const AZURE_FREE_CHARS = 500_000;
+export const azureAudioFormat = { enc: 'audio-24khz-96kbitrate-mono-mp3', mime: 'audio/mpeg' };
+
+// Voices that sound good in a book, first in the list
+const AZURE_PREFERRED = ['bg-BG-KalinaNeural', 'bg-BG-BorislavNeural'];
+
+function azureHost(region) {
+    const r = String(region || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!r) throw new ApiError('Въведете региона на Azure ресурса (напр. westeurope).', 0, false, { reason: 'AZURE_SETUP' });
+    return `https://${r}.tts.speech.microsoft.com`;
+}
+
+function azureError(status, text) {
+    const quota = /quota|exceed/i.test(text || '');
+    if (status === 401) return new ApiError('Невалиден ключ или грешен регион за Microsoft гласовете.', 401, false, { reason: 'AZURE_SETUP' });
+    if (status === 403 && quota) return new ApiError('Безплатните знаци на Microsoft гласовете за месеца свършиха.', 403, false, { reason: 'AZURE_QUOTA' });
+    if (status === 403) return new ApiError('Достъпът до Microsoft гласовете е отказан (проверете ключа и региона).', 403, false, { reason: 'AZURE_SETUP' });
+    if (status === 429 && quota) return new ApiError('Безплатните знаци на Microsoft гласовете за месеца свършиха.', 429, false, { reason: 'AZURE_QUOTA' });
+    if (status === 429) return new ApiError('Твърде много заявки към Microsoft. Опитвам отново…', 429, true);
+    if (status === 400) return new ApiError('Microsoft не прие текста.', 400, false);
+    return new ApiError(`Microsoft гласовете: HTTP ${status}`, status, status >= 500);
+}
+
+async function azureFetch(url, options, timeoutMs, signal) {
+    const ctrl = new AbortController();
+    const onAbort = () => ctrl.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+        const res = await fetch(url, { ...options, signal: ctrl.signal });
+        if (!res.ok) {
+            let text = '';
+            try { text = await res.text(); } catch {}
+            throw azureError(res.status, text);
+        }
+        return res;
+    } catch (e) {
+        if (e instanceof ApiError) throw e;
+        if (signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
+        if (e.name === 'AbortError') throw new ApiError('Microsoft не отговори навреме.', 0, true);
+        throw new ApiError(navigator.onLine ? 'Мрежова грешка.' : 'Няма интернет връзка.', 0, true);
+    } finally {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+    }
+}
+
+// Voices for the language: its own voices first, then the multilingual ones that
+// also speak it (livelier, sometimes with a slight accent).
+export async function azureVoices(key, region, lang) {
+    const res = await azureFetch(`${azureHost(region)}/cognitiveservices/voices/list`, {
+        headers: { 'Ocp-Apim-Subscription-Key': String(key).trim() },
+    }, 20000);
+    const list = await res.json();
+    const locale = (LOCALES[lang] || lang).toLowerCase();
+    const own = [], multi = [];
+    for (const v of list || []) {
+        if (v.VoiceType && v.VoiceType !== 'Neural') continue;
+        if (/:|DragonHD|HDLatest/i.test(v.ShortName || '')) continue;
+        const item = {
+            name: v.ShortName, locale: v.Locale, gender: v.Gender,
+            label: v.LocalName || v.DisplayName || v.ShortName,
+        };
+        if ((v.Locale || '').toLowerCase().startsWith(lang)) own.push(item);
+        else if ((v.SecondaryLocaleList || []).some((l) => l.toLowerCase() === locale)) multi.push({ ...item, multilingual: true });
+    }
+    const rank = (v) => { const i = AZURE_PREFERRED.indexOf(v.name); return i < 0 ? 99 : i; };
+    own.sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+    multi.sort((a, b) => a.name.localeCompare(b.name));
+    return [...own, ...multi];
+}
+
+function xmlEscape(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+
+// One continuous passage. Sentence pauses are set to a natural, even length (the
+// default can be long), paragraphs get a slightly longer breath, and the edges of the
+// file are kept short so passages join without a gap. tuned=false sends plain SSML.
+export function azureSsml({ text, voice, locale, multilingual, tuned = true }) {
+    const paras = String(text).split(/\n+/).map(prepareParagraph).filter(Boolean).map(xmlEscape);
+    const body = paras.join(tuned ? ' <break time="450ms"/> ' : ' ');
+    const silence = tuned
+        ? '<mstts:silence type="Leading-exact" value="60ms"/><mstts:silence type="Tailing-exact" value="250ms"/><mstts:silence type="Sentenceboundary-exact" value="320ms"/>'
+        : '';
+    const inner = multilingual ? `<lang xml:lang="${locale}">${body}</lang>` : body;
+    return `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="${locale}">` +
+        `<voice name="${xmlEscape(voice)}">${silence}${inner}</voice></speak>`;
+}
+
+// Characters Azure counts: the spoken text (tags are not billed)
+export function azureBilledChars(text) {
+    return String(text).split(/\n+/).map(prepareParagraph).filter(Boolean).join(' ').length;
+}
+
+async function azureOnce({ key, region, text, voice, locale, multilingual, tuned, signal }) {
+    const res = await withRetry(() => azureFetch(`${azureHost(region)}/cognitiveservices/v1`, {
+        method: 'POST',
+        headers: {
+            'Ocp-Apim-Subscription-Key': String(key).trim(),
+            'Content-Type': 'application/ssml+xml',
+            'X-Microsoft-OutputFormat': azureAudioFormat.enc,
+        },
+        body: azureSsml({ text, voice, locale, multilingual, tuned }),
+    }, 60000, signal), signal, 5);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (bytes.length < 500) throw new ApiError('Microsoft не върна аудио.', 0, true);
+    return bytes;
+}
+
+let azureTuned = true;   // turned off for the session if Azure rejects the pause tags
+
+async function azureBytes(opts) {
+    try {
+        return [await azureOnce({ ...opts, tuned: azureTuned })];
+    } catch (e) {
+        if (!(e instanceof ApiError) || e.status !== 400) throw e;
+        if (azureTuned) {
+            // Plain SSML first: a rejected pause setting must never stop the book
+            try {
+                const b = await azureOnce({ ...opts, tuned: false });
+                azureTuned = false;
+                return [b];
+            } catch (e2) { if (!(e2 instanceof ApiError) || e2.status !== 400) throw e2; }
+        }
+        const halves = opts.text.length > 200 && splitHalf(opts.text);
+        if (!halves) throw e;
+        opts.onSplit?.(e);
+        const out = [];
+        for (const part of halves) out.push(...await azureBytes({ ...opts, text: part }));
+        return out;
+    }
+}
+
+// → { blob (MP3), chars }. MP3 frames simply concatenate when a passage was split.
+// locale: the language of the text (a multilingual voice is told to speak it)
+export async function azureSynthesize({ key, region, text, voice, locale, signal, onSplit }) {
+    const multilingual = /Multilingual/i.test(voice);
+    const own = voice.split('-').slice(0, 2).join('-');
+    const opts = { key, region, text, voice, signal, onSplit, multilingual, locale: (multilingual ? locale : own) || locale || 'bg-BG' };
+    return { blob: new Blob(await azureBytes(opts), { type: azureAudioFormat.mime }), chars: azureBilledChars(text) };
 }
 
 // ---------- Device (Web Speech API) ----------

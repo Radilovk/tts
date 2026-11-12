@@ -5,18 +5,18 @@
 
 import * as db from './db.js';
 import { buildChapterModel, chunkBoundaries, nextBoundary, chunkText, charLen, LOCALES } from './text.js';
-import { cloudNarrate, cloudBilledChars, geminiSynthesize, geminiCost, cloudTier, deviceVoices } from './engines.js';
+import { cloudNarrate, cloudBilledChars, geminiSynthesize, geminiCost, cloudTier, deviceVoices, azureSynthesize, azureBilledChars } from './engines.js';
 import { pendingKeys } from './batch.js';
 import { sharedGetAudio, sharedPutAudio } from './shared.js';
-import { recordUsage, monthlyGeminiUsd, cloudReserve, cloudRelease, reportCloudUsage } from './usage.js';
+import { recordUsage, monthlyGeminiUsd, cloudReserve, cloudRelease, reportCloudUsage, azureFreeLeft } from './usage.js';
 import { Native, NativeAudio } from './native.js';
 import { sentenceMarks } from './align.js';
 
-const CHUNK_CHARS = { cloud: 1400, gemini: 1500 };
+const CHUNK_CHARS = { cloud: 1400, gemini: 1500, azure: 2000 };
 const FAST_START_CHARS = 320;
 // Chunking v2 (new books): longer passages that end at paragraphs, so the joins between
 // separately narrated passages are fewer and fall on natural pauses.
-const CHUNK_V2 = { gemini: { max: 2600, para: 0.6 }, cloud: { max: 1400, para: 0.5 } };
+const CHUNK_V2 = { gemini: { max: 2600, para: 0.6 }, cloud: { max: 1400, para: 0.5 }, azure: { max: 2400, para: 0.6 } };
 const FAST_START_V2 = { min: 450, max: 1100 };
 // Chunking v3: Google HD gets longer passages (up to ~2000 characters, still within its
 // 5000-byte limit), so the voice keeps one melody over more text and joins are rarer.
@@ -371,6 +371,7 @@ export class Player extends EventTarget {
         // v3: every passage checked for skipped text and levelled. The version is part
         // of the cache key, so passages made before (possibly cut short) are not replayed
         if (st.engine === 'cloud') return `cloud3|${st.cloudVoice}`;
+        if (st.engine === 'azure') return `azure1|${st.azureVoice}`;
         if (st.engine === 'gemini') return `gemini|${st.geminiModel}|${st.geminiVoice}|${st.style}|${st.style === 'custom' ? st.customStyle : ''}`;
         return 'device';
     }
@@ -465,6 +466,7 @@ export class Player extends EventTarget {
 
     async _synthesize(spec, book = this.book) {
         const st = spec.st || this.getSettings();
+        if (st.engine === 'azure') return this._synthesizeAzure(spec, book, st);
         const freeKey = st.engine === 'gemini' ? usableFreeKey(st) : '';
         if (!st.apiKey && !freeKey) throw new Error('Добавете Google API ключ в настройките или изберете гласа на устройството.');
         const lang = spec.lang || this._lang();
@@ -524,6 +526,36 @@ export class Player extends EventTarget {
         const prev = this.synthSeconds[st.engine];
         this.synthSeconds[st.engine] = prev ? prev * 0.6 + took * 0.4 : took;
         const dur = result.dur || await blobDuration(result.blob);
+        return { key: spec.key, blob: result.blob, dur, chars: spec.chars, bookId: book.id };
+    }
+
+    // Microsoft neural voices: one request per passage, inside the free characters
+    async _synthesizeAzure(spec, book, st) {
+        if (!st.azureKey || !st.azureRegion) {
+            throw Object.assign(new Error('Добавете ключ и регион за Microsoft гласовете в настройките.'), { reason: 'AZURE_SETUP' });
+        }
+        const billed = azureBilledChars(spec.text);
+        if (azureFreeLeft() < billed) {
+            diag('Microsoft: безплатните знаци за месеца свършиха — спрях');
+            throw Object.assign(new Error('Безплатните знаци на Microsoft гласовете за този месец свършиха.'), { reason: 'APP_CAP', azureCap: true });
+        }
+        const t0 = performance.now();
+        let result;
+        try {
+            result = await azureSynthesize({
+                key: st.azureKey, region: st.azureRegion, text: spec.text, voice: st.azureVoice,
+                locale: LOCALES[spec.lang || this._lang()] || 'bg-BG',
+                onSplit: (e) => diag(`Microsoft: откъсът е прочетен на две части — ${e.message} (гл. ${spec.c + 1})`),
+            });
+        } catch (e) {
+            if (e.reason === 'AZURE_QUOTA') throw Object.assign(new Error(e.message), { reason: 'APP_CAP', azureCap: true });
+            throw e;
+        }
+        recordUsage({ engine: 'azure', chars: result.chars });
+        const took = (performance.now() - t0) / 1000;
+        const prev = this.synthSeconds.azure;
+        this.synthSeconds.azure = prev ? prev * 0.6 + took * 0.4 : took;
+        const dur = await blobDuration(result.blob);
         return { key: spec.key, blob: result.blob, dur, chars: spec.chars, bookId: book.id };
     }
 
@@ -742,7 +774,7 @@ export class Player extends EventTarget {
 
     _eagerPrefetch() {
         const st = this.getSettings();
-        return st.engine === 'cloud' || !!this.book?.factory;
+        return st.engine === 'cloud' || st.engine === 'azure' || !!this.book?.factory;
     }
 
     _prefetchMargin() {

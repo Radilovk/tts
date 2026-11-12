@@ -1,6 +1,6 @@
 // Monthly usage counter and cost estimate (stored locally).
 
-import { PRICES, geminiPrice } from './engines.js';
+import { PRICES, geminiPrice, AZURE_FREE_CHARS } from './engines.js';
 import { libraryApi } from './shared.js';
 
 const KEY = 'rz_usage';
@@ -38,6 +38,7 @@ export function recordUsage({ engine, tier, chars = 0, inTokens = 0, outTokens =
         if (mode === 'batch') u.gemini.batchTokens = (u.gemini.batchTokens || 0) + outTokens;
         if (mode === 'free') u.gemini.freeTokens = (u.gemini.freeTokens || 0) + outTokens;
     }
+    if (engine === 'azure') u.azure = (u.azure || 0) + chars;
     if (engine === 'translate') {
         u.translate = u.translate || { inTokens: 0, outTokens: 0 };
         u.translate.inTokens += inTokens;
@@ -59,6 +60,9 @@ export function usageSummary() {
         const cost = billable / 1e6 * p.per1M;
         total += cost;
         rows.push({ label: `Google ${p.label}`, used: chars, free: p.free, cost, unit: 'знака' });
+    }
+    if (u.azure) {
+        rows.push({ label: 'Microsoft гласове', used: u.azure, free: AZURE_FREE_CHARS, cost: 0, unit: 'знака' });
     }
     if (u.gemini.outTokens) {
         const cost = monthlyGeminiUsd();
@@ -180,4 +184,17 @@ export function hourlyCost(engine, tier = 'Chirp3-HD', batch = false) {
 export function freeHoursPerMonth(tier = 'Chirp3-HD') {
     const p = PRICES.cloud[tier] || PRICES.cloud.Other;
     return p.free / (14 * 3600);
+}
+
+// ---------- Microsoft voices: inside the free characters ----------
+// A free (F0) Azure resource is never billed (Azure just refuses past 0.5M a month);
+// the app also stops itself at 95%, so a paid (S0) resource stays free too.
+export const AZURE_SAFE_SHARE = 0.95;
+
+export function monthlyAzureChars() {
+    return load().azure || 0;
+}
+
+export function azureFreeLeft() {
+    return Math.max(0, Math.floor(AZURE_FREE_CHARS * AZURE_SAFE_SHARE) - monthlyAzureChars());
 }
