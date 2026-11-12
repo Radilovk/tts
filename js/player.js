@@ -468,6 +468,14 @@ export class Player extends EventTarget {
         const st = spec.st || this.getSettings();
         if (st.engine === 'azure') return this._synthesizeAzure(spec, book, st);
         const freeKey = st.engine === 'gemini' ? usableFreeKey(st) : '';
+        // "Only free": the narrator reads with the free key alone and never pays; when
+        // the day's free quota is used up, the app goes on with a free plan-B voice
+        const freeOnly = st.engine === 'gemini' && st.geminiFreeOnly && !book?.factory;
+        if (freeOnly && !freeKey) {
+            throw Object.assign(new Error(st.geminiFreeKey
+                ? 'Безплатният дневен лимит на Gemini разказвача свърши за днес.'
+                : 'За безплатен Gemini разказвач е нужен безплатен ключ (Настройки → Gemini → Безплатен ключ).'), { reason: 'APP_CAP', geminiFreeCap: true });
+        }
         if (!st.apiKey && !freeKey) throw new Error('Добавете Google API ключ в настройките или изберете гласа на устройството.');
         const lang = spec.lang || this._lang();
         // Economy mode: this part is already being prepared at half price
@@ -510,6 +518,10 @@ export class Player extends EventTarget {
                 } catch (e) {
                     if (e.status !== 429 && e.status !== 403) throw e;
                     markFreeKeyExhausted();
+                    if (freeOnly) {
+                        diag('Gemini: безплатният дневен лимит свърши — продължавам с безплатен глас');
+                        throw Object.assign(new Error('Безплатният дневен лимит на Gemini разказвача свърши за днес.'), { reason: 'APP_CAP', geminiFreeCap: true });
+                    }
                     if (!st.apiKey) throw new Error('Безплатният дневен лимит на Gemini е изчерпан. Утре продължава безплатно.');
                 }
             }

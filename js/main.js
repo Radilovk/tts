@@ -26,11 +26,11 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.13';
+export const APP_VERSION = '2.14';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
-    engine: null, apiKey: '', cloudVoice: '', geminiVoice: 'Charon', geminiModel: '', geminiEconomy: true, geminiFreeKey: '',
+    engine: null, apiKey: '', cloudVoice: '', geminiVoice: 'Charon', geminiModel: '', geminiEconomy: true, geminiFreeKey: '', geminiFreeOnly: true,
     style: 'intriguing', customStyle: '', deviceVoice: '', lang: 'auto', rate: 1,
     cacheMB: 500, theme: 'system', readerSize: 19, view: 'cover', cloudReady: false, autoTranslate: 'bg',
     geminiCapUsd: 2, cloudPausedMonth: '',
@@ -76,6 +76,7 @@ function activeGeminiModel() {
 
 function geminiCardPrice() {
     const m = activeGeminiModel();
+    if (settings.geminiFreeOnly) return 'безплатно';
     return settings.geminiEconomy
         ? `от ~${hourlyCost('gemini', m, true).toFixed(2)} $/ч`
         : `~${hourlyCost('gemini', m, false).toFixed(2)} $/ч`;
@@ -318,7 +319,7 @@ function readerLang() {
 async function localizeRow(shelfId, row) {
     const d = shelfData[shelfId];
     if (!d) return;
-    await localizeTitles(d.items, readerLang(), effectiveSettings().apiKey);
+    await localizeTitles(d.items, readerLang(), (settings.geminiFreeOnly && usableFreeKey(settings)) || effectiveSettings().apiKey);
     row.querySelectorAll('.shelf-card').forEach((card) => {
         const it = d.items[Number(card.dataset.i)];
         if (!it?.titleT) return;
@@ -1377,7 +1378,7 @@ function renderSettings(body) {
     const hasPreKey = !!preconfiguredKey();
     const freeHrs = Math.round(freeHoursPerMonth('Chirp3-HD'));
     const engines = [
-        ['gemini', 'Gemini разказвач', 'Най-жива интонация: разказвачът „играе“ текста според избран стил и езика на книгата.', geminiCardPrice(), settings.geminiEconomy ? 'до −50% с пестелив режим' : 'плаща се само чутото'],
+        ['gemini', 'Gemini разказвач', 'Най-жива интонация: разказвачът „играе“ текста според избран стил и езика на книгата.', geminiCardPrice(), settings.geminiFreeOnly ? 'дневен лимит, после Google HD' : settings.geminiEconomy ? 'до −50% с пестелив режим' : 'плаща се само чутото'],
         ['device', 'Гласът на телефона', 'Безплатно и офлайн. Качеството зависи от устройството.', '0 $', 'завинаги'],
         ['azure', 'Microsoft гласове', 'Калина и Борислав — естествени невронни гласове. Чете цели откъси наведнъж: гладко, без паузи след всяко изречение. Работи на всеки телефон, и на Huawei.', 'безплатно', '~10 ч/месец · никога не се таксува'],
         ['cloud', 'Google HD гласове', `Chirp 3 HD. ~${freeHrs} ч месечно безплатно, но на български звучат по-слабо от разказвача.`, 'безплатно', `после ~${hourlyCost('cloud').toFixed(2)} $/ч`],
@@ -1655,19 +1656,28 @@ function renderVoiceGroup(box, lang) {
             ${settings.style === 'custom' ? `<textarea class="input" id="setCustomStyle" style="margin-top:10px" placeholder="Напр.: Чети като стар моряк, който разказва край огъня — бавно, с дрезгав глас и загадъчни паузи">${esc(settings.customStyle)}</textarea>` : ''}
             <div class="group-title" style="margin-top:18px">Пестене</div>
             <div class="row">
+                <span class="row-label">Само безплатно<small>Никога не плаща. След дневния лимит чете Google HD (безплатно), на другия ден — пак разказвачът.</small></span>
+                <select class="select" id="setFreeOnly">
+                    <option value="1" ${settings.geminiFreeOnly ? 'selected' : ''}>Вкл.</option>
+                    <option value="0" ${!settings.geminiFreeOnly ? 'selected' : ''}>Изкл.</option>
+                </select>
+            </div>
+            ${settings.geminiFreeOnly ? '' : `<div class="row">
                 <span class="row-label">Пестелив режим (−50%)<small>Следващата глава се подготвя предварително през Batch на Google на половин цена. Плаща се най-много една глава напред.</small></span>
                 <select class="select" id="setEconomy">
                     <option value="1" ${settings.geminiEconomy ? 'selected' : ''}>Вкл.</option>
                     <option value="0" ${!settings.geminiEconomy ? 'selected' : ''}>Изкл.</option>
                 </select>
-            </div>
-            <div class="group-title" style="margin-top:14px">Безплатен ключ (по избор)</div>
+            </div>`}
+            <div class="group-title" style="margin-top:14px">Безплатен ключ${settings.geminiFreeOnly ? '' : ' (по избор)'}</div>
             <input class="input" id="setFreeKey" type="password" autocomplete="off" spellcheck="false" placeholder="AIza… от проект без плащане" value="${esc(settings.geminiFreeKey)}">
-            <p class="hint">Ключ от <b>нов проект без свързано плащане</b> използва безплатния дневен лимит на Google. Разказвачът първо чете с него, а когато лимитът свърши за деня, минава на основния ключ. Създава се в <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">AI Studio</a> → Create API key → „Create in new project“.${settings.geminiFreeKey && !usableFreeKey(settings) ? ' <b>Днешният безплатен лимит е изчерпан.</b>' : ''}</p>
+            <p class="hint">Ключ от <b>нов проект без свързано плащане</b> използва безплатния дневен лимит на Google. Разказвачът първо чете с него, а когато лимитът свърши за деня, ${settings.geminiFreeOnly ? 'продължава с безплатен резервен глас (Google HD)' : 'минава на основния ключ'}. Създава се в <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">AI Studio</a> → Create API key → „Create in new project“.${settings.geminiFreeKey && !usableFreeKey(settings) ? ' <b>Днешният безплатен лимит е изчерпан.</b>' : ''}</p>
             <div class="group-title" style="margin-top:18px">Модел</div>
             <select class="select" id="setGeminiModel"></select>
             <p class="hint">„Автоматично“ избира най-евтиния проверен модел (Gemini 2.5 Flash TTS). Другите модели може да прочетат на глас инструкцията за стила — ако това стане, върнете „Автоматично“.</p>`;
-        $('#setEconomy', box).onchange = (e) => { settings.geminiEconomy = e.target.value === '1'; saveSettings(); rerenderSheet(renderSettings); };
+        const eco = $('#setEconomy', box);
+        if (eco) eco.onchange = (e) => { settings.geminiEconomy = e.target.value === '1'; saveSettings(); rerenderSheet(renderSettings); };
+        $('#setFreeOnly', box).onchange = (e) => { settings.geminiFreeOnly = e.target.value === '1'; saveSettings(); player.voiceChanged(); rerenderSheet(renderSettings); };
         $('#setFreeKey', box).onchange = (e) => { settings.geminiFreeKey = e.target.value.trim(); localStorage.removeItem('rz_free_key_exhausted'); saveSettings(); };
         $('#setGeminiVoice', box).onchange = (e) => { settings.geminiVoice = e.target.value; saveSettings(); player.voiceChanged(); };
         $('#setStyle', box).onclick = (e) => {
@@ -2304,12 +2314,12 @@ function bindEvents() {
             if (err.cloudCap) settings.cloudPausedMonth = monthKey();
             if (err.azureCap) settings.azurePausedMonth = monthKey();
             // Free hours one after another: Microsoft → Google HD → the phone's voice
-            if ((err.cloudCap || err.azureCap) && !settings.freeFrom) settings.freeFrom = settings.engine;
+            if ((err.cloudCap || err.azureCap || err.geminiFreeCap) && !settings.freeFrom) settings.freeFrom = settings.engine;
             const next = nextFreeEngine();
             settings.engine = next;
             saveSettings();
             updatePlayerUI();
-            const then = next === 'azure' ? 'Microsoft гласовете (безплатно)' : next === 'cloud' ? 'Google HD (безплатно)' : 'гласа на телефона';
+            const then = next === 'gemini' ? 'Gemini разказвача' : next === 'azure' ? 'Microsoft гласовете (безплатно)' : next === 'cloud' ? 'Google HD (безплатно)' : 'гласа на телефона';
             toast(`${err.message} Продължавам с ${then}.`, { duration: 9000, action: { label: 'Настройки', run: openSettings } });
             player.play();
             return;
@@ -2566,7 +2576,7 @@ async function prepareAhead(n, manual) {
 
 // While listening with the Gemini narrator, prepare the next chapter in time
 function maybePrepareNext() {
-    if (!settings.geminiEconomy || settings.engine !== 'gemini' || !player.playing || !currentBook) return;
+    if (!settings.geminiEconomy || settings.geminiFreeOnly || settings.engine !== 'gemini' || !player.playing || !currentBook) return;
     const m = player.model(player.pos.c);
     if (player.pos.s >= m.sentences.length * 0.4) prepareAhead(1, false);
 }
@@ -2647,9 +2657,14 @@ function azureUsable() {
 function cloudUsable() {
     return !!(settings.cloudReady && settings.cloudVoice && effectiveSettings().apiKey && settings.cloudPausedMonth !== monthKey());
 }
+// Gemini narrator (free key) first, then Google HD (plan B), then Microsoft, then the phone
+function geminiFreeUsable() {
+    return !!usableFreeKey(settings);
+}
 function nextFreeEngine() {
-    if (azureUsable()) return 'azure';
-    if (cloudUsable()) return 'cloud';
+    if (settings.engine !== 'gemini' && geminiFreeUsable() && settings.geminiFreeOnly) return 'gemini';
+    if (settings.engine !== 'cloud' && cloudUsable()) return 'cloud';
+    if (settings.engine !== 'azure' && azureUsable()) return 'azure';
     return 'device';
 }
 
@@ -2670,11 +2685,11 @@ function checkCloudMonth() {
     }
     // New month: back to the voice that was chosen before the free characters ran out
     const from = settings.freeFrom;
-    if (from && settings.engine !== from && (from === 'azure' ? azureUsable() : from === 'cloud' ? cloudUsable() : false)) {
+    if (from && settings.engine !== from && (from === 'azure' ? azureUsable() : from === 'cloud' ? cloudUsable() : from === 'gemini' ? geminiFreeUsable() : false)) {
         settings.engine = from;
         settings.freeFrom = '';
         saveSettings();
-        toast(`Нов месец — ${from === 'azure' ? 'Microsoft гласовете' : 'Google HD'} отново са безплатни и четат пак.`, { duration: 7000 });
+        toast(from === 'gemini' ? 'Нов ден — Gemini разказвачът отново чете безплатно.' : `Нов месец — ${from === 'azure' ? 'Microsoft гласовете' : 'Google HD'} отново са безплатни и четат пак.`, { duration: 7000 });
         if (currentBook) updatePlayerUI();
     } else if (from && settings.engine === from) {
         settings.freeFrom = '';
