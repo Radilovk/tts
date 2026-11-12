@@ -7,16 +7,17 @@ import { LANG_NAMES, LOCALES, charLen, noteText } from './text.js';
 import {
     GEMINI_VOICES, GEMINI_DEFAULT_MODEL, NARRATION_STYLES, PRICES,
     cloudVoices, cloudSynthesize, cloudBilledChars, cloudDiagnose, CLOUD_LINKS, geminiSynthesize, geminiModels, deviceVoices, onDeviceVoicesChanged, cloudTier,
-    cheapestGeminiModel, isVerifiedGeminiModel, geminiCost,
+    cheapestGeminiModel, isVerifiedGeminiModel, geminiCost, azureVoices, azureSynthesize, azureBilledChars, AZURE_FREE_CHARS,
 } from './engines.js';
 import { translateChapter, translationCost, deviceTranslationAvailable, TRANSLATE_DEFAULT_MODEL } from './translate.js';
 import { isNative, Native, nativeFileUrl, loadNativeVoices, nativeEngines } from './native.js';
 import { submitChapter, pollBatches, hasJobs, pendingChapters, batchEstimate } from './batch.js';
-import { usableFreeKey, diagLog, diagClear } from './player.js';
+import { usableFreeKey, diagLog, diagClear, bookPlanner } from './player.js';
 import { exportPlan, exportChapters, packageFiles, safeFileName } from './export.js';
 import { buildJob, submitJob, jobStatus, cancelJob, downloadBook, studioVoice } from './studio.js';
 import { searchBooks, localizeTitles, SOURCES } from './search.js';
 import { SHELVES, loadShelf, wikisourceWorks, fetchCatalogBook, sourceKey, RIGHTS_LABELS, shareCommunityBook, reportCommunityBook } from './library.js';
+import { azureFreeLeft, monthlyAzureChars } from './usage.js';
 import { usageSummary, resetUsage, hourlyCost, freeHoursPerMonth, recordUsage, monthKey, syncCloudUsage, cloudReserve, cloudRelease, reportCloudUsage, CLOUD_SAFE_SHARE } from './usage.js';
 
 const $ = (s, root = document) => root.querySelector(s);
@@ -25,14 +26,15 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.12';
+export const APP_VERSION = '2.17';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
-    engine: null, apiKey: '', cloudVoice: '', geminiVoice: 'Charon', geminiModel: '', geminiEconomy: true, geminiFreeKey: '',
+    engine: null, apiKey: '', cloudVoice: '', geminiVoice: 'Charon', geminiModel: '', geminiEconomy: true, geminiFreeKey: '', geminiFreeOnly: true, geminiPassage: 6000, studioBudgetUsd: 1,
     style: 'intriguing', customStyle: '', deviceVoice: '', lang: 'auto', rate: 1,
     cacheMB: 500, theme: 'system', readerSize: 19, view: 'cover', cloudReady: false, autoTranslate: 'bg',
     geminiCapUsd: 2, cloudPausedMonth: '',
+    azureKey: '', azureRegion: 'westeurope', azureVoice: '', azurePausedMonth: '', freeFrom: '', wavenetVoice: '', wavenetPausedMonth: '',
 };
 
 let settings = loadSettings();
@@ -74,6 +76,7 @@ function activeGeminiModel() {
 
 function geminiCardPrice() {
     const m = activeGeminiModel();
+    if (settings.geminiFreeOnly) return 'безплатно';
     return settings.geminiEconomy
         ? `от ~${hourlyCost('gemini', m, true).toFixed(2)} $/ч`
         : `~${hourlyCost('gemini', m, false).toFixed(2)} $/ч`;
@@ -186,6 +189,13 @@ function engineLabel(s = settings) {
         const name = s.cloudVoice ? s.cloudVoice.split('-').slice(-1)[0] : 'Google';
         return `${name} · ${PRICES.cloud[cloudTier(s.cloudVoice)]?.label === 'Chirp 3 HD' ? 'HD' : PRICES.cloud[cloudTier(s.cloudVoice)]?.label || ''}`;
     }
+    if (s.engine === 'wavenet') {
+        return `${(s.wavenetVoice || 'Google').split('-').slice(-1)[0]} · ${cloudTier(s.wavenetVoice) === 'Wavenet' ? 'WaveNet' : 'Google'}`;
+    }
+    if (s.engine === 'azure') {
+        const name = (s.azureVoice || 'Microsoft').split('-').slice(-1)[0].replace(/(Multilingual)?Neural$/, '');
+        return `${name || 'Microsoft'} · Microsoft`;
+    }
     return `${s.geminiVoice} · AI`;
 }
 
@@ -280,7 +290,10 @@ async function saveImported(parsed, { fileName = '', source = null, translateTo,
             // Narration is shared only for books every listener may legally receive
             shared: !!source && source.shareable !== false,
             originalTitle: parsed.title,
-            chunkV: 3,
+            // Shared catalog books keep v3, so their passages match what others narrated
+            chunkV: source && source.shareable !== false ? 3 : 4,
+            // Narrator passage length for this book (more audio per free request)
+            ...(source && source.shareable !== false ? {} : { geminiMax: settings.geminiPassage }),
         };
         if (displayTitle) meta.title = displayTitle;
         await db.put('contents', { id, chapters: parsed.chapters });
@@ -312,7 +325,7 @@ function readerLang() {
 async function localizeRow(shelfId, row) {
     const d = shelfData[shelfId];
     if (!d) return;
-    await localizeTitles(d.items, readerLang(), effectiveSettings().apiKey);
+    await localizeTitles(d.items, readerLang(), (settings.geminiFreeOnly && usableFreeKey(settings)) || effectiveSettings().apiKey);
     row.querySelectorAll('.shelf-card').forEach((card) => {
         const it = d.items[Number(card.dataset.i)];
         if (!it?.titleT) return;
@@ -600,7 +613,11 @@ async function openBook(id, autoplay) {
     }
     meta.lastOpened = Date.now();
     // Nothing narrated yet: switch to the longer, paragraph-aligned passages
-    if ((meta.chunkV || 0) < 3 && !meta.factory && !(await db.audioCountBook(id).catch(() => 1))) meta.chunkV = 3;
+    if (!meta.factory && !(await db.audioCountBook(id).catch(() => 1))) {
+        if ((meta.chunkV || 0) < (meta.shared ? 3 : 4)) meta.chunkV = meta.shared ? 3 : 4;
+        // Nothing narrated yet: take the current narrator passage length
+        if (!meta.shared) meta.geminiMax = settings.geminiPassage;
+    }
     if (seq !== openSeq) return;
     if (meta.cover && !coverUrls.has(id)) coverUrls.set(id, URL.createObjectURL(meta.cover));
     meta.coverUrl = coverUrls.get(id) || '';
@@ -801,7 +818,16 @@ async function startPlayback() {
         openCloudSetup({ thenPlay: true });
         return;
     }
-    if (st.engine !== 'device' && !st.apiKey) {
+    if (st.engine === 'azure' && (!settings.azureKey || !settings.azureRegion)) {
+        toast('Добавете ключ за Microsoft гласовете — отнема 2 минути.', { duration: 7000 });
+        openSettings();
+        return;
+    }
+    if (st.engine === 'azure' && !settings.azureVoice) {
+        const ok = await pickDefaultAzureVoice();
+        if (!ok) return;
+    }
+    if (st.engine !== 'device' && st.engine !== 'azure' && !st.apiKey && !(st.engine === 'gemini' && st.geminiFreeKey)) {
         toast('За естествените гласове е нужен Google API ключ. Засега чета с гласа на устройството.', {
             action: { label: 'Настройки', run: openSettings },
         });
@@ -830,6 +856,32 @@ async function pickDefaultCloudVoice() {
         return true;
     } catch (e) {
         toast(e.message, { error: true, duration: 7000, action: { label: 'Настройки', run: openSettings } });
+        return false;
+    }
+}
+
+const azureVoiceCache = {};
+async function loadAzureVoices(lang) {
+    const k = `${settings.azureRegion}|${lang}`;
+    if (azureVoiceCache[k]) return azureVoiceCache[k];
+    const voices = await azureVoices(settings.azureKey, settings.azureRegion, lang);
+    azureVoiceCache[k] = voices;
+    return voices;
+}
+
+async function pickDefaultAzureVoice() {
+    try {
+        const voices = await loadAzureVoices(currentLang());
+        if (!voices.length) {
+            toast(`Microsoft няма гласове за ${LANG_NAMES[currentLang()] || currentLang()}.`, { error: true });
+            return false;
+        }
+        settings.azureVoice = voices[0].name;
+        saveSettings();
+        updatePlayerUI();
+        return true;
+    } catch (e) {
+        toast(e.message, { error: true, duration: 8000, action: { label: 'Настройки', run: openSettings } });
         return false;
     }
 }
@@ -1190,6 +1242,47 @@ function openBookMenu() {
     });
 }
 
+// Menu of a book in the library (long press)
+function openLibraryBookMenu(meta) {
+    const book = player.book?.id === meta.id ? currentBook : meta;
+    openSheet(book.title, (body) => {
+        body.innerHTML = `
+            <div class="group list">
+                <button class="list-item" data-a="dl"><span class="grow">${book.factory ? 'Изтегля се за слушане — виж докъде е' : 'Изтегли за слушане (на заден план)'}<small>Gemini разказвачът записва цялата книга на сървъра, без да я отваряте: всеки ден безплатният лимит, после ½ цена до ${settings.studioBudgetUsd} $/мес. Бележки и препратки не се четат.</small></span></button>
+                <button class="list-item" data-a="open"><span class="grow">Отвори</span></button>
+                <button class="list-item" data-a="del"><span class="grow">Премахни</span></button>
+            </div>`;
+        body.onclick = async (e) => {
+            const a = e.target.closest('[data-a]')?.dataset.a;
+            if (!a) return;
+            if (a === 'open') { closeSheet(); openBook(book.id, false); return; }
+            if (a === 'del') { closeSheet(); if (confirm(`Да премахна ли „${book.title}“?`)) deleteBook(book.id); return; }
+            if (a === 'dl') {
+                if (book.factory) {
+                    try {
+                        const j = await jobStatus(studioKey(), book.factory.jobId);
+                        toast(`${book.title}: ${j.done} от ${j.total} откъса готови${j.status === 'done' ? ' — цялата книга е готова.' : '.'}`, { duration: 7000 });
+                    } catch (err) { toast(err.message, { error: true }); }
+                    return;
+                }
+                const btn = e.target.closest('[data-a]');
+                btn.disabled = true;
+                btn.querySelector('.grow').firstChild.textContent = 'Подготвям текста…';
+                try {
+                    await sendBookToStudio(book, 'auto', (p) => { btn.querySelector('.grow').firstChild.textContent = `Подготвям текста: ${Math.round(p * 100)}%`; });
+                    closeSheet();
+                    renderLibrary();
+                    toast(`„${book.title}“ ще се изтегля всеки ден на заден план. Можете да затворите приложението.`, { duration: 8000 });
+                } catch (err) {
+                    btn.disabled = false;
+                    btn.querySelector('.grow').firstChild.textContent = 'Изтегли за слушане (на заден план)';
+                    toast(err.message, { error: true, duration: 8000, action: /ключ/.test(err.message) ? { label: 'Настройки', run: openSettings } : null });
+                }
+            }
+        };
+    });
+}
+
 // ---------- Night studio (whole book narrated on the server) ----------
 
 function studioVoiceLabel(st) {
@@ -1200,13 +1293,46 @@ function studioVoiceLabel(st) {
 // The app's own key: it files the book on the server (only its hash is the owner id)
 // and pays for the narration there — nothing else to set up.
 function studioKey() {
-    return effectiveSettings().apiKey;
+    return effectiveSettings().apiKey || settings.geminiFreeKey;
+}
+
+// Send a book to the night studio. The book does not have to be open: its passages are
+// planned exactly as the player plans them (same texts — notes and references left
+// out — and the same cache keys), so listening later simply finds the audio.
+async function sendBookToStudio(book, mode, onProgress) {
+    const key = studioKey();
+    if (!key) throw new Error('Нужен е Google API ключ (или безплатен ключ в Настройки → Gemini).');
+    const st = recordingSettings();
+    if ((mode === 'free' || mode === 'auto') && !st.geminiFreeKey) throw new Error('Въведете безплатен ключ в Настройки → Gemini → „Безплатен ключ“.');
+    let planner = player;
+    if (player.book?.id !== book.id) {
+        const content = await db.get('contents', book.id);
+        if (!content) throw new Error('Книгата не е намерена.');
+        planner = bookPlanner(book, content.chapters, () => ({ ...effectiveSettings(), engine: 'gemini' }), (c, chapter, onP) => translateChapter({
+            bookId: book.id, c, chapter, from: book.lang, to: book.translateTo,
+            apiKey: effectiveSettings().apiKey, model: settings.translateModel || TRANSLATE_DEFAULT_MODEL, onProgress: onP,
+            sharedKey: book.shared ? book.sourceKey : '',
+        }));
+    }
+    // Nothing narrated yet: the longest narrator passages (most audio per free request)
+    if (!book.factory && !book.shared && !(await db.audioCountBook(book.id).catch(() => 1))) {
+        book.chunkV = Math.max(book.chunkV || 0, 4);
+        book.geminiMax = settings.geminiPassage;
+        planner.models?.clear?.();
+    }
+    // Batch needs the main key (a project with billing); with only a free key it stays free
+    const budget = effectiveSettings().apiKey ? settings.studioBudgetUsd : 0;
+    const job = await submitJob(key, await buildJob(planner, st, mode, onProgress, budget));
+    book.factory = { jobId: job.id, at: Date.now(), voice: studioVoice(st) };
+    persistBook(book);
+    if (player.book?.id === book.id) player.voiceChanged();
+    return job;
 }
 
 function openStudio() {
     if (!currentBook) return;
     const book = currentBook;
-    let mode = 'batch';
+    let mode = 'auto';
     let job = null;
     let busy = '';
     const isOpen = () => $('#sheetTitle').textContent === 'Нощно студио' && !$('#sheet').classList.contains('hidden');
@@ -1216,9 +1342,10 @@ function openStudio() {
         if (book.factory && job) {
             const pct = job.total ? Math.round(job.done / job.total * 100) : 0;
             const statusText = job.status === 'done' ? 'Готово — пуснете книгата, аудиото идва от сървъра.'
-                : job.status === 'queued' ? 'Чака реда си — сървърът проверява на всеки час.'
+                : job.status === 'queued' ? 'Чака реда си — сървърът започва всеки ден в ~10–11 ч. (когато безплатният лимит се поднови) и проверява още 3 пъти.'
                 : job.mode === 'batch' && job.batches?.length ? `Google озвучава (${job.batches.length} партиди на ½ цена) — обикновено до няколко часа.`
                 : job.mode === 'free' ? 'Озвучава се с безплатния дневен лимит — всеки ден по малко.'
+                : job.mode === 'auto' ? `Всеки ден първо безплатно, после ½ цена до ${job.budgetUsd || 0} $ на месец.${job.batches?.length ? ` Сега ${job.batches.length} партиди при Google.` : ''}`
                 : 'Озвучава се.';
             body.innerHTML = `
                 <div class="usage">
@@ -1239,6 +1366,7 @@ function openStudio() {
             body.innerHTML = '<p class="hint">Проверявам докъде е стигнал сървърът…</p>';
         } else {
             const modes = [
+                ['auto', settings.studioBudgetUsd && effectiveSettings().apiKey ? 'Авто: безплатно + ½ цена' : 'Авто: само безплатно', settings.studioBudgetUsd && effectiveSettings().apiKey ? `до ${settings.studioBudgetUsd} $/мес.` : '0 $', `Всеки ден първо безплатният лимит; останалото на ½ цена, докато разходът за месеца е под ${settings.studioBudgetUsd} $ — после чака следващия безплатен ден. Голяма книга се събира за няколко дни.`],
                 ['batch', '½ цена (Batch)', approxUsd(batchEstimate(st.geminiModel, book.totalChars)), 'Google озвучава в тихите си часове — обикновено готово за няколко часа.'],
                 ['free', 'Безплатно, бавно', '0 $', st.geminiFreeKey ? 'Само безплатният дневен лимит на безплатния ключ. Голяма книга отнема дни.' : 'Нужен е безплатен ключ (Настройки → Gemini → „Безплатен ключ“). Голяма книга отнема дни.'],
             ];
@@ -1265,20 +1393,15 @@ function openStudio() {
             const st = recordingSettings();
             if (act === 'send') {
                 if (!key) return toast('Нужен е Google API ключ.', { error: true, action: { label: 'Настройки', run: openSettings } });
-                if (mode === 'free' && !st.geminiFreeKey) return toast('Въведете безплатен ключ в Настройки → Gemini.', { error: true, action: { label: 'Настройки', run: openSettings } });
                 busy = 'send';
                 rerenderSheet(render);
                 try {
-                    const j = await buildJob(player, st, mode, (p) => { $('#pStatus').textContent = `Подготвям текста: ${Math.round(p * 100)}%`; });
+                    job = await sendBookToStudio(book, mode, (p) => { $('#pStatus').textContent = `Подготвям текста: ${Math.round(p * 100)}%`; });
                     $('#pStatus').textContent = '';
-                    job = await submitJob(key, j);
-                    book.factory = { jobId: job.id, at: Date.now(), voice: studioVoice(st) };
-                    persistBook(book);
-                    player.voiceChanged();
-                    toast('Изпратено. Сървърът започва до час — можете да затворите приложението.', { duration: 8000 });
+                    toast('Изпратено. Сървърът започва при следващото си пускане — можете да затворите приложението.', { duration: 8000 });
                 } catch (err) {
                     $('#pStatus').textContent = '';
-                    toast(err.message, { error: true, duration: 8000 });
+                    toast(err.message, { error: true, duration: 8000, action: /ключ/.test(err.message) ? { label: 'Настройки', run: openSettings } : null });
                 }
                 busy = '';
                 if (isOpen()) rerenderSheet(render);
@@ -1336,8 +1459,9 @@ function renderSettings(body) {
     const hasPreKey = !!preconfiguredKey();
     const freeHrs = Math.round(freeHoursPerMonth('Chirp3-HD'));
     const engines = [
-        ['gemini', 'Gemini разказвач', 'Най-жива интонация: разказвачът „играе“ текста според избран стил и езика на книгата.', geminiCardPrice(), settings.geminiEconomy ? 'до −50% с пестелив режим' : 'плаща се само чутото'],
+        ['gemini', 'Gemini разказвач', 'Най-жива интонация: разказвачът „играе“ текста според избран стил и езика на книгата.', geminiCardPrice(), settings.geminiFreeOnly ? 'дневен лимит, после Google HD' : settings.geminiEconomy ? 'до −50% с пестелив режим' : 'плаща се само чутото'],
         ['device', 'Гласът на телефона', 'Безплатно и офлайн. Качеството зависи от устройството.', '0 $', 'завинаги'],
+        ['azure', 'Microsoft гласове', 'Калина и Борислав — естествени невронни гласове. Чете цели откъси наведнъж: гладко, без паузи след всяко изречение. Работи на всеки телефон, и на Huawei.', 'безплатно', '~10 ч/месец · никога не се таксува'],
         ['cloud', 'Google HD гласове', `Chirp 3 HD. ~${freeHrs} ч месечно безплатно, но на български звучат по-слабо от разказвача.`, 'безплатно', `после ~${hourlyCost('cloud').toFixed(2)} $/ч`],
     ];
     body.innerHTML = `
@@ -1387,6 +1511,12 @@ function renderSettings(body) {
                 </select>
             </div>
 
+            <div class="row">
+                <span class="row-label">Изтегляне на заден план: ½ цена до<small>Нощното студио всеки ден първо използва безплатния лимит на Gemini; над него — Batch на ½ цена, но не повече от тази сума на месец. Важи за книгите, изпратени след промяната.</small></span>
+                <select class="select" id="setStudioBudget">
+                    ${[[0, 'Само безплатно'], [0.5, '0.5 $'], [1, '1 $'], [2, '2 $'], [5, '5 $']].map(([v, l]) => `<option value="${v}" ${settings.studioBudgetUsd === v ? 'selected' : ''}>${l}</option>`).join('')}
+                </select>
+            </div>
             <div class="row">
                 <span class="row-label">Пазене на аудио<small id="cacheInfo">…</small></span>
                 <select class="select" id="setCache">
@@ -1484,6 +1614,7 @@ function renderSettings(body) {
         rerenderSheet(renderSettings);
     };
     $('#setGeminiCap', body).onchange = (e) => { settings.geminiCapUsd = Number(e.target.value); saveSettings(); };
+    $('#setStudioBudget', body).onchange = (e) => { settings.studioBudgetUsd = Number(e.target.value); saveSettings(); };
     $('#setCache', body).onchange = (e) => {
         settings.cacheMB = Number(e.target.value);
         saveSettings();
@@ -1542,6 +1673,13 @@ function renderVoiceGroup(box, lang) {
         };
         const ttsSet = $('#btnTtsSettings', box);
         if (ttsSet) ttsSet.onclick = () => Native.openTtsSettings();
+    } else if (engine === 'azure') {
+        renderAzureGroup(box, lang);
+        return;
+    } else if (engine === 'wavenet') {
+        box.innerHTML = `<div class="group-title">Глас</div>
+            <p class="hint">Сега чете <b>${esc(engineLabel())}</b> — безплатният резервен глас на Google (4 млн. знака месечно). По-горните гласове изчерпаха безплатното си за деня/месеца и ще се върнат сами. Изберете глас отгоре, за да смените сега.</p>`;
+        return;
     } else if (engine === 'cloud') {
         box.innerHTML = `<div class="group-title">Глас</div><p class="hint" id="cloudVoiceMsg">Зареждам гласовете…</p>`;
         if (!effectiveSettings().apiKey || !settings.cloudReady) {
@@ -1610,19 +1748,35 @@ function renderVoiceGroup(box, lang) {
             ${settings.style === 'custom' ? `<textarea class="input" id="setCustomStyle" style="margin-top:10px" placeholder="Напр.: Чети като стар моряк, който разказва край огъня — бавно, с дрезгав глас и загадъчни паузи">${esc(settings.customStyle)}</textarea>` : ''}
             <div class="group-title" style="margin-top:18px">Пестене</div>
             <div class="row">
+                <span class="row-label">Само безплатно<small>Никога не плаща. След дневния лимит чете Google HD (безплатно), на другия ден — пак разказвачът.</small></span>
+                <select class="select" id="setFreeOnly">
+                    <option value="1" ${settings.geminiFreeOnly ? 'selected' : ''}>Вкл.</option>
+                    <option value="0" ${!settings.geminiFreeOnly ? 'selected' : ''}>Изкл.</option>
+                </select>
+            </div>
+            <div class="row">
+                <span class="row-label">Дължина на откъса<small>Повече аудио от всяка безплатна заявка (лимитът е в заявки на ден). Важи за книги, от които още нищо не е прочетено. Ако моделът отреже края, откъсът се чете на две части.</small></span>
+                <select class="select" id="setPassage">
+                    ${[[3600, '~4 мин.'], [6000, '~7 мин.'], [8000, '~9 мин. (макс.)']].map(([v, l]) => `<option value="${v}" ${settings.geminiPassage === v ? 'selected' : ''}>${l}</option>`).join('')}
+                </select>
+            </div>
+            ${settings.geminiFreeOnly ? '' : `<div class="row">
                 <span class="row-label">Пестелив режим (−50%)<small>Следващата глава се подготвя предварително през Batch на Google на половин цена. Плаща се най-много една глава напред.</small></span>
                 <select class="select" id="setEconomy">
                     <option value="1" ${settings.geminiEconomy ? 'selected' : ''}>Вкл.</option>
                     <option value="0" ${!settings.geminiEconomy ? 'selected' : ''}>Изкл.</option>
                 </select>
-            </div>
-            <div class="group-title" style="margin-top:14px">Безплатен ключ (по избор)</div>
+            </div>`}
+            <div class="group-title" style="margin-top:14px">Безплатен ключ${settings.geminiFreeOnly ? '' : ' (по избор)'}</div>
             <input class="input" id="setFreeKey" type="password" autocomplete="off" spellcheck="false" placeholder="AIza… от проект без плащане" value="${esc(settings.geminiFreeKey)}">
-            <p class="hint">Ключ от <b>нов проект без свързано плащане</b> използва безплатния дневен лимит на Google. Разказвачът първо чете с него, а когато лимитът свърши за деня, минава на основния ключ. Създава се в <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">AI Studio</a> → Create API key → „Create in new project“.${settings.geminiFreeKey && !usableFreeKey(settings) ? ' <b>Днешният безплатен лимит е изчерпан.</b>' : ''}</p>
+            <p class="hint">Ключ от <b>нов проект без свързано плащане</b> използва безплатния дневен лимит на Google. Разказвачът първо чете с него, а когато лимитът свърши за деня, ${settings.geminiFreeOnly ? 'продължава с безплатен резервен глас (Google HD)' : 'минава на основния ключ'}. Създава се в <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">AI Studio</a> → Create API key → „Create in new project“.${settings.geminiFreeKey && !usableFreeKey(settings) ? ' <b>Днешният безплатен лимит е изчерпан.</b>' : ''}</p>
             <div class="group-title" style="margin-top:18px">Модел</div>
             <select class="select" id="setGeminiModel"></select>
             <p class="hint">„Автоматично“ избира най-евтиния проверен модел (Gemini 2.5 Flash TTS). Другите модели може да прочетат на глас инструкцията за стила — ако това стане, върнете „Автоматично“.</p>`;
-        $('#setEconomy', box).onchange = (e) => { settings.geminiEconomy = e.target.value === '1'; saveSettings(); rerenderSheet(renderSettings); };
+        const eco = $('#setEconomy', box);
+        if (eco) eco.onchange = (e) => { settings.geminiEconomy = e.target.value === '1'; saveSettings(); rerenderSheet(renderSettings); };
+        $('#setPassage', box).onchange = (e) => { settings.geminiPassage = Number(e.target.value); saveSettings(); };
+        $('#setFreeOnly', box).onchange = (e) => { settings.geminiFreeOnly = e.target.value === '1'; saveSettings(); player.voiceChanged(); rerenderSheet(renderSettings); };
         $('#setFreeKey', box).onchange = (e) => { settings.geminiFreeKey = e.target.value.trim(); localStorage.removeItem('rz_free_key_exhausted'); saveSettings(); };
         $('#setGeminiVoice', box).onchange = (e) => { settings.geminiVoice = e.target.value; saveSettings(); player.voiceChanged(); };
         $('#setStyle', box).onclick = (e) => {
@@ -1663,6 +1817,90 @@ function renderVoiceGroup(box, lang) {
     }
     const prev = $('[data-preview]', box);
     if (prev) prev.onclick = () => previewVoice(prev);
+}
+
+const AZURE_REGIONS = [
+    ['westeurope', 'West Europe (Нидерландия)'], ['northeurope', 'North Europe (Ирландия)'],
+    ['germanywestcentral', 'Germany West Central'], ['francecentral', 'France Central'], ['swedencentral', 'Sweden Central'],
+    ['switzerlandnorth', 'Switzerland North'], ['uksouth', 'UK South'], ['italynorth', 'Italy North'], ['polandcentral', 'Poland Central'],
+    ['eastus', 'East US'], ['eastus2', 'East US 2'], ['westus2', 'West US 2'], ['centralindia', 'Central India'], ['southeastasia', 'Southeast Asia'],
+];
+
+function renderAzureGroup(box, lang) {
+    const regions = AZURE_REGIONS.some(([r]) => r === settings.azureRegion) ? AZURE_REGIONS : [[settings.azureRegion, settings.azureRegion], ...AZURE_REGIONS];
+    const used = monthlyAzureChars();
+    const hoursLeft = azureFreeLeft() / (14 * 3600);
+    box.innerHTML = `
+        <div class="group-title">Microsoft гласове</div>
+        <div id="azureVoiceRow"><p class="hint">${settings.azureKey ? 'Зареждам гласовете…' : 'Първо въведете ключ и регион.'}</p></div>
+        <div class="group-title" style="margin-top:14px">Ключ на Azure Speech</div>
+        <div class="field">
+            <input class="input" id="setAzureKey" type="password" autocomplete="off" spellcheck="false" placeholder="Key 1 от ресурса Speech" value="${esc(settings.azureKey)}">
+            <button class="btn btn-ghost btn-sm" id="btnAzureTest">Провери</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+            <span class="row-label">Регион<small>Същият като „Location/Region“ на ресурса</small></span>
+            <select class="select" id="setAzureRegion">
+                ${regions.map(([r, l]) => `<option value="${esc(r)}" ${r === settings.azureRegion ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+            </select>
+        </div>
+        <p class="hint" id="azureStatus">${used ? `Този месец: ${Math.round(used / 1000)} хил. от ${AZURE_FREE_CHARS / 1000} хил. безплатни знака · остават ~${hoursLeft.toFixed(1)} ч.` : ''}</p>
+        <details class="hint">
+            <summary><b>Как да взема безплатен ключ (2–3 мин.)</b></summary>
+            <ol style="padding-left:18px;margin:8px 0">
+                <li>Влезте в <a href="https://portal.azure.com/#create/Microsoft.CognitiveServicesSpeechServices" target="_blank" rel="noopener">portal.azure.com → Speech service → Create</a> (безплатен акаунт в Microsoft Azure).</li>
+                <li>Region: <b>West Europe</b>, Pricing tier: <b>Free F0</b> — 500 000 знака месечно, <b>никога не се таксува</b>.</li>
+                <li>След създаването: „Keys and Endpoint“ → копирайте <b>Key 1</b> тук и изберете същия регион.</li>
+            </ol>
+            Ключът остава само на това устройство. Когато безплатните знаци за месеца свършат, четенето продължава с Google HD (ако е свързан — още ~20 ч безплатно), после с гласа на телефона, и от 1-во число се връща само. <b>Нищо не се плаща.</b>
+        </details>`;
+    const keyEl = $('#setAzureKey', box);
+    const regEl = $('#setAzureRegion', box);
+    const status = $('#azureStatus', box);
+    const fillVoices = async () => {
+        const row = $('#azureVoiceRow', box);
+        if (!settings.azureKey) { row.innerHTML = '<p class="hint">Първо въведете ключ и регион.</p>'; return false; }
+        row.innerHTML = '<p class="hint">Зареждам гласовете…</p>';
+        try {
+            const voices = await loadAzureVoices(lang);
+            if (!voices.length) { row.innerHTML = `<p class="hint">Microsoft няма гласове за ${esc(LANG_NAMES[lang] || lang)}.</p>`; return false; }
+            if (!voices.some((v) => v.name === settings.azureVoice)) { settings.azureVoice = voices[0].name; saveSettings(); player.voiceChanged(); }
+            const own = voices.filter((v) => !v.multilingual), multi = voices.filter((v) => v.multilingual);
+            const opt = (v) => `<option value="${esc(v.name)}" ${v.name === settings.azureVoice ? 'selected' : ''}>${esc(v.label)} · ${v.gender === 'Female' ? 'жен.' : v.gender === 'Male' ? 'мъж.' : ''}</option>`;
+            row.innerHTML = `
+                <div class="field">
+                    <select class="select" id="setAzureVoice">
+                        ${own.length ? `<optgroup label="${esc(LANG_NAMES[lang] || lang)}">${own.map(opt).join('')}</optgroup>` : ''}
+                        ${multi.length ? `<optgroup label="Многоезични · по-живи, възможен лек акцент">${multi.map(opt).join('')}</optgroup>` : ''}
+                    </select>
+                    <button class="btn btn-ghost btn-sm" data-preview>Чуй</button>
+                </div>`;
+            const sel = $('#setAzureVoice', row);
+            sel.onchange = () => { settings.azureVoice = sel.value; saveSettings(); player.voiceChanged(); updatePlayerUI(); };
+            const prev = $('[data-preview]', row);
+            prev.onclick = () => previewVoice(prev);
+            return true;
+        } catch (e) {
+            row.innerHTML = `<p class="hint" style="color:var(--danger, #c0392b)">${esc(e.message)}</p>`;
+            return false;
+        }
+    };
+    const changed = () => {
+        settings.azureKey = keyEl.value.trim();
+        settings.azureRegion = regEl.value;
+        saveSettings();
+        player.voiceChanged();
+        return fillVoices();
+    };
+    keyEl.onchange = changed;
+    regEl.onchange = changed;
+    $('#btnAzureTest', box).onclick = async () => {
+        Object.keys(azureVoiceCache).forEach((k) => delete azureVoiceCache[k]);
+        status.textContent = 'Проверявам…';
+        const ok = await changed();
+        status.textContent = ok ? '✓ Ключът работи. Натиснете „Чуй“ за мостра.' : '';
+    };
+    if (settings.azureKey) fillVoices();
 }
 
 function voiceTitle(v) {
@@ -1723,7 +1961,12 @@ async function previewVoice(btn) {
         speechSynthesis.speak(u);
         return;
     }
-    if (!st.apiKey) return toast('Нужен е API ключ.', { error: true });
+    if (st.engine === 'azure') {
+        if (!st.azureKey || !st.azureVoice) return toast('Въведете ключ и изберете глас.', { error: true });
+        return previewAzure(btn, audioEl, text, lang, st);
+    }
+    const geminiKey = st.geminiFreeOnly ? (usableFreeKey(st) || '') : (usableFreeKey(st) || st.apiKey);
+    if (st.engine === 'gemini' ? !geminiKey : !st.apiKey) return toast(st.engine === 'gemini' && st.geminiFreeOnly ? 'Нужен е безплатен ключ (или днешният лимит е изчерпан).' : 'Нужен е API ключ.', { error: true });
     const key = st.engine === 'cloud' ? `preview|${st.cloudVoice}|${lang}` : `preview|${st.geminiModel}|${st.geminiVoice}|${st.style}|${st.customStyle}|${lang}`;
     const old = btn.textContent;
     btn.textContent = '…';
@@ -1744,11 +1987,37 @@ async function previewVoice(btn) {
                 recordUsage({ engine: 'cloud', tier, chars: billed });
                 reportCloudUsage(st.apiKey, tier, billed);
             } else {
-                const r = await geminiSynthesize({ apiKey: st.apiKey, model: st.geminiModel, text, voice: st.geminiVoice, style: st.style, customStyle: st.customStyle, lang });
+                const r = await geminiSynthesize({ apiKey: geminiKey, retry429: false, model: st.geminiModel, text, voice: st.geminiVoice, style: st.style, customStyle: st.customStyle, lang });
                 blob = r.blob;
                 recordUsage({ engine: 'gemini', inTokens: r.inTokens, outTokens: r.outTokens });
             }
             rec = { key, blob, dur: 0, chars: text.length, bookId: '_preview' };
+            await db.audioPut(rec);
+        }
+        previewAudio = audioEl;
+        previewAudio.src = URL.createObjectURL(rec.blob);
+        previewAudio.playbackRate = player.rate;
+        await playOrReport(previewAudio);
+    } catch (e) {
+        toast(e.message, { error: true, duration: 7000 });
+    } finally {
+        btn.textContent = old;
+        btn.disabled = false;
+    }
+}
+
+async function previewAzure(btn, audioEl, text, lang, st) {
+    const key = `preview|azure|${st.azureVoice}|${lang}`;
+    const old = btn.textContent;
+    btn.textContent = '…';
+    btn.disabled = true;
+    try {
+        let rec = await db.audioGet(key);
+        if (!rec) {
+            if (azureFreeLeft() < azureBilledChars(text)) throw new Error('Безплатните знаци на Microsoft гласовете за този месец свършиха.');
+            const r = await azureSynthesize({ key: st.azureKey, region: st.azureRegion, text, voice: st.azureVoice, locale: LOCALES[lang] || lang });
+            recordUsage({ engine: 'azure', chars: r.chars });
+            rec = { key, blob: r.blob, dur: 0, chars: text.length, bookId: '_preview' };
             await db.audioPut(rec);
         }
         previewAudio = audioEl;
@@ -1970,20 +2239,23 @@ function bindEvents() {
         const card = e.target.closest('.shelf-card');
         if (card) openCatalogItem(shelfData[card.dataset.shelfId].items[Number(card.dataset.i)]);
     });
+    let longPressAt = 0;
     $('#bookGrid').addEventListener('click', (e) => {
         const b = e.target.closest('.book');
+        if (Date.now() - longPressAt < 800) return; // the menu opened by a long press
         if (b) openBook(b.dataset.id, false);
     });
 
-    // Long-press a book to remove it
+    // Long-press a book: download it for listening (without opening it) or remove it
     let pressTimer = null;
     $('#bookGrid').addEventListener('pointerdown', (e) => {
         const b = e.target.closest('.book');
         if (!b) return;
         pressTimer = setTimeout(async () => {
             pressTimer = 'fired';
+            longPressAt = Date.now();
             const meta = await db.get('books', b.dataset.id);
-            if (meta && confirm(`Да премахна ли „${meta.title}“?`)) deleteBook(meta.id);
+            if (meta) openLibraryBookMenu(meta);
         }, 650);
     });
     ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => $('#bookGrid').addEventListener(ev, () => {
@@ -2141,20 +2413,18 @@ function bindEvents() {
             return;
         }
         if (err.reason === 'APP_CAP') {
-            // Google HD comes back by itself when Google's new month begins
-            if (err.cloudCap) settings.cloudPausedMonth = monthKey();
-            settings.engine = 'device';
-            saveSettings();
-            updatePlayerUI();
-            toast(err.message + ' Продължавам с гласа на телефона.', { duration: 9000, action: { label: 'Настройки', run: openSettings } });
-            player.play();
+            freeHandover(err);
             return;
         }
         const offerDevice = settings.engine !== 'device';
-        const setupIssue = settings.engine === 'cloud' && /^(API_KEY|SERVICE_DISABLED|BILLING_DISABLED)/.test(err.reason || '');
+        const setupIssue = (settings.engine === 'cloud' || settings.engine === 'wavenet') && /^(API_KEY|SERVICE_DISABLED|BILLING_DISABLED)/.test(err.reason || '');
         if (setupIssue) {
             settings.cloudReady = false;
             saveSettings();
+        }
+        if (err.reason === 'AZURE_SETUP') {
+            toast(err.message, { error: true, duration: 8000, action: { label: 'Настройки', run: openSettings } });
+            return;
         }
         toast(err.message || 'Грешка при четене.', {
             error: true, duration: 8000,
@@ -2398,7 +2668,7 @@ async function prepareAhead(n, manual) {
 
 // While listening with the Gemini narrator, prepare the next chapter in time
 function maybePrepareNext() {
-    if (!settings.geminiEconomy || settings.engine !== 'gemini' || !player.playing || !currentBook) return;
+    if (!settings.geminiEconomy || settings.geminiFreeOnly || settings.engine !== 'gemini' || !player.playing || !currentBook) return;
     const m = player.model(player.pos.c);
     if (player.pos.s >= m.sentences.length * 0.4) prepareAhead(1, false);
 }
@@ -2472,16 +2742,96 @@ function initNative() {
 // Google HD was paused because the month's free characters ran out: switch back when
 // Google's new billing month starts. Also fetch the month's total for the key from the
 // worker, so another device's listening counts against the limit too.
+// A free voice ran out: go on with the next free one (the chosen voice comes back
+// by itself on the next day / month)
+async function freeHandover(err) {
+    // Google HD comes back by itself when Google's new month begins
+    if (err.cloudCap) {
+        if (!err.tier || err.tier === 'Chirp3-HD') settings.cloudPausedMonth = monthKey();
+        else settings.wavenetPausedMonth = monthKey();
+    }
+    if (err.azureCap) settings.azurePausedMonth = monthKey();
+    if ((err.cloudCap || err.azureCap || err.geminiFreeCap) && !settings.freeFrom) settings.freeFrom = settings.engine;
+    let next = nextFreeEngine();
+    if (next === 'wavenet' && !settings.wavenetVoice && !(await pickWavenetVoice())) {
+        settings.wavenetPausedMonth = monthKey();
+        next = nextFreeEngine();
+    }
+    settings.engine = next;
+    saveSettings();
+    updatePlayerUI();
+    const then = { gemini: 'Gemini разказвача', cloud: 'Google HD (безплатно)', wavenet: 'Google WaveNet (безплатно)', azure: 'Microsoft гласовете (безплатно)' }[next] || 'гласа на телефона';
+    toast(`${err.message} Продължавам с ${then}.`, { duration: 9000, action: { label: 'Настройки', run: openSettings } });
+    player.play();
+}
+
+// Plan C voice: Google WaveNet (or Standard) for the language — 4M free characters a month
+async function pickWavenetVoice() {
+    try {
+        const voices = await loadCloudVoices(currentLang());
+        const v = voices.find((x) => x.tier === 'Wavenet') || voices.find((x) => x.tier === 'Standard');
+        if (!v) return false;
+        settings.wavenetVoice = v.name;
+        saveSettings();
+        return true;
+    } catch { return false; }
+}
+
+function wavenetUsable() {
+    return !!(settings.cloudReady && effectiveSettings().apiKey && settings.wavenetPausedMonth !== monthKey());
+}
+
+// A free voice that still has free characters this month, else the phone's voice
+function azureUsable() {
+    return !!(settings.azureKey && settings.azureRegion && settings.azurePausedMonth !== monthKey() && azureFreeLeft() > 5000);
+}
+function cloudUsable() {
+    return !!(settings.cloudReady && settings.cloudVoice && effectiveSettings().apiKey && settings.cloudPausedMonth !== monthKey());
+}
+// Gemini narrator (free key) first, then Google HD (plan B), then Microsoft, then the phone
+function geminiFreeUsable() {
+    return !!usableFreeKey(settings);
+}
+function nextFreeEngine() {
+    if (settings.engine !== 'gemini' && geminiFreeUsable() && settings.geminiFreeOnly) return 'gemini';
+    if (settings.engine !== 'cloud' && cloudUsable()) return 'cloud';
+    if (settings.engine !== 'wavenet' && wavenetUsable()) return 'wavenet';
+    if (settings.engine !== 'azure' && azureUsable()) return 'azure';
+    return 'device';
+}
+
 function checkCloudMonth() {
     if (settings.apiKey || preconfiguredKey()) syncCloudUsage(settings.apiKey || preconfiguredKey());
     if (settings.cloudPausedMonth && settings.cloudPausedMonth !== monthKey()) {
         settings.cloudPausedMonth = '';
-        if (settings.engine === 'device' && settings.cloudVoice) {
+        if (!settings.freeFrom && settings.engine === 'device' && settings.cloudVoice) {
             settings.engine = 'cloud';
             toast('Нов месец — Google HD отново е безплатен и чете пак.', { duration: 7000 });
         }
         saveSettings();
         if (currentBook) updatePlayerUI();
+    }
+    if (settings.azurePausedMonth && settings.azurePausedMonth !== monthKey()) {
+        settings.azurePausedMonth = '';
+        saveSettings();
+    }
+    if (settings.wavenetPausedMonth && settings.wavenetPausedMonth !== monthKey()) {
+        settings.wavenetPausedMonth = '';
+        saveSettings();
+    }
+    // Back up the chain too: a plan-B voice that has free characters again takes over
+    // from a later one (e.g. Google HD from the phone's voice) at the new month
+    // New month: back to the voice that was chosen before the free characters ran out
+    const from = settings.freeFrom;
+    if (from && settings.engine !== from && (from === 'azure' ? azureUsable() : from === 'cloud' ? cloudUsable() : from === 'wavenet' ? wavenetUsable() : from === 'gemini' ? geminiFreeUsable() : false)) {
+        settings.engine = from;
+        settings.freeFrom = '';
+        saveSettings();
+        toast(from === 'gemini' ? 'Нов ден — Gemini разказвачът отново чете безплатно.' : `Нов месец — ${from === 'azure' ? 'Microsoft гласовете' : 'Google HD'} отново са безплатни и четат пак.`, { duration: 7000 });
+        if (currentBook) updatePlayerUI();
+    } else if (from && settings.engine === from) {
+        settings.freeFrom = '';
+        saveSettings();
     }
 }
 

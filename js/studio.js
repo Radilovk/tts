@@ -28,7 +28,8 @@ export function studioVoice(st) {
 
 // Every passage of the book with the exact request the app itself would send.
 // Always the Gemini narrator: the studio records only the expressive voice.
-export async function buildJob(player, st, mode, onProgress) {
+// mode: 'auto' (free every day, then Batch up to budgetUsd a month), 'free' or 'batch'
+export async function buildJob(player, st, mode, onProgress, budgetUsd = 0) {
     st = { ...st, engine: 'gemini' };
     const items = [];
     const n = player.chapters.length;
@@ -44,7 +45,7 @@ export async function buildJob(player, st, mode, onProgress) {
     return {
         bookId: player.book.id, title: player.book.title, author: player.book.author || '',
         engine: 'gemini', mode, model: st.geminiModel, voice: st.geminiVoice,
-        freeKey: st.geminiFreeKey || '', items,
+        freeKey: st.geminiFreeKey || '', budgetUsd: mode === 'auto' ? budgetUsd : 0, items,
     };
 }
 

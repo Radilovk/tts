@@ -5,22 +5,26 @@
 
 import * as db from './db.js';
 import { buildChapterModel, chunkBoundaries, nextBoundary, chunkText, charLen, LOCALES } from './text.js';
-import { cloudNarrate, cloudBilledChars, geminiSynthesize, geminiCost, cloudTier, deviceVoices } from './engines.js';
+import { cloudNarrate, cloudBilledChars, geminiSynthesize, geminiCost, cloudTier, deviceVoices, azureSynthesize, azureBilledChars, isVerifiedGeminiModel, quotaKind } from './engines.js';
 import { pendingKeys } from './batch.js';
 import { sharedGetAudio, sharedPutAudio } from './shared.js';
-import { recordUsage, monthlyGeminiUsd, cloudReserve, cloudRelease, reportCloudUsage } from './usage.js';
+import { recordUsage, monthlyGeminiUsd, cloudReserve, cloudRelease, reportCloudUsage, azureFreeLeft } from './usage.js';
 import { Native, NativeAudio } from './native.js';
 import { sentenceMarks } from './align.js';
 
-const CHUNK_CHARS = { cloud: 1400, gemini: 1500 };
+const CHUNK_CHARS = { cloud: 1400, gemini: 1500, azure: 2000 };
 const FAST_START_CHARS = 320;
 // Chunking v2 (new books): longer passages that end at paragraphs, so the joins between
 // separately narrated passages are fewer and fall on natural pauses.
-const CHUNK_V2 = { gemini: { max: 2600, para: 0.6 }, cloud: { max: 1400, para: 0.5 } };
+const CHUNK_V2 = { gemini: { max: 2600, para: 0.6 }, cloud: { max: 1400, para: 0.5 }, azure: { max: 2400, para: 0.6 } };
 const FAST_START_V2 = { min: 450, max: 1100 };
+// Chunking v4 (new books): the narrator gets passages up to ~3600 characters (~4 min of
+// audio, well inside a request's limits). The free Gemini quota counts requests a day,
+// so longer passages mean more free listening per day and fewer joins.
 // Chunking v3: Google HD gets longer passages (up to ~2000 characters, still within its
 // 5000-byte limit), so the voice keeps one melody over more text and joins are rarer.
 const CHUNK_V3 = { ...CHUNK_V2, cloud: { max: 2000, para: 0.6 } };
+const CHUNK_V4 = { ...CHUNK_V3, gemini: { max: 3600, para: 0.6 } };
 // Network hiccups during playback are retried instead of stopping the book
 const PLAY_RETRIES = [3, 6, 12, 20, 30];
 
@@ -59,7 +63,10 @@ export class Player extends EventTarget {
         this.getSettings = () => {
             const st = getSettings();
             const v = this.book?.factory?.voice;
-            return v ? { ...st, ...v, engine: 'gemini' } : st;
+            if (v) return { ...st, ...v, engine: 'gemini' };
+            // Plan C: Google WaveNet/Standard is Google Cloud TTS with another voice
+            if (st.engine === 'wavenet') return { ...st, engine: 'cloud', cloudVoice: st.wavenetVoice || '' };
+            return st;
         };
         // Android app: the sound comes from Android's MediaPlayer (see NativeAudio)
         // (Android 10+: MediaPlayer plays Ogg/Opus only from Android 10)
@@ -362,7 +369,10 @@ export class Player extends EventTarget {
     // Fixed chunk starts of a chapter. Books keep the chunking they were first narrated
     // with, so audio already paid for keeps matching.
     _boundaries(m, engine = this.engine) {
-        const v = this.book?.chunkV >= 3 ? CHUNK_V3[engine] : this.book?.chunkV >= 2 && CHUNK_V2[engine];
+        // The narrator's passage length is fixed per book when it is added (Settings →
+        // passage length), so audio already made keeps matching
+        if (engine === 'gemini' && this.book?.geminiMax) return chunkBoundaries(m, this.book.geminiMax, 0.6);
+        const v = this.book?.chunkV >= 4 ? CHUNK_V4[engine] : this.book?.chunkV >= 3 ? CHUNK_V3[engine] : this.book?.chunkV >= 2 && CHUNK_V2[engine];
         if (v) return chunkBoundaries(m, v.max, v.para);
         return chunkBoundaries(m, CHUNK_CHARS[engine] || CHUNK_CHARS.gemini);
     }
@@ -371,6 +381,7 @@ export class Player extends EventTarget {
         // v3: every passage checked for skipped text and levelled. The version is part
         // of the cache key, so passages made before (possibly cut short) are not replayed
         if (st.engine === 'cloud') return `cloud3|${st.cloudVoice}`;
+        if (st.engine === 'azure') return `azure1|${st.azureVoice}`;
         if (st.engine === 'gemini') return `gemini|${st.geminiModel}|${st.geminiVoice}|${st.style}|${st.style === 'custom' ? st.customStyle : ''}`;
         return 'device';
     }
@@ -465,7 +476,16 @@ export class Player extends EventTarget {
 
     async _synthesize(spec, book = this.book) {
         const st = spec.st || this.getSettings();
+        if (st.engine === 'azure') return this._synthesizeAzure(spec, book, st);
         const freeKey = st.engine === 'gemini' ? usableFreeKey(st) : '';
+        // "Only free": the narrator reads with the free key alone and never pays; when
+        // the day's free quota is used up, the app goes on with a free plan-B voice
+        const freeOnly = st.engine === 'gemini' && st.geminiFreeOnly && !book?.factory;
+        if (freeOnly && !freeKey) {
+            throw Object.assign(new Error(st.geminiFreeKey
+                ? 'Безплатният дневен лимит на Gemini разказвача свърши за днес.'
+                : 'За безплатен Gemini разказвач е нужен безплатен ключ (Настройки → Gemini → Безплатен ключ).'), { reason: 'APP_CAP', geminiFreeCap: true });
+        }
         if (!st.apiKey && !freeKey) throw new Error('Добавете Google API ключ в настройките или изберете гласа на устройството.');
         const lang = spec.lang || this._lang();
         // Economy mode: this part is already being prepared at half price
@@ -484,8 +504,9 @@ export class Player extends EventTarget {
             // Every request of the passage (a retry, two halves) is reserved first
             const beforeRequest = (billed) => {
                 if (!cloudReserve(tier, billed)) {
-                    diag('Google HD: безплатните знаци за месеца свършиха — спрях преди таксуване');
-                    throw Object.assign(new Error('Безплатните знаци на Google HD за този месец свършиха — спрях го, преди да започне да се таксува.'), { reason: 'APP_CAP', cloudCap: true });
+                    const name = tier === 'Chirp3-HD' ? 'Google HD' : `Google ${tier === 'Wavenet' ? 'WaveNet' : tier}`;
+                    diag(`${name}: безплатните знаци за месеца свършиха — спрях преди таксуване`);
+                    throw Object.assign(new Error(`Безплатните знаци на ${name} за този месец свършиха — спрях го, преди да започне да се таксува.`), { reason: 'APP_CAP', cloudCap: true, tier });
                 }
                 return () => cloudRelease(tier, billed);
             };
@@ -498,16 +519,45 @@ export class Player extends EventTarget {
                 beforeRequest, afterRequest, onIssue: (m) => diag(`${m} (гл. ${spec.c + 1}, изр. ${spec.s0 + 1}–${spec.s1})`),
             });
         } else {
-            const req = { model: st.geminiModel, text: spec.text, voice: st.geminiVoice, style: st.style, customStyle: st.customStyle, lang };
+            const split = (why) => diag(`Gemini: ${why} — откъсът се чете на две части (гл. ${spec.c + 1}, изр. ${spec.s0 + 1}–${spec.s1})`);
+            const req = { model: st.geminiModel, text: spec.text, voice: st.geminiVoice, style: st.style, customStyle: st.customStyle, lang, onSplit: split };
             let free = false;
             if (freeKey) {
-                // Free daily quota first (key from a project without billing)
-                try {
-                    result = await geminiSynthesize({ ...req, apiKey: freeKey, retry429: false });
-                    free = true;
-                } catch (e) {
-                    if (e.status !== 429 && e.status !== 403) throw e;
+                // Free daily quota first (key from a project without billing). Each TTS
+                // model has its own free daily quota, so when the chosen one is used up
+                // the other verified narrator models (same voices) read on for free.
+                let lastErr = null;
+                for (const model of freeModels(st)) {
+                    for (let attempt = 0; attempt < 3 && !result; attempt++) {
+                        try {
+                            result = await geminiSynthesize({ ...req, model, apiKey: freeKey, retry429: false });
+                            free = true;
+                            if (model !== st.geminiModel) diag(`Gemini: безплатно с ${model} (лимитът на ${st.geminiModel} за днес свърши)`);
+                        } catch (e) {
+                            if (e.status !== 429 && e.status !== 403 && e.status !== 404) throw e;
+                            lastErr = e;
+                            const q = quotaKind(e);
+                            // Only the per-minute limit: wait the seconds Google asks for
+                            if (e.status === 429 && !q.daily && attempt < 2) {
+                                const wait = Math.min(65, Math.max(5, q.wait || 20));
+                                diag(`Gemini: минутен лимит — изчаквам ${wait} сек.`);
+                                this.dispatchEvent(new CustomEvent('retrying', { detail: { seconds: wait } }));
+                                await new Promise((r) => setTimeout(r, wait * 1000));
+                                continue;
+                            }
+                            markModelExhausted(model);
+                            break;
+                        }
+                    }
+                    if (result) break;
+                }
+                if (!result) {
+                    if (!lastErr) lastErr = new Error('no free model');
                     markFreeKeyExhausted();
+                    if (freeOnly) {
+                        diag('Gemini: безплатният дневен лимит свърши — продължавам с безплатен глас');
+                        throw Object.assign(new Error('Безплатният дневен лимит на Gemini разказвача свърши за днес.'), { reason: 'APP_CAP', geminiFreeCap: true });
+                    }
                     if (!st.apiKey) throw new Error('Безплатният дневен лимит на Gemini е изчерпан. Утре продължава безплатно.');
                 }
             }
@@ -524,6 +574,36 @@ export class Player extends EventTarget {
         const prev = this.synthSeconds[st.engine];
         this.synthSeconds[st.engine] = prev ? prev * 0.6 + took * 0.4 : took;
         const dur = result.dur || await blobDuration(result.blob);
+        return { key: spec.key, blob: result.blob, dur, chars: spec.chars, bookId: book.id };
+    }
+
+    // Microsoft neural voices: one request per passage, inside the free characters
+    async _synthesizeAzure(spec, book, st) {
+        if (!st.azureKey || !st.azureRegion) {
+            throw Object.assign(new Error('Добавете ключ и регион за Microsoft гласовете в настройките.'), { reason: 'AZURE_SETUP' });
+        }
+        const billed = azureBilledChars(spec.text);
+        if (azureFreeLeft() < billed) {
+            diag('Microsoft: безплатните знаци за месеца свършиха — спрях');
+            throw Object.assign(new Error('Безплатните знаци на Microsoft гласовете за този месец свършиха.'), { reason: 'APP_CAP', azureCap: true });
+        }
+        const t0 = performance.now();
+        let result;
+        try {
+            result = await azureSynthesize({
+                key: st.azureKey, region: st.azureRegion, text: spec.text, voice: st.azureVoice,
+                locale: LOCALES[spec.lang || this._lang()] || 'bg-BG',
+                onSplit: (e) => diag(`Microsoft: откъсът е прочетен на две части — ${e.message} (гл. ${spec.c + 1})`),
+            });
+        } catch (e) {
+            if (e.reason === 'AZURE_QUOTA') throw Object.assign(new Error(e.message), { reason: 'APP_CAP', azureCap: true });
+            throw e;
+        }
+        recordUsage({ engine: 'azure', chars: result.chars });
+        const took = (performance.now() - t0) / 1000;
+        const prev = this.synthSeconds.azure;
+        this.synthSeconds.azure = prev ? prev * 0.6 + took * 0.4 : took;
+        const dur = await blobDuration(result.blob);
         return { key: spec.key, blob: result.blob, dur, chars: spec.chars, bookId: book.id };
     }
 
@@ -742,7 +822,7 @@ export class Player extends EventTarget {
 
     _eagerPrefetch() {
         const st = this.getSettings();
-        return st.engine === 'cloud' || !!this.book?.factory;
+        return st.engine === 'cloud' || st.engine === 'azure' || !!this.book?.factory;
     }
 
     _prefetchMargin() {
@@ -1129,6 +1209,29 @@ export function usableFreeKey(st) {
     return localStorage.getItem(FREE_KEY_STATE) === todayPacific() ? '' : st.geminiFreeKey;
 }
 
+// Verified narrator models the free key can still use today: the chosen one first
+const FREE_MODELS_STATE = 'rz_free_models_exhausted';
+
+function exhaustedModels() {
+    try {
+        const x = JSON.parse(localStorage.getItem(FREE_MODELS_STATE) || '{}');
+        return x.day === todayPacific() ? x.models || [] : [];
+    } catch { return []; }
+}
+
+function markModelExhausted(model) {
+    const models = [...new Set([...exhaustedModels(), model])];
+    try { localStorage.setItem(FREE_MODELS_STATE, JSON.stringify({ day: todayPacific(), models })); } catch {}
+}
+
+function freeModels(st) {
+    let known = [];
+    try { known = JSON.parse(localStorage.getItem('rz_gemini_models') || '[]'); } catch {}
+    const all = [st.geminiModel, ...known.filter((m) => isVerifiedGeminiModel(m) && !/native|live|dialog/.test(m))];
+    const used = exhaustedModels();
+    return [...new Set(all)].filter((m) => m && !used.includes(m));
+}
+
 function markFreeKeyExhausted() {
     localStorage.setItem(FREE_KEY_STATE, todayPacific());
 }
@@ -1161,4 +1264,16 @@ function blobDuration(blob) {
         a.onerror = () => done(0);
         a.src = url;
     });
+}
+
+// The passages of a book that is not open (to send it to the night studio straight
+// from the library): the player's own planning code, without audio or events, so the
+// texts and cache keys are exactly the ones the player uses when the book is played.
+export function bookPlanner(book, chapters, getSettings, translator) {
+    const p = Object.create(Player.prototype);
+    Object.assign(p, {
+        getSettings, book, chapters, translator, models: new Map(), translated: new Map(), translating: new Map(),
+        pos: { c: -1, s: 0 }, gen: 1, dispatchEvent() {},
+    });
+    return p;
 }

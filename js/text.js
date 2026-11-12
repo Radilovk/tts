@@ -166,7 +166,9 @@ export function buildChapterModel(chapter, lang) {
     blocks.forEach((b) => {
         const pIndex = paras.length;
         const first = sentences.length;
-        const note = !!b.note || (!b.h && (allNotes || isNotePara(b.t, lang)));
+        // A line such as "Литература" / "References" inside the chapter heads the notes:
+        // it is shown, not read (the entries under it are caught as notes/references)
+        const note = !!b.note || (!b.h && (allNotes || isNotesTitle(b.t) || isNotePara(b.t, lang)));
         for (const s of splitSentences(noteText(b.t), lang)) {
             const speak = note ? '' : cleanForSpeech(s, lang);
             sentences.push({ t: s, speak, p: pIndex });
