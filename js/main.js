@@ -26,11 +26,11 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.15';
+export const APP_VERSION = '2.16';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
-    engine: null, apiKey: '', cloudVoice: '', geminiVoice: 'Charon', geminiModel: '', geminiEconomy: true, geminiFreeKey: '', geminiFreeOnly: true,
+    engine: null, apiKey: '', cloudVoice: '', geminiVoice: 'Charon', geminiModel: '', geminiEconomy: true, geminiFreeKey: '', geminiFreeOnly: true, geminiPassage: 6000,
     style: 'intriguing', customStyle: '', deviceVoice: '', lang: 'auto', rate: 1,
     cacheMB: 500, theme: 'system', readerSize: 19, view: 'cover', cloudReady: false, autoTranslate: 'bg',
     geminiCapUsd: 2, cloudPausedMonth: '',
@@ -292,6 +292,8 @@ async function saveImported(parsed, { fileName = '', source = null, translateTo,
             originalTitle: parsed.title,
             // Shared catalog books keep v3, so their passages match what others narrated
             chunkV: source && source.shareable !== false ? 3 : 4,
+            // Narrator passage length for this book (more audio per free request)
+            ...(source && source.shareable !== false ? {} : { geminiMax: settings.geminiPassage }),
         };
         if (displayTitle) meta.title = displayTitle;
         await db.put('contents', { id, chapters: parsed.chapters });
@@ -611,7 +613,11 @@ async function openBook(id, autoplay) {
     }
     meta.lastOpened = Date.now();
     // Nothing narrated yet: switch to the longer, paragraph-aligned passages
-    if ((meta.chunkV || 0) < (meta.shared ? 3 : 4) && !meta.factory && !(await db.audioCountBook(id).catch(() => 1))) meta.chunkV = meta.shared ? 3 : 4;
+    if (!meta.factory && !(await db.audioCountBook(id).catch(() => 1))) {
+        if ((meta.chunkV || 0) < (meta.shared ? 3 : 4)) meta.chunkV = meta.shared ? 3 : 4;
+        // Nothing narrated yet: take the current narrator passage length
+        if (!meta.shared) meta.geminiMax = settings.geminiPassage;
+    }
     if (seq !== openSeq) return;
     if (meta.cover && !coverUrls.has(id)) coverUrls.set(id, URL.createObjectURL(meta.cover));
     meta.coverUrl = coverUrls.get(id) || '';
@@ -821,7 +827,7 @@ async function startPlayback() {
         const ok = await pickDefaultAzureVoice();
         if (!ok) return;
     }
-    if (st.engine !== 'device' && st.engine !== 'azure' && !st.apiKey) {
+    if (st.engine !== 'device' && st.engine !== 'azure' && !st.apiKey && !(st.engine === 'gemini' && st.geminiFreeKey)) {
         toast('За естествените гласове е нужен Google API ключ. Засега чета с гласа на устройството.', {
             action: { label: 'Настройки', run: openSettings },
         });
@@ -1670,6 +1676,12 @@ function renderVoiceGroup(box, lang) {
                     <option value="0" ${!settings.geminiFreeOnly ? 'selected' : ''}>Изкл.</option>
                 </select>
             </div>
+            <div class="row">
+                <span class="row-label">Дължина на откъса<small>Повече аудио от всяка безплатна заявка (лимитът е в заявки на ден). Важи за книги, от които още нищо не е прочетено. Ако моделът отреже края, откъсът се чете на две части.</small></span>
+                <select class="select" id="setPassage">
+                    ${[[3600, '~4 мин.'], [6000, '~7 мин.'], [8000, '~9 мин. (макс.)']].map(([v, l]) => `<option value="${v}" ${settings.geminiPassage === v ? 'selected' : ''}>${l}</option>`).join('')}
+                </select>
+            </div>
             ${settings.geminiFreeOnly ? '' : `<div class="row">
                 <span class="row-label">Пестелив режим (−50%)<small>Следващата глава се подготвя предварително през Batch на Google на половин цена. Плаща се най-много една глава напред.</small></span>
                 <select class="select" id="setEconomy">
@@ -1685,6 +1697,7 @@ function renderVoiceGroup(box, lang) {
             <p class="hint">„Автоматично“ избира най-евтиния проверен модел (Gemini 2.5 Flash TTS). Другите модели може да прочетат на глас инструкцията за стила — ако това стане, върнете „Автоматично“.</p>`;
         const eco = $('#setEconomy', box);
         if (eco) eco.onchange = (e) => { settings.geminiEconomy = e.target.value === '1'; saveSettings(); rerenderSheet(renderSettings); };
+        $('#setPassage', box).onchange = (e) => { settings.geminiPassage = Number(e.target.value); saveSettings(); };
         $('#setFreeOnly', box).onchange = (e) => { settings.geminiFreeOnly = e.target.value === '1'; saveSettings(); player.voiceChanged(); rerenderSheet(renderSettings); };
         $('#setFreeKey', box).onchange = (e) => { settings.geminiFreeKey = e.target.value.trim(); localStorage.removeItem('rz_free_key_exhausted'); saveSettings(); };
         $('#setGeminiVoice', box).onchange = (e) => { settings.geminiVoice = e.target.value; saveSettings(); player.voiceChanged(); };
@@ -1874,7 +1887,8 @@ async function previewVoice(btn) {
         if (!st.azureKey || !st.azureVoice) return toast('Въведете ключ и изберете глас.', { error: true });
         return previewAzure(btn, audioEl, text, lang, st);
     }
-    if (!st.apiKey) return toast('Нужен е API ключ.', { error: true });
+    const geminiKey = st.geminiFreeOnly ? (usableFreeKey(st) || '') : (usableFreeKey(st) || st.apiKey);
+    if (st.engine === 'gemini' ? !geminiKey : !st.apiKey) return toast(st.engine === 'gemini' && st.geminiFreeOnly ? 'Нужен е безплатен ключ (или днешният лимит е изчерпан).' : 'Нужен е API ключ.', { error: true });
     const key = st.engine === 'cloud' ? `preview|${st.cloudVoice}|${lang}` : `preview|${st.geminiModel}|${st.geminiVoice}|${st.style}|${st.customStyle}|${lang}`;
     const old = btn.textContent;
     btn.textContent = '…';
@@ -1895,7 +1909,7 @@ async function previewVoice(btn) {
                 recordUsage({ engine: 'cloud', tier, chars: billed });
                 reportCloudUsage(st.apiKey, tier, billed);
             } else {
-                const r = await geminiSynthesize({ apiKey: st.apiKey, model: st.geminiModel, text, voice: st.geminiVoice, style: st.style, customStyle: st.customStyle, lang });
+                const r = await geminiSynthesize({ apiKey: geminiKey, retry429: false, model: st.geminiModel, text, voice: st.geminiVoice, style: st.style, customStyle: st.customStyle, lang });
                 blob = r.blob;
                 recordUsage({ engine: 'gemini', inTokens: r.inTokens, outTokens: r.outTokens });
             }

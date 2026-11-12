@@ -614,6 +614,21 @@ export function geminiRequestBody({ text, voice, style, customStyle, lang, stead
 
 // Turn a generateContent response (interactive or from a batch) into compact audio:
 // Ogg/Opus when the browser can encode it (~12× smaller), WAV otherwise.
+// PCM of an answer, trimmed and levelled, with why the model stopped
+function geminiPcm(data) {
+    const part = data?.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data);
+    if (!part) return null;
+    const rate = Number((part.inlineData.mimeType || '').match(/rate=(\d+)/)?.[1] || 24000);
+    const raw = base64ToBytes(part.inlineData.data);
+    const usage = data.usageMetadata || {};
+    return {
+        pcm: levelLoudness(trimSilence(raw, rate)), rate,
+        finish: data.candidates[0].finishReason || '',
+        inTokens: usage.promptTokenCount || 0,
+        outTokens: usage.candidatesTokenCount || Math.round(raw.length / 2 / rate * PRICES.gemini.tokensPerSecond),
+    };
+}
+
 export async function geminiParseAudio(data) {
     const part = data?.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data);
     if (!part) {
@@ -644,14 +659,22 @@ export function quotaKind(e) {
     return { daily, wait: m ? Math.ceil(Number(m[1])) : 0 };
 }
 
-export async function geminiSynthesize({ apiKey, model, text, voice, style, customStyle, lang, signal, retry429 = true }) {
+// A long passage that comes back cut short (the model hit its output limit or left
+// text out) is read again in two halves and joined, so no text is ever lost. The
+// longer the passage, the more audio one free request gives.
+function geminiTruncated(r, chars) {
+    const secs = r.pcm.length / r.rate;
+    return r.finish === 'MAX_TOKENS' || (chars > 500 && secs < chars / 24);
+}
+
+async function geminiOnce({ apiKey, model, text, voice, style, customStyle, lang, signal, retry429 }) {
     const send = async (steady) => {
         const body = geminiRequestBody({ text, voice, style, customStyle, lang, steady });
         const call = () => fetchJson(`${GEMINI_BASE}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
-        }, 180000, signal);
+        }, 300000, signal);
         return retry429 ? withRetry(call, signal) : call();
     };
     const steady = steadyState() !== 'off';
@@ -665,7 +688,46 @@ export async function geminiSynthesize({ apiKey, model, text, voice, style, cust
         setSteadyState('off');
         data = await send(false);
     }
-    return geminiParseAudio(data);
+    const r = geminiPcm(data);
+    if (!r) await geminiParseAudio(data); // throws the right error
+    return r;
+}
+
+async function geminiPieces(opts, depth = 0) {
+    let r;
+    try {
+        r = await geminiOnce(opts);
+    } catch (e) {
+        // One request is bigger than the free tier's tokens per minute: read it in halves
+        const halves = e.status === 429 && /token/i.test(e.raw || '') && !/PerDay/i.test(e.raw || '') && depth < 2 && opts.text.length > 1500 && splitHalf(opts.text);
+        if (!halves) throw e;
+        opts.onSplit?.('откъсът е по-голям от минутния лимит на токените');
+        const out = [];
+        for (const part of halves) out.push(...await geminiPieces({ ...opts, text: part }, depth + 1));
+        return out;
+    }
+    if (!geminiTruncated(r, opts.text.length) || depth >= 2) return [r];
+    const halves = splitHalf(opts.text);
+    if (!halves) return [r];
+    opts.onSplit?.(r.finish === 'MAX_TOKENS' ? 'достигна края на изхода' : 'върна по-кратко аудио от текста');
+    const out = [];
+    for (const part of halves) out.push(...await geminiPieces({ ...opts, text: part }, depth + 1));
+    // The cut-short answer was paid for (or counted) too
+    out[0] = { ...out[0], inTokens: out[0].inTokens + r.inTokens, outTokens: out[0].outTokens + r.outTokens };
+    return out;
+}
+
+export async function geminiSynthesize({ apiKey, model, text, voice, style, customStyle, lang, signal, retry429 = true, onSplit }) {
+    const parts = await geminiPieces({ apiKey, model, text, voice, style, customStyle, lang, signal, retry429, onSplit });
+    const rate = parts[0].rate;
+    const pcm = parts.length === 1 ? parts[0].pcm : joinPcm(parts.map((p) => p.pcm), rate);
+    return {
+        blob: (await encodeOpus(pcm, rate)) || pcmToWav(pcm, rate),
+        dur: pcm.length / rate,
+        inTokens: parts.reduce((a, p) => a + p.inTokens, 0),
+        outTokens: parts.reduce((a, p) => a + p.outTokens, 0),
+        requests: parts.length > 1 ? parts.length + 1 : 1,
+    };
 }
 
 // ---------- Gemini Batch API (half price, finished within minutes to hours) ----------

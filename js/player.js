@@ -369,6 +369,9 @@ export class Player extends EventTarget {
     // Fixed chunk starts of a chapter. Books keep the chunking they were first narrated
     // with, so audio already paid for keeps matching.
     _boundaries(m, engine = this.engine) {
+        // The narrator's passage length is fixed per book when it is added (Settings →
+        // passage length), so audio already made keeps matching
+        if (engine === 'gemini' && this.book?.geminiMax) return chunkBoundaries(m, this.book.geminiMax, 0.6);
         const v = this.book?.chunkV >= 4 ? CHUNK_V4[engine] : this.book?.chunkV >= 3 ? CHUNK_V3[engine] : this.book?.chunkV >= 2 && CHUNK_V2[engine];
         if (v) return chunkBoundaries(m, v.max, v.para);
         return chunkBoundaries(m, CHUNK_CHARS[engine] || CHUNK_CHARS.gemini);
@@ -516,7 +519,8 @@ export class Player extends EventTarget {
                 beforeRequest, afterRequest, onIssue: (m) => diag(`${m} (гл. ${spec.c + 1}, изр. ${spec.s0 + 1}–${spec.s1})`),
             });
         } else {
-            const req = { model: st.geminiModel, text: spec.text, voice: st.geminiVoice, style: st.style, customStyle: st.customStyle, lang };
+            const split = (why) => diag(`Gemini: ${why} — откъсът се чете на две части (гл. ${spec.c + 1}, изр. ${spec.s0 + 1}–${spec.s1})`);
+            const req = { model: st.geminiModel, text: spec.text, voice: st.geminiVoice, style: st.style, customStyle: st.customStyle, lang, onSplit: split };
             let free = false;
             if (freeKey) {
                 // Free daily quota first (key from a project without billing). Each TTS
