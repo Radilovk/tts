@@ -110,6 +110,35 @@ if styles.exists():
                    r'\1\n        <item name="android:windowBackground">@color/rz_window</item>', s, count=1)
         styles.write_text(s, encoding="utf-8")
 
+# ---- launch screen: the app's own mark, centred, never stretched
+# Capacitor's template paints its default splash.png (its own logo) as the window
+# background of the launch theme, scaled to the screen — it looked squashed. It is
+# replaced by a layer list: the icon's dark colour + the book mark centred at a fixed
+# size; Android 12+ draws its system splash from the same colour and icon.
+for png in RES.glob("drawable*/splash.png"):
+    png.unlink()
+(RES / "drawable").mkdir(exist_ok=True)
+(RES / "values/rz_splash.xml").write_text(
+    '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="rz_splash">#1E1A16</color>\n</resources>\n',
+    encoding="utf-8")
+(RES / "drawable/splash.xml").write_text("""<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/rz_splash" />
+    <item android:width="200dp" android:height="200dp" android:gravity="center"
+        android:drawable="@drawable/rz_splash_logo" />
+</layer-list>
+""", encoding="utf-8")
+if styles.exists():
+    s = styles.read_text(encoding="utf-8")
+    launch = """<style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/rz_splash</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/rz_splash_icon</item>
+        <item name="postSplashScreenTheme">@style/AppTheme.NoActionBar</item>
+        <item name="android:windowBackground">@drawable/splash</item>
+    </style>"""
+    s = re.sub(r'<style\s+name="AppTheme\.NoActionBarLaunch"[\s\S]*?</style>', launch, s, count=1)
+    styles.write_text(s, encoding="utf-8")
+
 # ---- launcher icons
 try:
     from PIL import Image
@@ -123,9 +152,20 @@ try:
     for size, dpi in [(108, "mdpi"), (162, "hdpi"), (216, "xhdpi"), (324, "xxhdpi"), (432, "xxxhdpi")]:
         d = RES / f"mipmap-{dpi}"
         mask.resize((size, size), Image.LANCZOS).save(d / "ic_launcher_foreground.png")
+    # Launch screen marks (see above): the whole mark for the layer list; for the Android 12+
+    # system splash the mark with the same safe margin as an adaptive icon foreground
+    nodpi = RES / "drawable-nodpi"
+    nodpi.mkdir(exist_ok=True)
+    mask.resize((512, 512), Image.LANCZOS).save(nodpi / "rz_splash_logo.png")
+    mask.resize((432, 432), Image.LANCZOS).save(nodpi / "rz_splash_icon.png")
     colors = RES / "values/ic_launcher_background.xml"
     colors.write_text('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="ic_launcher_background">#1E1A16</color>\n</resources>\n', encoding="utf-8")
 except ImportError:
     print("Pillow not installed — keeping the default Capacitor icons")
+    # The launch screen still needs its marks: the web icon, unscaled
+    nodpi = RES / "drawable-nodpi"
+    nodpi.mkdir(exist_ok=True)
+    shutil.copy("icons/icon-maskable-512.png", nodpi / "rz_splash_logo.png")
+    shutil.copy("icons/icon-maskable-512.png", nodpi / "rz_splash_icon.png")
 
 print("Android project patched for Разказвач")

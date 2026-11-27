@@ -312,7 +312,12 @@ R2 1M/10M операции и 10 GB месечно). Приложението п
 
 ## Android приложение (APK)
 
-Изтегляне: **https://github.com/Radilovk/tts/releases/download/apk-latest/Razkazvach.apk**
+Страница за изтегляне: **https://radilovk.github.io/tts/get/** — винаги най-новата версия (номер, дата и размер
+идват от изданието `apk-latest`). Директен линк към файла:
+**https://github.com/Radilovk/tts/releases/download/apk-latest/Razkazvach.apk**
+
+- Стартов екран: иконата на приложението, центрирана на нейния тъмен фон (#1E1A16), без разпъване — и на Android 12+
+  (системният splash), и на по-старите (layer-list). Шаблонът на Capacitor разпъваше своето лого на целия екран.
 (компилира се автоматично при всяко качване — `.github/workflows/build-apk.yml`).
 
 - Чете и при **изгасен екран** — фонова услуга с известие, контроли от заключения екран и слушалките.
