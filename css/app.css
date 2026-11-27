@@ -470,3 +470,23 @@ label.list-item { cursor: pointer; }
 /* Footnotes and endnotes: visible in the text, never read aloud */
 #textStage p.note { font-size: .82em; opacity: .62; border-left: 2px solid currentColor; padding-left: .7em; margin-left: .2em; }
 #textStage p.note::before { content: 'Бележка · не се чете — '; font-size: .85em; font-weight: 600; }
+
+/* Текст → аудио файл */
+.lib-tools { display: flex; gap: 4px; }
+.lt-text { min-height: 180px !important; max-height: 42vh; font-size: 14px; }
+.lt-row { display: flex; gap: 10px; margin-top: 10px; align-items: center; }
+.lt-row .input { flex: 1; min-width: 0; }
+.lt-voices { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 8px; margin-top: 12px; max-height: 236px; overflow-y: auto; padding: 2px; }
+.lt-voice { text-align: left; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--bg); box-shadow: inset 0 0 0 1px var(--line); transition: box-shadow .15s, transform .1s; }
+.lt-voice:active { transform: scale(.97); }
+.lt-voice b { display: block; font-size: 14px; font-weight: 600; }
+.lt-voice small { display: block; font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.lt-voice.on { box-shadow: inset 0 0 0 2px var(--accent); }
+.lt-audio { width: 100%; margin-top: 4px; }
+.lt-link { word-break: break-all; }
+.hint code { font-size: 12px; background: var(--bg); padding: 1px 5px; border-radius: 6px; word-break: break-word; }
+.lt-topic { min-height: 110px !important; }
+.lt-scen { min-height: 60vh !important; font-size: 13px; }
+.lt-seg-sm { width: 150px; flex: none; }
+.lt-seg-sm button { height: 32px; }
+#ltSource { margin-top: 4px; }

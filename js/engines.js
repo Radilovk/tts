@@ -131,7 +131,7 @@ function errorInfo(data) {
     return { reason, project, fixUrl: info.metadata?.activationUrl || inMsg || help };
 }
 
-async function fetchJson(url, options, timeoutMs, signal) {
+export async function fetchJson(url, options, timeoutMs, signal) {
     const ctrl = new AbortController();
     const onAbort = () => ctrl.abort();
     signal?.addEventListener('abort', onAbort, { once: true });
@@ -170,7 +170,7 @@ function friendlyError(status, msg, reason) {
     return msg;
 }
 
-async function withRetry(fn, signal, tries = 3) {
+export async function withRetry(fn, signal, tries = 3) {
     let lastErr;
     for (let i = 0; i < tries; i++) {
         try { return await fn(); } catch (e) {
@@ -215,7 +215,7 @@ export async function cloudVoices(apiKey, lang) {
 // melody: every paragraph must end like a sentence (a heading or a list line without a
 // full stop runs into the next one with a "continuing" tone), a dialogue dash at the
 // start of a line is spoken as a sound, and words in capitals are spelled out.
-function prepareParagraph(p) {
+export function prepareParagraph(p) {
     let t = p.trim()
         .replace(/^[—–-]\s*/, '')                    // dialogue dash at the start of a line
         .replace(/\s+[—–]\s+/g, ' — ')               // one kind of dash inside the line
@@ -309,7 +309,7 @@ export async function cloudSynthesize({ apiKey, text, voice, locale, signal, onS
 const PCM_RATE = 24000;
 const PACE_KEY = 'rz_cloud_pace';
 
-function parseWavPcm(bytes) {
+export function parseWavPcm(bytes) {
     const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const tag = (o) => String.fromCharCode(bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]);
     if (bytes.length < 12 || tag(0) !== 'RIFF') {
@@ -408,7 +408,7 @@ export function passageProblem(pcm, rate, chars, voice) {
     return '';
 }
 
-function joinPcm(parts, rate) {
+export function joinPcm(parts, rate) {
     const gap = Math.round(rate * 0.35);
     const len = parts.reduce((a, p) => a + p.length, 0) + gap * (parts.length - 1);
     const out = new Int16Array(len);
@@ -419,7 +419,14 @@ function joinPcm(parts, rate) {
 
 // beforeRequest(billedChars) → release() — reserves the characters (throws at the
 //   free limit); afterRequest(billedChars) records them. onIssue(message) for the log.
-export async function cloudNarrate({ apiKey, text, voice, locale, signal, beforeRequest, afterRequest, onIssue }) {
+export async function cloudNarrate(opts) {
+    const res = await cloudNarratePcm(opts);
+    return packSpeech(res.pcm, res.rate);
+}
+
+// The same checked narration, as raw PCM → { pcm, rate, problem } (the long-text studio
+// joins many of these into one file).
+export async function cloudNarratePcm({ apiKey, text, voice, locale, signal, beforeRequest, afterRequest, onIssue }) {
     const once = async (t) => {
         const billed = cloudBilledChars(t);
         const release = beforeRequest ? beforeRequest(billed) : () => {};
@@ -472,7 +479,7 @@ export async function cloudNarrate({ apiKey, text, voice, locale, signal, before
     } else {
         onIssue?.(`Google HD: откъсът остава със забележка (${res.problem})`);
     }
-    return packSpeech(res.pcm, res.rate);
+    return res;
 }
 
 // Trim, level and compress narration PCM → { blob, dur }
@@ -765,7 +772,7 @@ export async function geminiBatchGet(apiKey, name) {
 }
 
 // Trim long leading/trailing silence (keeps ~0.25 s so chunks join naturally).
-function trimSilence(bytes, rate) {
+export function trimSilence(bytes, rate) {
     const view = new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.length / 2));
     const threshold = 400;
     const keep = Math.round(rate * 0.25);
@@ -780,7 +787,7 @@ function trimSilence(bytes, rate) {
 // Bring every passage to the same speech loudness, so one is never louder or quieter
 // than the one before. Only voiced samples are measured; peaks are softly limited.
 const TARGET_RMS = 3300; // ≈ -20 dBFS
-function levelLoudness(view) {
+export function levelLoudness(view) {
     let sum = 0, n = 0;
     for (let i = 0; i < view.length; i += 4) {
         const x = view[i];
@@ -800,7 +807,7 @@ function levelLoudness(view) {
     return out;
 }
 
-function pcmToWav(int16, rate) {
+export function pcmToWav(int16, rate) {
     const dataLen = int16.length * 2;
     const buf = new ArrayBuffer(44 + dataLen);
     const v = new DataView(buf);
@@ -918,13 +925,13 @@ export function azureBilledChars(text) {
     return String(text).split(/\n+/).map(prepareParagraph).filter(Boolean).join(' ').length;
 }
 
-async function azureOnce({ key, region, text, voice, locale, multilingual, tuned, signal }) {
+async function azureOnce({ key, region, text, voice, locale, multilingual, tuned, signal, format }) {
     const res = await withRetry(() => azureFetch(`${azureHost(region)}/cognitiveservices/v1`, {
         method: 'POST',
         headers: {
             'Ocp-Apim-Subscription-Key': String(key).trim(),
             'Content-Type': 'application/ssml+xml',
-            'X-Microsoft-OutputFormat': azureAudioFormat.enc,
+            'X-Microsoft-OutputFormat': format || azureAudioFormat.enc,
         },
         body: azureSsml({ text, voice, locale, multilingual, tuned }),
     }, 60000, signal), signal, 5);
@@ -964,6 +971,21 @@ export async function azureSynthesize({ key, region, text, voice, locale, signal
     const own = voice.split('-').slice(0, 2).join('-');
     const opts = { key, region, text, voice, signal, onSplit, multilingual, locale: (multilingual ? locale : own) || locale || 'bg-BG' };
     return { blob: new Blob(await azureBytes(opts), { type: azureAudioFormat.mime }), chars: azureBilledChars(text) };
+}
+
+// Raw PCM (24 kHz, 16-bit, mono) for the long-text studio → { pcm, rate, chars, problem }.
+// Azure voices are not generative: the same text always sounds the same, so a retry
+// would change nothing — the check only reports.
+export async function azureNarratePcm({ key, region, text, voice, locale, signal, onSplit }) {
+    const multilingual = /Multilingual/i.test(voice);
+    const own = voice.split('-').slice(0, 2).join('-');
+    const opts = { key, region, text, voice, signal, onSplit, multilingual, format: 'riff-24khz-16bit-mono-pcm', locale: (multilingual ? locale : own) || locale || 'bg-BG' };
+    const parts = (await azureBytes(opts)).map(parseWavPcm);
+    const pcm = parts.length === 1 ? parts[0].pcm : joinPcm(parts.map((p) => p.pcm), parts[0].rate);
+    const rate = parts[0].rate;
+    const x = speechExtent(pcm, rate);
+    const problem = x.speech < 0.3 ? 'няма реч' : x.cutOff ? 'прекъснато насред дума' : '';
+    return { pcm, rate, chars: azureBilledChars(text), problem };
 }
 
 // ---------- Device (Web Speech API) ----------

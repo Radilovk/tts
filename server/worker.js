@@ -37,6 +37,13 @@
 // The runner (.github/workflows/night-studio.yml) stores finished passages through
 // PUT /audio/:key, so the player finds them by the same keys as any cached passage.
 //
+// Long text → audio file (js/narrate.js, scripts/narrate.mjs): the finished file can be
+// kept here and shared by a link. Files are filed under a hash of the key in X-Rz-Key.
+//   PUT    /files?name=…                 → store a file (audio/*, video/mp4); → { id, url }
+//   GET    /files                        → the key's files: [{ id, name, size, at, url }]
+//   DELETE /files/:id                    → remove one of the key's files
+//   GET    /f/:id/:name   HEAD …         → the file itself, public, with Range (seeking)
+//
 // Only public-domain books use the shared store (the app decides; see js/library.js).
 // Every chunk is synthesized once and then served to every listener.
 
@@ -51,6 +58,7 @@ const MAX_TRANS_BYTES = 2 * 1024 * 1024;
 const MAX_PROXY_BYTES = 80 * 1024 * 1024;
 const MAX_BOOK_BYTES = 6 * 1024 * 1024;
 const MAX_JOB_BYTES = 40 * 1024 * 1024;
+const MAX_FILE_BYTES = 95 * 1024 * 1024; // a Workers request body may be up to 100 MB
 const RIGHTS = ['pd', 'own', 'cc0', 'cc-by', 'cc-by-sa'];
 const PROXY_HOSTS = [/^(export\.)?arxiv\.org$/, /^library\.oapen\.org$/, /^([\w-]+\.)*archive\.org$/, /^(www\.)?gutenberg\.org$/];
 
@@ -62,6 +70,7 @@ function cors(req) {
         'Access-Control-Allow-Methods': 'GET, HEAD, PUT, POST, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, X-Rz-Voice, X-Rz-Lang, X-Rz-Text, X-Rz-Key, Authorization',
         'Access-Control-Max-Age': '86400',
+        'Access-Control-Expose-Headers': 'Content-Range, Content-Length, Accept-Ranges',
         Vary: 'Origin',
     };
 }
@@ -331,6 +340,85 @@ async function usage(req, env) {
     return json(req, { month, cloud });
 }
 
+// ---------- long text → audio file: shared by a link ----------
+
+function fileName(s) {
+    return String(s || '').replace(/[\\/:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120) || 'audio';
+}
+
+function fileUrl(req, id, name) {
+    return `${new URL(req.url).origin}/f/${id}/${encodeURIComponent(name)}`;
+}
+
+async function files(req, env, id) {
+    if (!env.AUDIO) return json(req, { error: 'Сървърът няма хранилище (R2).' }, 503);
+    const owner = await studioOwner(req);
+    if (!owner) return json(req, { error: 'Нужен е API ключ.' }, 403);
+    if (!id && req.method === 'PUT') {
+        const type = (req.headers.get('Content-Type') || '').split(';')[0].trim();
+        if (!/^(audio\/(mpeg|ogg|wav|mp4|aac|x-m4a)|video\/mp4)$/.test(type)) return json(req, { error: 'bad type' }, 415);
+        const len = Number(req.headers.get('Content-Length') || 0);
+        if (!len || len > MAX_FILE_BYTES) return json(req, { error: 'Файлът е над 95 MB.' }, 413);
+        const name = fileName(new URL(req.url).searchParams.get('name'));
+        const fid = [...crypto.getRandomValues(new Uint8Array(10))].map((b) => b.toString(16).padStart(2, '0')).join('');
+        const at = new Date().toISOString();
+        await env.AUDIO.put(`f/${fid}`, req.body, {
+            httpMetadata: { contentType: type, contentDisposition: `inline; filename*=UTF-8''${encodeURIComponent(name)}` },
+            customMetadata: { owner, name, at },
+        });
+        await env.AUDIO.put(`fo/${owner}/${fid}`, '', { customMetadata: { name, at, size: String(len) } });
+        return json(req, { id: fid, url: fileUrl(req, fid, name) });
+    }
+    if (!id && req.method === 'GET') {
+        const list = [];
+        let cursor;
+        do {
+            const page = await env.AUDIO.list({ prefix: `fo/${owner}/`, cursor, include: ['customMetadata'], limit: 1000 });
+            for (const o of page.objects) {
+                const fid = o.key.split('/').pop();
+                const m = o.customMetadata || {};
+                list.push({ id: fid, name: m.name || '', size: Number(m.size) || 0, at: m.at || '', url: fileUrl(req, fid, m.name || 'audio') });
+            }
+            cursor = page.truncated ? page.cursor : undefined;
+        } while (cursor);
+        list.sort((a, b) => (a.at < b.at ? 1 : -1));
+        return json(req, list);
+    }
+    if (id && req.method === 'DELETE') {
+        if (!(await env.AUDIO.head(`fo/${owner}/${id}`))) return json(req, { error: 'not found' }, 404);
+        await env.AUDIO.delete([`f/${id}`, `fo/${owner}/${id}`]);
+        return json(req, { ok: true });
+    }
+    return json(req, { error: 'method' }, 405);
+}
+
+// Public: anyone with the link can listen (or download). Range requests let players seek.
+async function fileGet(req, env, id) {
+    if (!env.AUDIO) return new Response(null, { status: 503, headers: cors(req) });
+    const key = `f/${id}`;
+    const obj = req.method === 'HEAD' ? await env.AUDIO.head(key) : await env.AUDIO.get(key, { range: req.headers });
+    if (!obj) return new Response('Файлът не е намерен.', { status: 404, headers: cors(req) });
+    const headers = new Headers(cors(req));
+    obj.writeHttpMetadata(headers);
+    headers.set('ETag', obj.httpEtag);
+    headers.set('Accept-Ranges', 'bytes');
+    headers.set('Cache-Control', 'public, max-age=86400');
+    if (req.method === 'HEAD') {
+        headers.set('Content-Length', String(obj.size));
+        return new Response(null, { headers });
+    }
+    const r = obj.range;
+    if (r && req.headers.has('Range')) {
+        const offset = r.offset ?? (r.suffix != null ? obj.size - r.suffix : 0);
+        const length = r.length ?? (obj.size - offset);
+        headers.set('Content-Range', `bytes ${offset}-${offset + length - 1}/${obj.size}`);
+        headers.set('Content-Length', String(length));
+        return new Response(obj.body, { status: 206, headers });
+    }
+    headers.set('Content-Length', String(obj.size));
+    return new Response(obj.body, { headers });
+}
+
 // ---------- night studio ----------
 
 async function studioOwner(req) {
@@ -483,6 +571,10 @@ export default {
             if (path === '/usage') return usage(req, env);
             m = path.match(/^\/jobs(?:\/([0-9a-f]{20})(\/book)?)?$/);
             if (m) return jobs(req, env, m[1], m[2]);
+            m = path.match(/^\/files(?:\/([0-9a-f]{20}))?$/);
+            if (m) return files(req, env, m[1]);
+            m = path.match(/^\/f\/([0-9a-f]{20})(?:\/.*)?$/);
+            if (m && (req.method === 'GET' || req.method === 'HEAD')) return fileGet(req, env, m[1]);
             m = path.match(/^\/trans\/(.+)$/);
             if (m) return trans(req, env, m[1]);
             return json(req, { error: 'not found' }, 404);

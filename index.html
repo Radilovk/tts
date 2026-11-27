@@ -32,6 +32,7 @@
             <symbol id="i-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1" fill="currentColor"/><circle cx="4.5" cy="12" r="1" fill="currentColor"/><circle cx="4.5" cy="18" r="1" fill="currentColor"/></symbol>
             <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></symbol>
             <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></symbol>
+            <symbol id="i-wavefile" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><path d="M14 3v5h5"/><path d="M9 14v2M12 12v6M15 13.5v3"/></symbol>
             <symbol id="i-text" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 6h16M4 10h16M4 14h10M4 18h13"/></symbol>
             <symbol id="i-cover" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 3v18"/></symbol>
             <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z"/></symbol>
@@ -50,7 +51,10 @@
                 <p class="eyebrow">Аудиокниги от вашите файлове</p>
                 <h1 class="brand">Разказвач</h1>
             </div>
-            <button id="btnSettings" class="icon-btn" aria-label="Настройки"><svg class="ic"><use href="#i-settings"/></svg></button>
+            <div class="lib-tools">
+                <button id="btnTextToFile" class="icon-btn" aria-label="Текст → аудио файл" title="Текст → аудио файл"><svg class="ic"><use href="#i-wavefile"/></svg></button>
+                <button id="btnSettings" class="icon-btn" aria-label="Настройки"><svg class="ic"><use href="#i-settings"/></svg></button>
+            </div>
         </header>
 
         <section id="continueCard" class="continue hidden" aria-label="Продължи слушането"></section>
