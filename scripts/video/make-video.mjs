@@ -234,7 +234,7 @@ async function choose(scene, cands) {
         if (!t) continue;
         shown.push(c);
         parts.push({ text: `Candidate ${shown.length} (${c.kind}${c.duration ? `, ${c.duration} s` : ''}):` }, { inline_data: { mime_type: t.mime, data: t.data } });
-        if (shown.length >= 8) break;
+        if (shown.length >= 10) break;
     }
     if (!shown.length) return null;
     const r = await generate({ apiKey: KEY, task: 'look', system: LOOK_SYSTEM, parts, json: true, maxTokens: 4096, what: `кадър ${scene.idx + 1}` });
@@ -276,20 +276,25 @@ let aiUsed = 0, sceneDone = 0;
 async function fillScene(idx, scene) {
     scene.idx = idx;
     const dur = scene.end - scene.start;
-    let pick = null;
+    // Every query and source at once (was: query by query, a look after each), then ONE
+    // look at the best candidates of all of them
+    const queries = scene.queries.length ? scene.queries : [scene.visual];
+    const lists = await Promise.all(queries.flatMap((q) => [
+        ...(scene.kind === 'video' ? [searchAll(q, 'video', keys)] : []), searchAll(q, 'photo', keys),
+    ]));
     const seen = new Set();
-    for (const q of scene.queries.length ? scene.queries : [scene.visual]) {
-        const found = [];
-        if (scene.kind === 'video') found.push(...await searchAll(q, 'video', keys));
-        found.push(...await searchAll(q, 'photo', keys));
-        const cands = found.filter((c) => !used.has(c.id) && !seen.has(c.id) && (c.kind !== 'video' || !c.duration || c.duration >= Math.min(dur, 6)));
-        cands.forEach((c) => seen.add(c.id));
-        cands.sort((a, b) => (scene.kind === 'video' ? (b.kind === 'video') - (a.kind === 'video') : 0));
-        if (!cands.length) continue;
-        const r = await choose(scene, cands.slice(0, 8)).catch((e) => { log(`  подбор: ${e.message}`); return null; });
-        if (r?.id && (!pick || r.score > pick.score)) pick = r;
-        if (pick && pick.score >= 7) break;
+    const ok = (c) => c.thumb && !used.has(c.id) && !seen.has(c.id) && (c.kind !== 'video' || !c.duration || c.duration >= Math.min(dur, 6));
+    // Interleave: the specific query's top results first, footage first when motion matters
+    const cands = [];
+    for (let r = 0; r < 4; r++) {
+        for (const l of lists) {
+            const sorted = scene.kind === 'video' ? [...l].sort((a, b) => (b.kind === 'video') - (a.kind === 'video')) : l;
+            const c = sorted.filter(ok)[0];
+            if (c) { seen.add(c.id); cands.push(c); }
+        }
     }
+    let pick = null;
+    if (cands.length) pick = await choose(scene, cands.slice(0, 10)).catch((e) => { log(`  подбор: ${e.message}`); return null; });
     const file = join(WORK, `asset-${String(idx).padStart(4, '0')}`);
     if (pick?.id) used.add(pick.id);   // claim it now, before the slow download
     if ((!pick || pick.score < 5) && aiUsed < aiLimit) {
@@ -307,7 +312,7 @@ async function fillScene(idx, scene) {
 }
 {
     let next = 0;
-    await Promise.all(Array.from({ length: 4 }, async () => { while (next < scenes.length) { const i = next++; await fillScene(i, scenes[i]); } }));
+    await Promise.all(Array.from({ length: 6 }, async () => { while (next < scenes.length) { const i = next++; await fillScene(i, scenes[i]); } }));
 }
 // A scene with nothing at all keeps the previous shot on screen a little longer
 for (let i = 0; i < scenes.length; i++) {
@@ -326,13 +331,19 @@ const MOVES = [
     ["1.10", "(iw-iw/zoom)*(1-on/FR)", "ih/2-(ih/zoom/2)"],            // pan right → left
 ];
 const GRADE = 'eq=contrast=1.03:saturation=0.96';
+const GROUP = 12;
 const clips = new Array(scenes.length);
 let clipDone = 0;
 await pool([...scenes.entries()], cpu, async ([i, s]) => {
-    const d = (s.end - s.start) + (i < scenes.length - 1 ? T : 0.3);   // overlap for the cross-fade; the last one a bit longer than the voice
+    // Shots cross-fade inside groups of GROUP; groups are joined end to end without another
+    // encode (a plain cut every GROUP shots), so only the last shot of the video and the
+    // shots ending a group get no overlap
+    const endsGroup = (i + 1) % GROUP === 0 || i === scenes.length - 1;
+    const d = (s.end - s.start) + (i === scenes.length - 1 ? 0.3 : endsGroup ? 0 : T);
     const frames = Math.max(2, Math.round(d * FPS));
     const out = join(WORK, `clip-${String(i).padStart(4, '0')}.mp4`);
-    const enc = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-r', String(FPS)];
+    // intermediate files: fastest encode, near-lossless (the group pass makes the final one)
+    const enc = ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '16', '-pix_fmt', 'yuv420p', '-r', String(FPS)];
     if (s.asset.kind === 'video') {
         await ffA(['-stream_loop', '-1', '-i', s.asset.file, '-t', d.toFixed(3), '-an',
             '-vf', `scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=${FPS},setsar=1,${GRADE}`, ...enc, out]);
@@ -347,33 +358,31 @@ await pool([...scenes.entries()], cpu, async ([i, s]) => {
 });
 process.stdout.write('\n');
 
-// Cross-fade a list of clips (each one T longer than its part, except the very last) into
-// one; groups of 12, then the groups the same way — any number of shots.
-let joinN = 0;
-function crossfade(list) {
-    if (list.length === 1) return list[0];
-    const groups = [];
-    for (let i = 0; i < list.length; i += 12) groups.push(list.slice(i, i + 12));
-    const merged = groups.map((g) => {
-        if (g.length === 1) return g[0];
-        const inputs = g.flatMap((c) => ['-i', c.file]);
-        // xfade needs the same time base and frame rate on both sides
-        let filter = g.map((_, k) => `[${k}:v]settb=AVTB,fps=${FPS},format=yuv420p[i${k}];`).join('');
-        let prev = '[i0]', off = 0;
-        for (let k = 1; k < g.length; k++) {
-            off += g[k - 1].d;
-            const outLabel = k === g.length - 1 ? '[v]' : `[x${k}]`;
-            filter += `${prev}[i${k}]xfade=transition=fade:duration=${T}:offset=${off.toFixed(3)}${outLabel};`;
-            prev = `[x${k}]`;
-        }
-        const out = join(WORK, `join-${joinN++}.mp4`);
-        ff([...inputs, '-filter_complex', filter.replace(/;$/, ''), '-map', '[v]', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', out]);
-        return { file: out, d: g.reduce((a, c) => a + c.d, 0), last: g[g.length - 1].last };
-    });
-    return crossfade(merged);
-}
+// Cross-fade the shots of each group (the groups encode at once, one per core), then join
+// the groups without re-encoding.
 log('Сглобявам…');
-const picture = crossfade(clips);
+const groups = [];
+for (let i = 0; i < clips.length; i += GROUP) groups.push(clips.slice(i, i + GROUP));
+const groupFiles = new Array(groups.length);
+await pool([...groups.entries()], cpu, async ([gi, g]) => {
+    const out = join(WORK, `group-${String(gi).padStart(3, '0')}.mp4`);
+    const final = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p', '-r', String(FPS)];
+    if (g.length === 1) { await ffA(['-i', g[0].file, ...final, out]); groupFiles[gi] = out; return; }
+    let filter = g.map((_, k) => `[${k}:v]settb=AVTB,fps=${FPS},format=yuv420p[i${k}];`).join('');
+    let prev = '[i0]', off = 0;
+    for (let k = 1; k < g.length; k++) {
+        off += g[k - 1].d;
+        const outLabel = k === g.length - 1 ? '[v]' : `[x${k}]`;
+        filter += `${prev}[i${k}]xfade=transition=fade:duration=${T}:offset=${off.toFixed(3)}${outLabel};`;
+        prev = `[x${k}]`;
+    }
+    await ffA([...g.flatMap((c) => ['-i', c.file]), '-filter_complex', filter.replace(/;$/, ''), '-map', '[v]', ...final, out]);
+    groupFiles[gi] = out;
+});
+const listFile = join(WORK, 'groups.txt');
+writeFileSync(listFile, groupFiles.map((f) => `file '${f.replace(/'/g, "'\\''")}'`).join('\n') + '\n');
+const picture = { file: join(WORK, 'picture.mp4') };
+ff(['-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', picture.file]);
 
 // Captions (SRT) from the sentence times
 const ts = (t) => {
