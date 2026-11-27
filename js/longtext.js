@@ -10,6 +10,7 @@ import { parseBook } from './parsers.js';
 import { libraryApi } from './shared.js';
 import { writeNarration, pickWriterModel, editForVoice } from './writer.js';
 import { SCENARIO, SCENARIO_NAME } from './scenario.js';
+import { runSymbolProbe, probeMarkdown, PROBE_CASES } from './probe.js';
 import { recordUsage, cloudReserve, cloudRelease, reportCloudUsage, cloudUsedChars, cloudLimitChars, azureFreeLeft } from './usage.js';
 
 const DRAFT = 'rz_longtext';
@@ -105,6 +106,7 @@ export function openTextToFile() {
                 <div class="lt-voices" id="ltVoices">
                     ${voices.map((v) => `<button class="lt-voice ${v.name === cur ? 'on' : ''}" data-v="${v.name}"><b>${ui.esc(v.label)}</b><small>${v.gender === 'f' ? 'жен.' : 'мъж.'} · ${ui.esc(v.note)}</small></button>`).join('')}
                 </div>
+                ${draft.engine === 'google' ? `<p class="hint">Чете ли гласът символите правилно? <a href="#" id="ltProbe">Тест на символите →</a></p>` : ''}
                 ${keyOk(st) ? '' : `<p class="hint">${draft.engine === 'azure' ? 'Нужен е ключ за Microsoft гласовете.' : 'Нужен е Google API ключ (Google HD).'} <a href="#" id="ltSetup">Настройки →</a></p>`}
             </div>
             <div class="group">
@@ -184,6 +186,7 @@ export function openTextToFile() {
             if (v) { draft[draft.engine === 'azure' ? 'azure' : 'google'] = v.dataset.v; saveDraft(); return ui.rerenderSheet(render); }
             const fm = e.target.closest('#ltFormat [data-f]');
             if (fm) { draft.format = fm.dataset.f; saveDraft(); return ui.rerenderSheet(render); }
+            if (e.target.closest('#ltProbe')) { e.preventDefault(); return openProbe(); }
             if (e.target.closest('#ltSetup')) { e.preventDefault(); ui.closeSheet(); ui.openSettings(); return; }
             if (e.target.closest('#ltGo')) return run();
             resultClick(e);
@@ -410,4 +413,47 @@ async function write(andVoice) {
         if (e.name !== 'AbortError') ui.toast(e.message || 'Текстът не можа да се напише.', { error: true, duration: 8000 });
         openTextToFile();
     }
+}
+
+// ---------- symbol test ----------
+let probeRows = null;
+
+function openProbe() {
+    const st = ui.settings();
+    const voice = draft.google;
+    const render = (body) => {
+        body.innerHTML = `<p class="hint" style="margin-top:0">${PROBE_CASES.length} изречения с по един символ се озвучават с <b>${ui.esc(voice.split('-').pop())}</b> два пъти — както са написани и след почистването на приложението — а Gemini записва дословно какво е казал гласът. ~5 000 знака от безплатния лимит на Google HD.</p>
+            <div class="catalog-actions"><button class="btn btn-primary" id="prGo" ${st.apiKey ? '' : 'disabled'}>${probeRows ? 'Пусни теста отново' : 'Пусни теста'}</button>
+            ${probeRows ? '<button class="btn btn-ghost" id="prSave">Изтегли отчета (.md)</button>' : ''}</div>
+            ${probeRows ? `<div class="pr-list">${probeRows.map((r) => `<div class="pr-row ${r.rawNote ? 'bad' : ''}">
+                <div class="pr-name">${ui.esc(r.name)}</div>
+                <div><small>написано</small> ${ui.esc(r.raw)}</div>
+                <div><small>чуто</small> ${ui.esc(r.rawHeard)}${r.rawNote ? ` <em>— ${ui.esc(r.rawNote)}</em>` : ''}</div>
+                <div class="pr-clean"><small>след почистване</small> ${ui.esc(r.cleanHeard)}${r.cleanNote ? ` <em>— ${ui.esc(r.cleanNote)}</em>` : ' ✓'}</div>
+            </div>`).join('')}</div>` : ''}`;
+        body.onclick = async (e) => {
+            if (e.target.closest('#prSave')) return ui.saveBlob('тест-на-символите.md', new Blob([probeMarkdown(probeRows, voice)], { type: 'text/plain;charset=utf-8' }));
+            const go = e.target.closest('#prGo');
+            if (!go) return;
+            go.disabled = true;
+            const tier = 'Chirp3-HD';
+            try {
+                probeRows = await runSymbolProbe({
+                    apiKey: st.apiKey, voice,
+                    onProgress: (l) => { go.textContent = l; },
+                    beforeRequest: (billed) => {
+                        if (!cloudReserve(tier, billed)) throw new Error('Безплатните знаци на Google HD за месеца свършиха.');
+                        return () => cloudRelease(tier, billed);
+                    },
+                    afterRequest: (billed) => { recordUsage({ engine: 'cloud', tier, chars: billed }); reportCloudUsage(st.apiKey, tier, billed); },
+                });
+                ui.rerenderSheet(render);
+            } catch (err) {
+                go.disabled = false;
+                go.textContent = 'Пусни теста';
+                ui.toast(err.message || 'Тестът не успя.', { error: true, duration: 7000 });
+            }
+        };
+    };
+    ui.openSheet('Тест на символите', render, () => openTextToFile());
 }

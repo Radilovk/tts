@@ -490,3 +490,10 @@ label.list-item { cursor: pointer; }
 .lt-seg-sm { width: 150px; flex: none; }
 .lt-seg-sm button { height: 32px; }
 #ltSource { margin-top: 4px; }
+.pr-list { display: grid; gap: 8px; margin-top: 18px; }
+.pr-row { padding: 10px 12px; border-radius: var(--radius-sm); background: var(--bg); font-size: 13px; line-height: 1.45; display: grid; gap: 2px; }
+.pr-row small { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; margin-right: 6px; }
+.pr-row em { color: var(--accent); font-style: normal; }
+.pr-row.bad { box-shadow: inset 3px 0 0 var(--accent); }
+.pr-name { font-weight: 600; font-size: 14px; }
+.pr-clean { color: var(--muted); }

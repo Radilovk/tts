@@ -86,15 +86,76 @@ const SPOKEN = [
     unit('нм', 'нанометра'), unit('(?:мкм|µm|μm)', 'микрометра'), unit('мг', 'милиграма'), unit('мл', 'милилитра'),
     unit('(?:Hz|Хц)', 'херца'), unit('(?:kHz|кХц)', 'килохерца'), unit('(?:ms|мс)', 'милисекунди'),
     [/(\d)\s?м(?![\p{L}\p{N}/-])(?:\.(?=\s+\p{Ll}))?/gu, '$1 метра'],
-    [/\s&\s/g, ' и '], [/№\s?/g, 'номер '], [/\s*→\s*/g, ' към '], [/\s+[~≈]\s*(?=\d)/g, ' около '],
+    [/\s&\s/g, ' и '], [/№\s?/g, 'номер '], [/\s+[~≈]\s*(?=\d)/g, ' около '],
+];
+
+// Symbols a voice reads oddly or by name ("наклонена черта", "звездичка", the name of
+// an emoji, "икс икс век") — replaced by what a narrator would say, or dropped. Checked
+// against Google Chirp 3 HD with the symbol test (js/probe.js).
+const ORD = ['', 'първи', 'втори', 'трети', 'четвърти', 'пети', 'шести', 'седми', 'осми', 'девети', 'десети', 'единадесети',
+    'дванадесети', 'тринадесети', 'четиринадесети', 'петнадесети', 'шестнадесети', 'седемнадесети', 'осемнадесети',
+    'деветнадесети', 'двадесети', 'двадесет и първи'];
+const ROMAN = { I: 1, V: 5, X: 10, L: 50, C: 100 };
+function roman(r) {
+    let n = 0;
+    for (let i = 0; i < r.length; i++) {
+        const v = ROMAN[r[i]], w = ROMAN[r[i + 1]] || 0;
+        n += v < w ? -v : v;
+    }
+    return n;
+}
+const GREEK = { α: 'алфа', β: 'бета', γ: 'гама', δ: 'делта', Δ: 'делта', ε: 'епсилон', ζ: 'дзета', η: 'ета', θ: 'тета', λ: 'ламбда',
+    μ: 'мю', ν: 'ню', π: 'пи', ρ: 'ро', σ: 'сигма', Σ: 'сигма', τ: 'тау', φ: 'фи', χ: 'хи', ψ: 'пси', ω: 'омега', Ω: 'омега' };
+const SYMBOLS = [
+    // "XX век", "20 век", "III хилядолетие" → ordinal words
+    [/(?<![\p{L}\p{N}])([IVXLC]{1,6}|\d{1,2})\s+(век|века|столетие|хилядолетие)(?![\p{L}])/gu, (m, n, w) => {
+        const v = /\d/.test(n) ? Number(n) : roman(n);
+        if (!(v >= 1 && v <= 21)) return m;
+        return `${w.startsWith('век') ? ORD[v] : ORD[v].replace(/и$/, 'о')} ${w}`;   // "трето хилядолетие"
+    }],
+    // emoji, pictographs, arrows, bullets, check marks, box drawing: dropped
+    [/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}]/gu, ''],
+    [/[•·▪▫■□►▶◄◀●○◆◇★☆✓✔✗✘※†‡¶]/gu, ' '],
+    [/\s*[→←↑↓↔⇒⇐⇔⟶⟹➔➜]\s*/gu, ', '],
+    // numbers: thousands groups ("300 000" was read digit by digit), minus, ranges, fractions
+    [/(\d)[   ](?=\d{3}(?!\d))/g, '$1'],
+    [/(^|[\s(])[-−–](?=\d)/gu, '$1минус '],
+    [/(?<![\p{L}])(между)\s+(\d+)\s?[–—-]\s?(\d+)/giu, '$1 $2 и $3'],
+    [/(?<![\p{L}])(от\s+)?(\d+)\s?[–—-]\s?(\d+)/giu, (m, from, a, b) => `${from || 'от '}${a} до ${b}`],
+    [/(\d)\s?\/\s?(\d)/g, '$1 на $2'],
+    [/½/g, ' половина'], [/¼/g, ' една четвърт'], [/¾/g, ' три четвърти'],
+    [/(\d)\s?[×x]\s?(\d)/g, '$1 по $2'], [/\s?×\s?/g, ' по '],
+    [/\s?±\s?/g, ' плюс-минус '], [/(\d)\s?\+\s?(\d)/g, '$1 плюс $2'], [/\s?\+\s?/g, ' и '],
+    [/\s?(?:≈|~)\s?/g, ' около '], [/\s?=\s?/g, ' е равно на '], [/\s?≠\s?/g, ' не е равно на '],
+    [/\s?≤\s?/g, ' по-малко или равно на '], [/\s?≥\s?/g, ' по-голямо или равно на '],
+    [/(\d)\s?<\s?(\d)/g, '$1 е по-малко от $2'], [/(\d)\s?>\s?(\d)/g, '$1 е по-голямо от $2'], [/[<>]/g, ' '],
+    [/(\d)\s?‰/g, '$1 промила'], [/§\s?/g, 'параграф '],
+    [/\$\s?(\d[\d.,]*)/g, '$1 долара'], [/(\d)\s?\$/g, '$1 долара'], [/€\s?(\d[\d.,]*)/g, '$1 евро'], [/(\d)\s?€/g, '$1 евро'],
+    [/(\d)\s?(?:лв\.?|BGN)(?![\p{L}])/gu, '$1 лева'],
+    [/[αβγδΔεζηθλμνπρσΣτφχψωΩ]/g, (c) => ` ${GREEK[c]} `],
+    // word slashes: "и/или" → "или", "учен/изследовател" → "учен или изследовател"
+    [/(?<![\p{L}])(и)\/(или)(?![\p{L}])/giu, (m, i, ili) => (i === 'И' ? 'Или' : 'или')], [/(\p{L})\s?\/\s?(\p{L})/gu, '$1 или $2'], [/\//g, ' '],
+    // brackets become commas (Chirp drops the voice into an aside or reads them oddly)
+    [/\s*[([{]\s*/g, ', '], [/\s*[)\]}]\s*(?=[.,;:!?…])/g, ''], [/\s*[)\]}]\s*/g, ', '],
+    // marks with no sound: Markdown, programming and typographic leftovers
+    [/[*#_~^|\\`@]+/g, ' '],
+    // quotes: dropped (the voice may stop on them or change tone)
+    [/["„“”«»‘’‚‹›]/g, ''], [/(^|\s)'|'(?=\s|$)/g, '$1'],
+    // semicolon → comma; dashes inside a sentence → comma (a dash before a word is read as a sound by some voices)
+    [/\s*;\s*/g, ', '], [/\s+[–—]\s+/g, ', '], [/\s*[–—]{2,}\s*/g, ', '],
+    [/\.{2,}/g, '…'], [/([!?]){2,}/g, '$1'],
+    [/(\p{L}) -(?=\p{L})/gu, '$1 '],
+    [/,\s*,+/g, ','], [/,\s*([.!?…:])/g, '$1'], [/^\s*,\s*/g, ''],
 ];
 
 export function speakable(t) {
     let s = String(t);
     for (const [re, to] of SPOKEN.slice(0, 2)) s = s.replace(re, to);
+    s = s.replace(/(\p{L})\s?²/gu, '$1 на квадрат').replace(/(\p{L})\s?³/gu, '$1 на куб');
     s = cleanForSpeech(s, 'bg');
     for (const [re, to] of SPOKEN.slice(2)) s = s.replace(re, to);
-    return s.replace(/\s{2,}/g, ' ').trim();
+    for (const [re, to] of SYMBOLS) s = s.replace(re, to);
+    return s.replace(/\s{2,}/g, ' ').replace(/\s+([.,!?…:])/g, '$1').trim();
 }
 
 // Raw text (pasted, a .txt/.md file) → paragraphs ready to be spoken. A blank line
