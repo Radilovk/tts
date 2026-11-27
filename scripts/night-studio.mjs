@@ -148,8 +148,19 @@ function geminiPcm(data) {
         const reason = data?.candidates?.[0]?.finishReason || 'no audio';
         throw Object.assign(new Error(`Gemini: ${reason}`), { permanent: /SAFETY|PROHIBITED|BLOCK/.test(reason) });
     }
-    const rate = Number((part.inlineData.mimeType || '').match(/rate=(\d+)/)?.[1] || 24000);
-    const raw = Buffer.from(part.inlineData.data, 'base64');
+    let rate = Number((part.inlineData.mimeType || '').match(/rate=(\d+)/)?.[1] || 24000);
+    let raw = Buffer.from(part.inlineData.data, 'base64');
+    // Gemini 3.8 answers a WAV file: skip its header (older models: raw PCM)
+    if (raw.length > 44 && raw.toString('latin1', 0, 4) === 'RIFF') {
+        let o = 12;
+        while (o + 8 <= raw.length) {
+            const id = raw.toString('latin1', o, o + 4), size = raw.readUInt32LE(o + 4);
+            if (id === 'fmt ') rate = raw.readUInt32LE(o + 12);
+            if (id === 'data') { raw = raw.subarray(o + 8, Math.min(raw.length, o + 8 + size)); break; }
+            o += 8 + size + (size & 1);
+        }
+        raw = Buffer.from(raw.subarray(0, raw.length & ~1));
+    }
     const pcm = levelLoudness(trimSilence(new Int16Array(raw.buffer, raw.byteOffset, raw.length >> 1), rate));
     const u = data.usageMetadata || {};
     return { pcm, rate, dur: pcm.length / rate, finish: data.candidates[0].finishReason || '',
@@ -186,7 +197,9 @@ async function mp3Duration(bytes) {
 function geminiCost(model, inT, outT, batch) {
     const m = model || '';
     let p = { in: 0.5, out: 10 };
-    if (/3\.8-flash/.test(m)) p = Date.now() < Date.UTC(2027, 0, 1) ? { in: 0.5, out: 9 } : { in: 0.5, out: 18 };
+    const y2027 = Date.now() >= Date.UTC(2027, 0, 1);   // 3.8 list prices double on 1 Jan 2027
+    if (/3\.8-flash-lite/.test(m)) p = y2027 ? { in: 1, out: 12 } : { in: 0.5, out: 6 };
+    else if (/3\.8-flash/.test(m)) p = y2027 ? { in: 1, out: 18 } : { in: 0.5, out: 9 };
     else if (/3\.1-flash|pro/.test(m)) p = { in: 1, out: 20 };
     return (inT * p.in + outT * p.out) / 1e6 * (batch ? 0.5 : 1);
 }
@@ -214,8 +227,11 @@ function todayPacific() {
 
 // ---------- engines ----------
 
-// The models that narrate with the same voices; each has its own free daily quota
-const FREE_MODELS = ['gemini-2.5-flash-tts', 'gemini-2.5-flash-preview-tts'];
+// Other models whose free daily quota may narrate the same book: only for the 2.5
+// requests (style inside the text). A 3.8 request (style in speech_metadata) stays on its
+// own model — another model would sound different. The 2.5 models shut down 18.12.2026.
+const freeModels = (model) => (/gemini-(?:3\.[89]|[4-9])/.test(model || '') || Date.now() >= Date.UTC(2026, 11, 18)
+    ? [] : ['gemini-2.5-flash-tts', 'gemini-2.5-flash-preview-tts']);
 
 const isDaily = (e) => /PerDay/i.test(e.raw || '');
 const retryIn = (e) => Number(((e.raw || '').match(/retry in ([\d.]+)\s*s/i) || (e.raw || '').match(/"retryDelay":\s*"([\d.]+)s"/) || [])[1]) || 0;
@@ -300,7 +316,7 @@ async function runFree(job, book, missing) {
         return 0;
     }
     if (job.freeDay === todayPacific()) { log('  free quota already used today'); return 0; }
-    const state = { key: FREE_KEY, models: [...new Set([book.model, ...FREE_MODELS])], usedModels: new Set(), minuteWaits: 0, requests: 0 };
+    const state = { key: FREE_KEY, models: [...new Set([book.model, ...freeModels(book.model)])], usedModels: new Set(), minuteWaits: 0, requests: 0 };
     const ready = new Set(job.readyKeys || []);
     let made = 0;
     for (const item of missing) {

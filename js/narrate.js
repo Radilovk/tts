@@ -22,12 +22,14 @@
 // Microsoft voices (Azure) are not generative — the same text always sounds the same —
 // so their seams are inaudible anyway; paragraphs keep a short breath there.
 
-import { prepareParagraph, cloudNarratePcm, azureNarratePcm, speechExtent, levelLoudness, pcmToWav, cloudBilledChars, azureBilledChars } from './engines.js';
+import { prepareParagraph, cloudNarratePcm, azureNarratePcm, geminiNarratePcm, quotaKind, speechExtent, levelLoudness, pcmToWav, cloudBilledChars, azureBilledChars } from './engines.js';
 import { splitSentences, cleanForSpeech } from './text.js';
 
 export const RATE = 24000;
 export const GOOGLE_MAX_BYTES = 4600;   // API limit 5000 bytes per request
 export const AZURE_MAX_BYTES = 9000;    // Azure: up to 10 min of audio per request; ~4500 Cyrillic chars
+// Gemini: the passage length set in Настройки → Gemini (characters; ~2 bytes each in Cyrillic)
+export const geminiMaxBytes = (passageChars = 6000) => Math.round(passageChars * 1.9);
 const SENTENCE_GAP = 0.5;               // seconds between two blocks (= a sentence pause)
 const EDGE = 0.03;                      // kept around the speech of each block
 
@@ -232,8 +234,32 @@ export function planBlocks(paras, { maxBytes = GOOGLE_MAX_BYTES, lang = 'bg', ke
     return blocks;
 }
 
+// Gemini: the free key first (free of charge until its daily quota ends), then the paid key.
+// opts.gemini = { model, voice, style, customStyle, lang }; afterGemini(r, paid) records usage.
+async function geminiBlock(opts, text, signal, note) {
+    const g = { ...opts.gemini, text, signal, onSplit: (why) => note(`прочетен на части (${why})`) };
+    for (let waits = 0; opts.freeKey && !opts.freeSpent;) {
+        try {
+            const r = await geminiNarratePcm({ ...g, apiKey: opts.freeKey, retry429: false });
+            opts.afterGemini?.(r, false);
+            return r;
+        } catch (e) {
+            if (e.name === 'AbortError' || e.status !== 429) throw e;
+            const q = quotaKind(e);
+            // Only the per-minute limit: wait and stay free
+            if (!q.daily && waits < 5) { waits++; await new Promise((r) => setTimeout(r, (q.wait || 30) * 1000 + 500)); continue; }
+            if (!opts.apiKey) throw e;
+            opts.freeSpent = true;      // today's free quota is used up: the rest on the paid key
+            note('безплатният дневен лимит свърши — продължавам с платения ключ');
+        }
+    }
+    const r = await geminiNarratePcm({ ...g, apiKey: opts.apiKey });
+    opts.afterGemini?.(r, true);
+    return r;
+}
+
 // Trim a block to its speech (keeps EDGE) and level it.
-function tidy(pcm, rate) {
+export function tidy(pcm, rate) {
     const x = speechExtent(pcm, rate);
     const a = Math.max(0, Math.floor((x.start - EDGE) * rate));
     const b = Math.min(pcm.length, Math.ceil((x.end + EDGE) * rate));
@@ -266,11 +292,13 @@ export async function narrateBlocks(blocks, opts) {
     let done = 0, next = 0;
     const one = async (i) => {
         const text = blocks[i];
-        const key = cache ? await blockKey(engine, voice, text) : '';
+        const key = cache ? await blockKey(engine, opts.voiceKey || voice, text) : '';
         let pcm = key ? await cache.get(key) : null;
         if (!pcm) {
             const note = (m) => { const msg = `Блок ${i + 1}: ${m}`; issues.push(msg); onIssue?.(msg); };
-            const r = engine === 'azure'
+            const r = engine === 'gemini'
+                ? await geminiBlock(opts, text, signal, note)
+                : engine === 'azure'
                 ? await azureNarratePcm({ key: opts.azureKey, region: opts.region, text, voice, locale: opts.locale || 'bg-BG', signal, onSplit: (e) => note(`прочетен на две части (${e.message})`) })
                 : await cloudNarratePcm({ apiKey: opts.apiKey, text, voice, locale, signal, beforeRequest: opts.beforeRequest, afterRequest: opts.afterRequest, onIssue: note });
             if (r.problem) note(r.problem);

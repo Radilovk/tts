@@ -5,7 +5,7 @@
 
 import * as db from './db.js';
 import { buildChapterModel, chunkBoundaries, nextBoundary, chunkText, charLen, LOCALES } from './text.js';
-import { cloudNarrate, cloudBilledChars, geminiSynthesize, geminiCost, cloudTier, deviceVoices, azureSynthesize, azureBilledChars, isVerifiedGeminiModel, quotaKind } from './engines.js';
+import { cloudNarrate, cloudBilledChars, geminiSynthesize, geminiCost, cloudTier, deviceVoices, azureSynthesize, azureBilledChars, isVerifiedGeminiModel, isTranscriptTts, quotaKind } from './engines.js';
 import { pendingKeys } from './batch.js';
 import { sharedGetAudio, sharedPutAudio } from './shared.js';
 import { recordUsage, monthlyGeminiUsd, cloudReserve, cloudRelease, reportCloudUsage, azureFreeLeft } from './usage.js';
@@ -1227,7 +1227,9 @@ function markModelExhausted(model) {
 function freeModels(st) {
     let known = [];
     try { known = JSON.parse(localStorage.getItem('rz_gemini_models') || '[]'); } catch {}
-    const all = [st.geminiModel, ...known.filter((m) => isVerifiedGeminiModel(m) && !/native|live|dialog/.test(m))];
+    // A 3.8 narrator stays on its own model: another one would sound different
+    const all = isTranscriptTts(st.geminiModel) ? [st.geminiModel]
+        : [st.geminiModel, ...known.filter((m) => isVerifiedGeminiModel(m) && !isTranscriptTts(m) && !/native|live|dialog/.test(m))];
     const used = exhaustedModels();
     return [...new Set(all)].filter((m) => m && !used.includes(m));
 }
