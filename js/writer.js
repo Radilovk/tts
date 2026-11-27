@@ -307,31 +307,45 @@ export async function writeNarration({ apiKey, model = '', mode, input, scenario
     for (const s of sections) s.chars = Math.max(1500, Math.round((Number(s.chars) || sum / sections.length) / sum * goal));
     const planText = `Заглавие: ${plan.title || ''}\nФакти: ${(plan.facts || []).join('; ')}\nЧасти:\n${sections.map((s, i) => `${i + 1}. ${s.name} (~${s.chars} знака): ${s.beats || ''}`).join('\n')}`;
 
-    // 2. Each act in turn, continuing the text so far
+    // 2. The acts. Each act is written from the PLAN (its own beats + the whole outline),
+    // not from the previous act's full text, so the acts are independent and can be written
+    // in parallel — the slow part used to be N sequential, dependent calls. The edit pass
+    // smooths the few transitions. onPart (the app's "listen while writing") keeps order, so
+    // it forces sequential; parallel (default here, and in the video tool) writes all at once.
     const parts = [];
+    let wrote = 0;
     const writePart = async (i, extra = '') => {
         const s = sections[i];
-        const before = parts.slice(0, i).join('\n\n');
+        const neighbours = sections.map((x, k) => `${k === i ? '→ ' : ''}${k + 1}. ${x.name}: ${x.beats || ''}`).join('\n');
         const prompt = `${source}
 
 ПЛАН НА ЦЕЛИЯ РАЗКАЗ:
 ${planText}
 
-${before ? `ТЕКСТЪТ ДОТУК (последната част):\n…${before.slice(-5000)}\n\n` : ''}Напиши част ${i + 1} от ${sections.length}: „${s.name}“ — ${s.beats || ''}
+Пишеш част ${i + 1} от ${sections.length}: „${s.name}“.
+Съседни части (за да знаеш какво е преди и след теб, но НЕ ги преразказвай):
+${neighbours}
+
+Напиши САМО част ${i + 1} — „${s.name}“: ${s.beats || ''}
 Обем: около ${s.chars} знака (не по-малко от ${Math.round(s.chars * 0.85)}). ${extra}
-Продължи естествено от текста дотук, без да повтаряш вече казаното${i === sections.length - 1 ? '; това е финалът на целия разказ' : '; не завършвай разказа — следват още части'}.
+${i === 0 ? 'Това е началото на разказа.' : i === sections.length - 1 ? 'Това е финалът на целия разказ.' : 'Това е средна част — започни така, че да продължава естествено предходната, и не завършвай разказа.'} Не повтаряй идеи от другите части.
 Върни само самия текст за четене на глас: абзаци, разделени с празен ред, без заглавия, без номера, без Markdown, без бележки за музика или паузи.`;
-        const label = `Пиша: ${s.name} (${i + 1}/${sections.length})`;
         const r = await call({
             system: scenario, prompt, what: s.name, task: 'write', maxTokens: Math.round(s.chars * 0.8) + 24576,
-            onDelta: (n, thinking, m) => onProgress?.(0.08 + 0.8 * i / sections.length, `${label} · ${m} · ${thinking && !n ? 'обмисля…' : `${n} знака`}`),
+            onDelta: (n, thinking, m) => onProgress?.(0.08 + 0.8 * wrote / sections.length, `Пиша: ${s.name} · ${m} · ${thinking && !n ? 'обмисля…' : `${n} знака`}`),
         });
         return cleanNarration(r.text);
     };
-    for (let i = 0; i < sections.length; i++) {
-        onProgress?.(0.08 + 0.8 * i / sections.length, `Пиша: ${sections[i].name} (${i + 1}/${sections.length})`);
-        parts[i] = await writePart(i);
-        onPart?.(i, parts[i], sections.length);
+    if (onPart) {
+        // Ordered: each act handed over as written (the app voices it while the next is written)
+        for (let i = 0; i < sections.length; i++) {
+            onProgress?.(0.08 + 0.8 * i / sections.length, `Пиша: ${sections[i].name} (${i + 1}/${sections.length})`);
+            parts[i] = await writePart(i);
+            wrote++;
+            onPart(i, parts[i], sections.length);
+        }
+    } else {
+        await Promise.all(sections.map((_, i) => writePart(i).then((t) => { parts[i] = t; wrote++; })));
     }
 
     // 3. Too short: the acts furthest below their share are written again, longer
