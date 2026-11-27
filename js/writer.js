@@ -53,16 +53,34 @@ function textOf(data) {
     return parts.filter((p) => !p.thought && typeof p.text === 'string').map((p) => p.text).join('').trim();
 }
 
+// The newest Flash models "think" at length before every answer by default (minutes for
+// a long part). Writing a story by a detailed plan, and editing, need little of that:
+// thinking_level "low" — the fastest level every current Flash model accepts.
+let thinkingOk = true;
+
 async function generate({ apiKey, model, system, prompt, search = false, json = false, maxTokens = 16384, signal }) {
-    const body = {
+    const body = (thinking) => ({
         systemInstruction: { parts: [{ text: system }] },
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: { temperature: json ? 0.6 : 0.85, maxOutputTokens: maxTokens, ...(json && !search ? { responseMimeType: 'application/json' } : {}) },
+        generationConfig: {
+            temperature: json ? 0.6 : 0.85, maxOutputTokens: maxTokens,
+            ...(json && !search ? { responseMimeType: 'application/json' } : {}),
+            ...(thinking ? { thinkingConfig: { thinkingLevel: 'low' } } : {}),
+        },
         ...(search ? { tools: [{ google_search: {} }] } : {}),
-    };
-    const data = await withRetry(() => fetchJson(`${BASE}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const send = (thinking) => withRetry(() => fetchJson(`${BASE}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body(thinking)),
     }, 240000, signal), signal, 4);
+    let data;
+    try {
+        data = await send(thinkingOk);
+    } catch (e) {
+        // A model without thinking levels: ask once more without, and never again
+        if (!thinkingOk || e.status !== 400 || !/think/i.test(e.message + (e.raw || ''))) throw e;
+        thinkingOk = false;
+        data = await send(false);
+    }
     const u = data.usageMetadata || {};
     return { text: textOf(data), inTokens: u.promptTokenCount || 0, outTokens: (u.candidatesTokenCount || 0) + (u.thoughtsTokenCount || 0), finish: data?.candidates?.[0]?.finishReason || '' };
 }
@@ -91,7 +109,10 @@ const len = (parts) => parts.reduce((a, p) => a + p.length, 0) + Math.max(0, par
 
 // → { title, text, model, inTokens, outTokens, plan }
 // onProgress(fraction, label)
-export async function writeNarration({ apiKey, model, mode, input, scenario = SCENARIO, minChars = 25000, search = true, signal, onProgress }) {
+// onPart(i, text, total): each act as soon as it is written — the caller edits and voices it
+// while the next one is being written. expand=false (with onPart): no rewriting at the end
+// (a voiced act is never replaced), so each act is asked a little longer from the start.
+export async function writeNarration({ apiKey, model, mode, input, scenario = SCENARIO, minChars = 25000, search = true, signal, onProgress, onPart, expand = true }) {
     if (!apiKey) throw new Error('Нужен е Google (Gemini) API ключ.');
     const material = String(input || '').trim();
     if (!material) throw new Error(mode === 'topic' ? 'Въведете тема.' : 'Няма текст за преработка.');
@@ -102,7 +123,7 @@ export async function writeNarration({ apiKey, model, mode, input, scenario = SC
         usage.inTokens += r.inTokens; usage.outTokens += r.outTokens;
         return r;
     };
-    const goal = Math.round(minChars * 1.1);
+    const goal = Math.round(minChars * (expand ? 1.1 : 1.2));
     scenario = `${scenario}\n\n${SPOKEN_RULES}`;
     const source = mode === 'topic' ? `ТЕМА / РАЗСЪЖДЕНИЕ:\n${material}` : `НАУЧЕН МАТЕРИАЛ (преразкажи го по сценария; не добавяй твърдения, които не следват от него или от установената наука):\n${material}`;
 
@@ -148,10 +169,11 @@ ${before ? `ТЕКСТЪТ ДОТУК (последната част):\n…${bef
     for (let i = 0; i < sections.length; i++) {
         onProgress?.(0.08 + 0.8 * i / sections.length, `Пиша: ${sections[i].name} (${i + 1}/${sections.length})`);
         parts[i] = await writePart(i);
+        onPart?.(i, parts[i], sections.length);
     }
 
     // 3. Too short: the acts furthest below their share are written again, longer
-    for (let round = 0; round < 3 && len(parts) < minChars; round++) {
+    for (let round = 0; expand && round < 3 && len(parts) < minChars; round++) {
         const order = sections.map((s, i) => ({ i, gap: s.chars - parts[i].length })).sort((a, b) => b.gap - a.gap);
         const i = order[0].i;
         onProgress?.(0.9, `Разширявам: ${sections[i].name}`);
@@ -198,18 +220,21 @@ export async function editForVoice({ apiKey, model, text, signal, onProgress }) 
     if (!apiKey) throw new Error('Нужен е Google (Gemini) API ключ.');
     model ||= await pickWriterModel(apiKey);
     const list = pieces(text);
-    const out = [];
-    let inTokens = 0, outTokens = 0, kept = 0;
-    for (let i = 0; i < list.length; i++) {
-        onProgress?.(i / list.length, `Редактирам за слушане: ${i + 1} от ${list.length}`);
+    const out = new Array(list.length);
+    let inTokens = 0, outTokens = 0, kept = 0, done = 0, next = 0;
+    // Pieces are independent (each gets the end of the one before as context): 3 at a time
+    const one = async (i) => {
         const before = i ? `(Предходният откъс завършва така: „…${list[i - 1].slice(-300)}“)\n\n` : '';
         const r = await generate({ apiKey, model, system: EDITOR, prompt: `${before}ОТКЪС ЗА РЕДАКЦИЯ:\n\n${list[i]}`, maxTokens: 16384, signal });
         inTokens += r.inTokens; outTokens += r.outTokens;
         const t = cleanNarration(r.text);
         const ratio = t.length / list[i].length;
-        if (t && ratio > 0.85 && ratio < 1.35 && r.finish !== 'MAX_TOKENS') out.push(t);
-        else { out.push(list[i]); kept++; }
-    }
+        if (t && ratio > 0.85 && ratio < 1.35 && r.finish !== 'MAX_TOKENS') out[i] = t;
+        else { out[i] = list[i]; kept++; }
+        onProgress?.(++done / list.length, `Редактирам за слушане: ${done} от ${list.length}`);
+    };
+    onProgress?.(0, `Редактирам за слушане: 0 от ${list.length}`);
+    await Promise.all(Array.from({ length: Math.min(3, list.length) }, async () => { while (next < list.length) await one(next++); }));
     onProgress?.(1, '');
     return { text: out.join('\n\n'), model, inTokens, outTokens, kept };
 }

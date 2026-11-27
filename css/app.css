@@ -486,3 +486,6 @@ label.list-item { cursor: pointer; }
 .lt-link { word-break: break-all; }
 .lt-topic { min-height: 110px !important; }
 #ltSource { margin-top: 4px; }
+.lt-live { margin-top: 18px; min-width: 240px; }
+.import-card { max-width: 100%; padding: 0 24px; text-align: center; }
+.import-card p { line-height: 1.4; }
