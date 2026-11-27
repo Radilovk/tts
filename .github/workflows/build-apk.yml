@@ -41,6 +41,10 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
+      # Caches the Gradle dependencies between builds: fewer downloads from Maven Central,
+      # which answers 429 (Too Many Requests) to busy runners
+      - uses: gradle/actions/setup-gradle@v4
+
       - uses: android-actions/setup-android@v3
         with:
           packages: 'platform-tools'
@@ -79,7 +83,12 @@ jobs:
           V_NAME="1.0.${V_CODE}"
           echo "V_NAME=${V_NAME}" >> "$GITHUB_ENV"
           cd android
-          ./gradlew --no-daemon assembleRelease -PrzVersionName="$V_NAME" -PrzVersionCode="$V_CODE"
+          # A temporary refusal of a dependency server (429, 5xx) is retried, not a failed build
+          for i in 1 2 3; do
+            ./gradlew --no-daemon assembleRelease -PrzVersionName="$V_NAME" -PrzVersionCode="$V_CODE" && break
+            [ "$i" = 3 ] && exit 1
+            echo "Gradle failed (try $i) — retrying in $((i * 60)) s"; sleep $((i * 60))
+          done
           cd ..
           mkdir -p release
           cp android/app/build/outputs/apk/release/app-release.apk "release/Razkazvach.apk"
