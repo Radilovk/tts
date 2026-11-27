@@ -1,24 +1,25 @@
-// "Текст → аудио файл": paste or open a long text, pick a voice, get one audio file
-// (Ogg/Opus or WAV) to save or share by a link. The engine is js/narrate.js.
+// "Текст → аудио файл": a text (yours, retold, or written from a topic), a voice, and
+// one audio file to save or share by a link. The engine is js/narrate.js.
 
 import * as db from './db.js';
-import { prepareLongText, planBlocks, narrateBlocks, billedChars, CHIRP_VOICES, AZURE_VOICES, GOOGLE_MAX_BYTES, AZURE_MAX_BYTES, RATE } from './narrate.js';
+import { prepareLongText, planBlocks, narrateBlocks, billedChars, CHIRP_MAIN, AZURE_VOICES, GOOGLE_MAX_BYTES, AZURE_MAX_BYTES, RATE } from './narrate.js';
 import { pcmToWav, parseWavPcm, PRICES } from './engines.js';
 import { encodeOpus } from './opus.js';
 import { detectLang } from './text.js';
 import { parseBook } from './parsers.js';
 import { libraryApi } from './shared.js';
 import { writeNarration, pickWriterModel, editForVoice } from './writer.js';
-import { SCENARIO, SCENARIO_NAME } from './scenario.js';
-import { runSymbolProbe, probeMarkdown, PROBE_CASES } from './probe.js';
+import { SCENARIO } from './scenario.js';
 import { recordUsage, cloudReserve, cloudRelease, reportCloudUsage, cloudUsedChars, cloudLimitChars, azureFreeLeft } from './usage.js';
 
 const DRAFT = 'rz_longtext';
-// source: 'text' — read the text as it is; 'rewrite' — retell it by the scenario;
-// 'topic' — write it from a topic. scenario: '' = the owner's default (js/scenario.js)
-const DEFAULT_DRAFT = { text: '', topic: '', source: 'text', scenario: '', title: '', engine: 'google', google: 'bg-BG-Chirp3-HD-Charon', azure: 'bg-BG-KalinaNeural', format: 'opus', writer: 'flash', review: true, reviewed: '' };
-// review: the text goes through the AI editor for the voice first; reviewed: the text as
-// it came out of the editor (so the same text is never edited — and paid for — twice)
+// source: 'text' — read the text as it is; 'rewrite' — retell it by the scenario
+// (js/scenario.js); 'topic' — write it from a topic.
+const DEFAULT_DRAFT = { text: '', topic: '', source: 'text', title: '', engine: 'google', google: 'bg-BG-Chirp3-HD-Charon', azure: 'bg-BG-KalinaNeural', reviewed: '' };
+// Fixed, not asked: the newest Flash model writes; every text goes through the editor for
+// the voice (when a Google key is there); the file is Ogg/Opus (WAV where the browser
+// cannot encode Opus). reviewed: the text as the editor returned it, so the same text is
+// never edited — and paid for — twice.
 const SOURCE_HINTS = {
     text: 'Поставете текста тук (25 000+ знака са наред) или отворете файл',
     rewrite: 'Поставете научния материал — ИИ ще го преразкаже като документален аудиоразказ по сценария',
@@ -72,7 +73,7 @@ function keyOk(st) {
 export function openTextToFile() {
     const render = (body) => {
         const st = ui.settings();
-        const voices = draft.engine === 'azure' ? AZURE_VOICES : CHIRP_VOICES;
+        const voices = draft.engine === 'azure' ? AZURE_VOICES : CHIRP_MAIN;
         const cur = draft.engine === 'azure' ? draft.azure : draft.google;
         body.innerHTML = `
             <div class="seg" id="ltSource">
@@ -83,20 +84,11 @@ export function openTextToFile() {
             <div class="group">
                 <textarea id="ltText" class="input lt-text ${draft.source === 'topic' ? 'lt-topic' : ''}" placeholder="${SOURCE_HINTS[draft.source]}" spellcheck="false">${ui.esc(draft.source === 'topic' ? draft.topic : draft.text)}</textarea>
                 <div class="lt-row">
-                    <button class="btn btn-ghost btn-sm" id="ltOpen">Отвори файл</button>
-                    <input class="input" id="ltTitle" placeholder="Заглавие на файла" value="${ui.esc(draft.title)}">
+                    ${draft.source !== 'topic' ? '<button class="btn btn-ghost btn-sm" id="ltOpen">Отвори файл</button>' : ''}
+                    <input class="input" id="ltTitle" placeholder="Заглавие" value="${ui.esc(draft.title)}">
                 </div>
                 <input type="file" id="ltFile" hidden accept=".txt,.md,.markdown,.docx,.epub,.fb2,.html,.htm,.pdf">
             </div>
-            <div class="group">
-                <div class="row"><span class="row-label">Преглед и редакция за глас<small>${draft.source === 'text' && draft.text && draft.text === draft.reviewed ? 'текстът вече е редактиран ✓' : 'Gemini изглажда текста за слушане: съкращения, скоби, символи, дълги изречения — без да мени съдържанието'}</small></span>
-                    <div class="seg lt-seg-sm" id="ltReview"><button data-r="1" class="${draft.review ? 'on' : ''}">Да</button><button data-r="0" class="${!draft.review ? 'on' : ''}">Не</button></div></div>
-            </div>
-            ${draft.source !== 'text' ? `<div class="group">
-                <div class="row"><span class="row-label">Сценарий<small>${ui.esc(draft.scenario ? 'ваш вариант' : SCENARIO_NAME)} · ≥ 25 000 знака</small></span><button class="btn btn-ghost btn-sm" id="ltScenario">Промени</button></div>
-                <div class="row"><span class="row-label">Модел за писане<small>най-новият наличен за ключа</small></span>
-                    <div class="seg lt-seg-sm" id="ltWriter"><button data-w="flash" class="${draft.writer !== 'pro' ? 'on' : ''}">Flash</button><button data-w="pro" class="${draft.writer === 'pro' ? 'on' : ''}">Pro</button></div></div>
-            </div>` : ''}
             <div class="group">
                 <div class="group-title">Глас</div>
                 <div class="seg" id="ltEngine">
@@ -106,25 +98,15 @@ export function openTextToFile() {
                 <div class="lt-voices" id="ltVoices">
                     ${voices.map((v) => `<button class="lt-voice ${v.name === cur ? 'on' : ''}" data-v="${v.name}"><b>${ui.esc(v.label)}</b><small>${v.gender === 'f' ? 'жен.' : 'мъж.'} · ${ui.esc(v.note)}</small></button>`).join('')}
                 </div>
-                ${draft.engine === 'google' ? `<p class="hint">Чете ли гласът символите правилно? <a href="#" id="ltProbe">Тест на символите →</a></p>` : ''}
-                ${keyOk(st) ? '' : `<p class="hint">${draft.engine === 'azure' ? 'Нужен е ключ за Microsoft гласовете.' : 'Нужен е Google API ключ (Google HD).'} <a href="#" id="ltSetup">Настройки →</a></p>`}
-            </div>
-            <div class="group">
-                <div class="group-title">Формат</div>
-                <div class="seg" id="ltFormat">
-                    <button data-f="opus" class="${draft.format === 'opus' ? 'on' : ''}">Ogg/Opus · малък</button>
-                    <button data-f="wav" class="${draft.format === 'wav' ? 'on' : ''}">WAV · без загуба</button>
-                </div>
-                <p class="hint">MP3 и видео за YouTube (картинка + глас, MP4): <code>node scripts/narrate.mjs текст.txt --video корица.jpg</code></p>
+                ${keyOk(st) ? '' : `<p class="hint">${draft.engine === 'azure' ? 'Нужен е ключ за Microsoft гласовете.' : 'Нужен е Google API ключ.'} <a href="#" id="ltSetup">Настройки →</a></p>`}
             </div>
             <div id="ltInfo" class="usage"></div>
             <div class="catalog-actions">${draft.source === 'text'
                 ? `<button class="btn btn-primary" id="ltGo">Създай аудио файла</button>
-                   ${draft.review && draft.text !== draft.reviewed ? '<button class="btn btn-ghost" id="ltEdit">Само редактирай текста (ще го видите)</button>' : ''}
                    <button class="btn btn-ghost" id="ltListen">Слушай в приложението</button>`
                 : `<button class="btn btn-primary" id="ltWriteGo">Напиши и създай аудио файла</button>
-                   <button class="btn btn-ghost" id="ltWrite">Само напиши текста (ще го видите и редактирате)</button>`}</div>
-            ${lastFile ? `<div class="group"><div class="group-title">Последен файл</div>${resultHtml()}</div>` : ''}`;
+                   <button class="btn btn-ghost" id="ltWrite">Само напиши текста</button>`}</div>
+            ${lastFile ? `<div class="group"><div class="group-title">Готов файл</div>${resultHtml()}</div>` : ''}`;
         const info = () => {
             if (draft.source !== 'text') {
                 const box = $('#ltInfo', body);
@@ -132,8 +114,8 @@ export function openTextToFile() {
                 $('#ltWriteGo', body).disabled = !ok || !keyOk(ui.settings());
                 $('#ltWrite', body).disabled = !ok;
                 box.innerHTML = `<div class="usage-item"><div class="top"><span>~30 мин аудио</span><span>≥ 25 000 знака</span></div>
-                    <div class="sub">Gemini пише по сценария на части (план → пролог … финал), после текстът се озвучава. Писането отнема няколко минути.</div>
-                    ${ui.settings().apiKey ? '' : '<div class="sub">Нужен е Google (Gemini) API ключ — Настройки.</div>'}</div>`;
+                    <div class="sub">Пише се като документален разказ — няколко минути.</div>
+                    ${ui.settings().apiKey ? '' : '<div class="sub">Нужен е Google API ключ — Настройки.</div>'}</div>`;
                 return;
             }
             const p = plan();
@@ -141,9 +123,7 @@ export function openTextToFile() {
             const go = $('#ltGo', body);
             if (!p) { box.innerHTML = ''; go.disabled = true; return; }
             go.disabled = !keyOk(ui.settings());
-            const sizes = p.blocks.map((b) => new TextEncoder().encode(b).length);
             box.innerHTML = `<div class="usage-item"><div class="top"><span>~${Math.max(1, Math.round(p.minutes))} мин аудио</span><span>${ui.fmtNum(p.chars)} знака</span></div>
-                <div class="sub">${p.paras.length} абзаца → ${p.blocks.length} ${p.blocks.length === 1 ? 'заявка' : 'заявки'} по ${Math.min(...sizes)}–${Math.max(...sizes)} байта, рязани само в края на изречение</div>
                 <div class="sub">${ui.esc(priceLine(p))}</div></div>`;
         };
         info();
@@ -151,7 +131,8 @@ export function openTextToFile() {
         let t = 0;
         ta.oninput = () => { draft[draft.source === 'topic' ? 'topic' : 'text'] = ta.value; clearTimeout(t); t = setTimeout(() => { saveDraft(); info(); }, 300); };
         $('#ltTitle', body).oninput = (e) => { draft.title = e.target.value; saveDraft(); };
-        $('#ltOpen', body).onclick = () => $('#ltFile', body).click();
+        const open = $('#ltOpen', body);
+        if (open) open.onclick = () => $('#ltFile', body).click();
         $('#ltFile', body).onchange = async (e) => {
             const f = e.target.files[0];
             if (!f) return;
@@ -171,22 +152,13 @@ export function openTextToFile() {
         body.onclick = (e) => {
             const src = e.target.closest('#ltSource [data-s]');
             if (src && src.dataset.s !== draft.source) { draft.source = src.dataset.s; saveDraft(); return ui.rerenderSheet(render); }
-            const wr = e.target.closest('#ltWriter [data-w]');
-            if (wr) { draft.writer = wr.dataset.w; saveDraft(); return ui.rerenderSheet(render); }
-            if (e.target.closest('#ltScenario')) return editScenario();
             if (e.target.closest('#ltWriteGo')) return write(true);
             if (e.target.closest('#ltWrite')) return write(false);
             if (e.target.closest('#ltListen')) return listen();
-            if (e.target.closest('#ltEdit')) return reviewOnly();
-            const rv = e.target.closest('#ltReview [data-r]');
-            if (rv) { draft.review = rv.dataset.r === '1'; saveDraft(); return ui.rerenderSheet(render); }
             const eng = e.target.closest('#ltEngine [data-e]');
             if (eng && eng.dataset.e !== draft.engine) { draft.engine = eng.dataset.e; saveDraft(); return ui.rerenderSheet(render); }
             const v = e.target.closest('#ltVoices [data-v]');
             if (v) { draft[draft.engine === 'azure' ? 'azure' : 'google'] = v.dataset.v; saveDraft(); return ui.rerenderSheet(render); }
-            const fm = e.target.closest('#ltFormat [data-f]');
-            if (fm) { draft.format = fm.dataset.f; saveDraft(); return ui.rerenderSheet(render); }
-            if (e.target.closest('#ltProbe')) { e.preventDefault(); return openProbe(); }
             if (e.target.closest('#ltSetup')) { e.preventDefault(); ui.closeSheet(); ui.openSettings(); return; }
             if (e.target.closest('#ltGo')) return run();
             resultClick(e);
@@ -199,7 +171,7 @@ const $ = (s, root = document) => root.querySelector(s);
 
 function resultHtml() {
     return `<audio controls preload="metadata" src="${lastFile.url}" class="lt-audio"></audio>
-        <p class="hint">${ui.esc(lastFile.name)} · ${(lastFile.blob.size / 1024 / 1024).toFixed(1)} MB · ${Math.round(lastFile.dur / 60)} мин${lastFile.issues ? ` · ${lastFile.issues} забележки (виж Диагностика)` : ''}</p>
+        <p class="hint">${ui.esc(lastFile.name)} · ${(lastFile.blob.size / 1024 / 1024).toFixed(1)} MB · ${Math.round(lastFile.dur / 60)} мин</p>
         <div class="catalog-actions">
             <button class="btn btn-primary" data-lt="save">Запази файла</button>
             <button class="btn btn-ghost" data-lt="link">${lastFile.link ? 'Копирай линка' : 'Качи и вземи линк'}</button>
@@ -258,10 +230,10 @@ const cache = {
 
 // The editor pass inside the progress overlay; false when it failed (toast shown)
 async function review(st, arc, label) {
-    if (!draft.review || !st.apiKey || !draft.text.trim() || draft.text === draft.reviewed) return true;
+    if (!st.apiKey || !draft.text.trim() || draft.text === draft.reviewed) return true;
     try {
         const r = await editForVoice({
-            apiKey: st.apiKey, model: await pickWriterModel(st.apiKey, draft.writer === 'pro' ? 'pro' : 'flash'), text: draft.text,
+            apiKey: st.apiKey, model: await pickWriterModel(st.apiKey, 'flash'), text: draft.text,
             onProgress: (f, l) => { arc.style.strokeDashoffset = 125.7 * (1 - f); if (l) label.textContent = l; },
         });
         draft.text = r.text;
@@ -286,17 +258,9 @@ function overlayOn(text) {
     return { overlay, arc, label };
 }
 
-async function reviewOnly() {
-    ui.closeSheet();
-    const { overlay, arc, label } = overlayOn('Редактирам за слушане…');
-    await review(ui.settings(), arc, label);
-    overlay.classList.add('hidden');
-    openTextToFile();
-}
-
 async function run() {
     const st = ui.settings();
-    if (draft.review && st.apiKey && draft.text.trim() && draft.text !== draft.reviewed) {
+    if (st.apiKey && draft.text.trim() && draft.text !== draft.reviewed) {
         ui.closeSheet();
         const { overlay, arc, label } = overlayOn('Редактирам за слушане…');
         await review(st, arc, label);
@@ -336,13 +300,10 @@ async function run() {
         const title = (draft.title || p.paras[0].slice(0, 60)).trim();
         const name = ui.safeFileName(title);
         let blob = null;
-        if (draft.format === 'opus') {
-            blob = await encodeOpus(res.pcm, RATE, { TITLE: title, COMMENT: 'Озвучено с изкуствен интелект — Разказвач' });
-            if (!blob) ui.toast('Този браузър не записва Opus — файлът е WAV.');
-        }
+        blob = await encodeOpus(res.pcm, RATE, { TITLE: title, COMMENT: 'Озвучено с изкуствен интелект — Разказвач' });
         const file = blob ? { name: `${name}.ogg`, blob } : { name: `${name}.wav`, blob: pcmToWav(res.pcm, RATE) };
         if (lastFile?.url) URL.revokeObjectURL(lastFile.url);
-        lastFile = { ...file, url: URL.createObjectURL(file.blob), dur: res.dur, issues: res.issues.length, engine };
+        lastFile = { ...file, url: URL.createObjectURL(file.blob), dur: res.dur, engine };
         overlay.classList.add('hidden');
         openTextToFile();
     } catch (e) {
@@ -350,23 +311,6 @@ async function run() {
         console.error(e);
         if (e.name !== 'AbortError') ui.toast(e.message || 'Аудио файлът не можа да се създаде.', { error: true, duration: 8000 });
     }
-}
-
-function editScenario() {
-    ui.openSheet('Сценарий', (body) => {
-        body.innerHTML = `<textarea id="ltScen" class="input lt-scen" spellcheck="false">${ui.esc(draft.scenario || SCENARIO)}</textarea>
-            <div class="catalog-actions">
-                <button class="btn btn-primary" id="ltScenSave">Запази</button>
-                <button class="btn btn-ghost" id="ltScenReset">Върни сценария по подразбиране</button>
-            </div>`;
-        $('#ltScenSave', body).onclick = () => {
-            const v = $('#ltScen', body).value.trim();
-            draft.scenario = v && v !== SCENARIO.trim() ? v : '';
-            saveDraft();
-            openTextToFile();
-        };
-        $('#ltScenReset', body).onclick = () => { draft.scenario = ''; saveDraft(); openTextToFile(); };
-    });
 }
 
 // The text as a book in the library: the app's own player reads it aloud
@@ -392,9 +336,9 @@ async function write(andVoice) {
     label.textContent = 'Избирам модел…';
     overlay.classList.remove('hidden');
     try {
-        const model = await pickWriterModel(st.apiKey, draft.writer === 'pro' ? 'pro' : 'flash');
+        const model = await pickWriterModel(st.apiKey, 'flash');
         const r = await writeNarration({
-            apiKey: st.apiKey, model, mode, input, scenario: draft.scenario || SCENARIO,
+            apiKey: st.apiKey, model, mode, input, scenario: SCENARIO,
             onProgress: (f, l) => { arc.style.strokeDashoffset = 125.7 * (1 - f); if (l) label.textContent = l; },
         });
         draft.text = r.text;
@@ -415,45 +359,3 @@ async function write(andVoice) {
     }
 }
 
-// ---------- symbol test ----------
-let probeRows = null;
-
-function openProbe() {
-    const st = ui.settings();
-    const voice = draft.google;
-    const render = (body) => {
-        body.innerHTML = `<p class="hint" style="margin-top:0">${PROBE_CASES.length} изречения с по един символ се озвучават с <b>${ui.esc(voice.split('-').pop())}</b> два пъти — както са написани и след почистването на приложението — а Gemini записва дословно какво е казал гласът. ~5 000 знака от безплатния лимит на Google HD.</p>
-            <div class="catalog-actions"><button class="btn btn-primary" id="prGo" ${st.apiKey ? '' : 'disabled'}>${probeRows ? 'Пусни теста отново' : 'Пусни теста'}</button>
-            ${probeRows ? '<button class="btn btn-ghost" id="prSave">Изтегли отчета (.md)</button>' : ''}</div>
-            ${probeRows ? `<div class="pr-list">${probeRows.map((r) => `<div class="pr-row ${r.rawNote ? 'bad' : ''}">
-                <div class="pr-name">${ui.esc(r.name)}</div>
-                <div><small>написано</small> ${ui.esc(r.raw)}</div>
-                <div><small>чуто</small> ${ui.esc(r.rawHeard)}${r.rawNote ? ` <em>— ${ui.esc(r.rawNote)}</em>` : ''}</div>
-                <div class="pr-clean"><small>след почистване</small> ${ui.esc(r.cleanHeard)}${r.cleanNote ? ` <em>— ${ui.esc(r.cleanNote)}</em>` : ' ✓'}</div>
-            </div>`).join('')}</div>` : ''}`;
-        body.onclick = async (e) => {
-            if (e.target.closest('#prSave')) return ui.saveBlob('тест-на-символите.md', new Blob([probeMarkdown(probeRows, voice)], { type: 'text/plain;charset=utf-8' }));
-            const go = e.target.closest('#prGo');
-            if (!go) return;
-            go.disabled = true;
-            const tier = 'Chirp3-HD';
-            try {
-                probeRows = await runSymbolProbe({
-                    apiKey: st.apiKey, voice,
-                    onProgress: (l) => { go.textContent = l; },
-                    beforeRequest: (billed) => {
-                        if (!cloudReserve(tier, billed)) throw new Error('Безплатните знаци на Google HD за месеца свършиха.');
-                        return () => cloudRelease(tier, billed);
-                    },
-                    afterRequest: (billed) => { recordUsage({ engine: 'cloud', tier, chars: billed }); reportCloudUsage(st.apiKey, tier, billed); },
-                });
-                ui.rerenderSheet(render);
-            } catch (err) {
-                go.disabled = false;
-                go.textContent = 'Пусни теста';
-                ui.toast(err.message || 'Тестът не успя.', { error: true, duration: 7000 });
-            }
-        };
-    };
-    ui.openSheet('Тест на символите', render, () => openTextToFile());
-}

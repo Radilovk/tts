@@ -43,6 +43,10 @@ export const CHIRP_VOICES = [
     ['Achird', 'm', 'приятелски'], ['Zubenelgenubi', 'm', 'непринуден'], ['Sadachbia', 'm', 'жив'],
 ].map(([n, g, d]) => ({ name: `bg-BG-Chirp3-HD-${n}`, label: n, gender: g, note: d }));
 
+// The voices offered in the app: calm, clear narrators (Charon and Kore first). The full
+// list stays for the command line (--voice Puck …).
+export const CHIRP_MAIN = ['Charon', 'Kore', 'Orus', 'Sulafat'].map((n) => CHIRP_VOICES.find((v) => v.label === n));
+
 // Microsoft neural voices (the same list as the XEMS coach): Bulgarian, then
 // multilingual voices told to speak Bulgarian (livelier, slight accent).
 export const AZURE_VOICES = [
@@ -91,7 +95,7 @@ const SPOKEN = [
 
 // Symbols a voice reads oddly or by name ("наклонена черта", "звездичка", the name of
 // an emoji, "икс икс век") — replaced by what a narrator would say, or dropped. Checked
-// against Google Chirp 3 HD with the symbol test (js/probe.js).
+// against Google Chirp 3 HD with scripts/symbol-probe.mjs.
 const ORD = ['', 'първи', 'втори', 'трети', 'четвърти', 'пети', 'шести', 'седми', 'осми', 'девети', 'десети', 'единадесети',
     'дванадесети', 'тринадесети', 'четиринадесети', 'петнадесети', 'шестнадесети', 'седемнадесети', 'осемнадесети',
     'деветнадесети', 'двадесети', 'двадесет и първи'];
