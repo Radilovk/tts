@@ -51,10 +51,10 @@ export const SPOKEN_RULES = `ПРАВИЛА ЗА ЗАПИС ЗА ГЛАС (те�
 //   look   — judge which thumbnail fits a sentence; perception, many calls, tiny output:
 //            Hydrogen, low thinking (speed and cost; the extra depth buys nothing here)
 export const TASKS = {
-    plan: { models: ['gemini-4-neon', 'gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'high', label: 'план' },
+    plan: { models: ['gemini-4-neon', 'gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'medium', label: 'план' },
     write: { models: ['gemini-4-neon', 'gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'medium', label: 'писане' },
     edit: { models: ['gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'medium', label: 'редакция' },
-    scenes: { models: ['gemini-4-neon', 'gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'high', label: 'сцени' },
+    scenes: { models: ['gemini-4-neon', 'gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'medium', label: 'сцени' },
     look: { models: ['gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'low', label: 'подбор на кадър' },
 };
 export const WRITER_FALLBACK = 'gemini-4-hydrogen';

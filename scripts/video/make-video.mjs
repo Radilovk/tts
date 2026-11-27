@@ -57,6 +57,19 @@ const ff = (args) => {
     const r = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...args], { stdio: ['ignore', 'inherit', 'inherit'] });
     if (r.status !== 0) throw new Error(`ffmpeg: ${args.slice(-1)[0]}`);
 };
+// Async ffmpeg (several run at once across CPU cores)
+import { spawn as _spawn } from 'node:child_process';
+const ffA = (args) => new Promise((res, rej) => {
+    const p = _spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...args], { stdio: ['ignore', 'inherit', 'inherit'] });
+    p.on('error', rej);
+    p.on('close', (code) => code === 0 ? res() : rej(new Error(`ffmpeg: ${args.slice(-1)[0]}`)));
+});
+const cpu = Math.max(2, Math.min(6, (await import('node:os')).cpus().length));
+// Run jobs (functions returning promises) with limited concurrency
+async function pool(items, n, fn) {
+    let i = 0;
+    await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (i < items.length) { const k = i++; await fn(items[k], k); } }));
+}
 const log = (m) => console.log(m);
 setWriterLog((m) => console.log(`  · ${m}`));
 const slug = (t) => String(t).replace(/[\\/:*?"<>|\n\r]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) || 'видео';
@@ -106,24 +119,30 @@ const cache = {
     },
     put: async (k, pcm) => writeFileSync(join(cacheDir, `${k}.pcm`), Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength)),
 };
-const sentences = [];   // { text, start }
-const audio = [];
-let offset = 0;
-for (let b = 0; b < blocks.length; b++) {
-    process.stdout.write(`\rГлас: част ${b + 1} от ${blocks.length}   `);
-    const res = await narrateBlocks([blocks[b]], {
+// Each block is narrated independently (several at once); the sentence times inside a block
+// come from its own audio, then the blocks are stitched in order.
+const parts = new Array(blocks.length);
+let voiceDone = 0;
+await pool(blocks, 3, async (block, b) => {
+    const res = await narrateBlocks([block], {
         engine: 'gemini', voice: gemini.voice, voiceKey: Object.values(gemini).join('|'), gemini, apiKey: KEY,
         freeKey: process.env.GEMINI_FREE_KEY || '', cache, concurrency: 1, onIssue: (m) => log(`\n  ⚠ ${m}`),
     });
-    const ss = blocks[b].split('\n').flatMap((p) => splitSentences(p, 'bg', 450)).filter((s) => /\p{L}/u.test(s));
-    // findPauses works on 8 kHz float samples
+    const ss = block.split('\n').flatMap((p) => splitSentences(p, 'bg', 450)).filter((s) => /\p{L}/u.test(s));
     const step = Math.round(RATE / 8000);
     const f = new Float32Array(Math.floor(res.pcm.length / step));
     for (let i = 0; i < f.length; i++) f[i] = res.pcm[i * step] / 32768;
     const marks = alignSentences(ss.map((s) => s.length), findPauses(f));
-    ss.forEach((s, i) => sentences.push({ text: s, start: offset + (marks[i] ?? 0) }));
-    audio.push(res.pcm);
-    offset += res.pcm.length / RATE;
+    parts[b] = { pcm: res.pcm, marks: ss.map((s, i) => ({ text: s, local: marks[i] ?? 0 })) };
+    process.stdout.write(`\rГлас: ${++voiceDone} от ${blocks.length} части   `);
+});
+const sentences = [];
+const audio = [];
+let offset = 0;
+for (const part of parts) {
+    for (const m of part.marks) sentences.push({ text: m.text, start: offset + m.local });
+    audio.push(part.pcm);
+    offset += part.pcm.length / RATE;
 }
 const total = offset;
 const pcm = new Int16Array(audio.reduce((a, p) => a + p.length, 0));
@@ -139,11 +158,18 @@ const SCENE_SYSTEM = `You are a documentary film editor and picture researcher. 
 Rules:
 - Every sentence belongs to exactly one scene; scenes are consecutive and cover all sentences given.
 - A scene lasts about 5–10 seconds (use the durations); one long sentence may be one scene; never more than ~12 s.
-- "visual": what is SEEN, concrete and filmable (subject, setting, light, camera). Turn abstract ideas into concrete visual metaphors a stock library has (e.g. "the brain predicts" → "macro shot of glowing neurons firing"; "uncertainty" → "fog over a forest road at dawn"). Real named things (a scientist, a place, an instrument, a spacecraft) are shown as themselves.
-- "queries": 3 short English stock-search phrases (2–4 words), most specific first, then broader.
+- "visual": what is SEEN, concrete and filmable (subject, setting, light). Turn abstract ideas into concrete visual metaphors a stock library has (e.g. "the brain predicts" → "glowing neurons firing"; "uncertainty" → "fog over a forest road at dawn"). Real named things (a scientist, a place, an instrument, a spacecraft) are shown as themselves.
+- "queries": 2–3 English stock-search terms, each the PLAIN SUBJECT only — concrete nouns a photographer would tag, 1–3 words. NO camera or style words (no "slow-motion", "shot", "tracking", "close-up", "macro", "cinematic", "aerial", "editorial", "footage", "4k"), NO sentences. Good: "neurons firing", "tennis player serve", "foggy forest road", "brain scan". Bad: "slow-motion side tracking shot of a tennis player". Order: most specific first, then one broad fallback (e.g. "brain", "science lab").
 - "kind": "video" when motion matters (processes, nature, people doing something), else "photo".
 - Keep a visual thread: a recurring subject looks consistent; avoid people's faces in close-up unless the text is about a person.
-Return only JSON: {"scenes":[{"from":0,"to":2,"visual":"…","queries":["…","…","…"],"kind":"video"}]}`;
+Return only JSON: {"scenes":[{"from":0,"to":2,"visual":"…","queries":["neurons firing","brain"],"kind":"video"}]}`;
+
+// Strip camera / style words a model sometimes still slips into a query, and keep the noun
+const CAMERA = /\b(ultra|extreme|slow[- ]?motion|slow|motion|time[- ]?lapse|timelapse|high[- ]?speed|tracking|handheld|steadicam|dolly|pan(ning)?|zoom|aerial|drone|overhead|top[- ]?down|close[- ]?up|macro|wide|medium|establishing|cinematic|editorial|archival|footage|b[- ]?roll|4k|8k|hd|shot|clip|view|animation|visualization|visualisation|render|3d|still|photograph|photo|portrait|side|front|rear|dark|bright|minimalist|sudden|intense)\b/gi;
+function cleanQuery(q) {
+    let s = String(q || '').toLowerCase().replace(/\bshot of\b/gi, ' ').replace(CAMERA, ' ').replace(/\bof\b|\bthe\b|\ba\b|\ban\b|\bwith\b|\binto\b/gi, ' ').replace(/[^\p{L}\p{N} ]+/gu, ' ').replace(/\s+/g, ' ').trim();
+    return s.split(' ').slice(0, 4).join(' ');
+}
 
 async function planScenes(first, last) {
     const lines = [];
@@ -158,7 +184,8 @@ async function planScenes(first, last) {
     for (const s of sc) {
         if (s.to < next) continue;
         const from = next, to = Math.min(last, s.to);
-        out.push({ ...s, from, to, queries: (s.queries || []).filter(Boolean).slice(0, 3), kind: s.kind === 'video' ? 'video' : 'photo' });
+        const queries = [...new Set((s.queries || []).map(cleanQuery).filter((q) => q.length > 1))].slice(0, 3);
+        out.push({ ...s, from, to, queries, kind: s.kind === 'video' ? 'video' : 'photo' });
         next = to + 1;
         if (next > last) break;
     }
@@ -299,24 +326,25 @@ const MOVES = [
     ["1.10", "(iw-iw/zoom)*(1-on/FR)", "ih/2-(ih/zoom/2)"],            // pan right → left
 ];
 const GRADE = 'eq=contrast=1.03:saturation=0.96';
-const clips = [];
-for (const [i, s] of scenes.entries()) {
+const clips = new Array(scenes.length);
+let clipDone = 0;
+await pool([...scenes.entries()], cpu, async ([i, s]) => {
     const d = (s.end - s.start) + (i < scenes.length - 1 ? T : 0.3);   // overlap for the cross-fade; the last one a bit longer than the voice
     const frames = Math.max(2, Math.round(d * FPS));
     const out = join(WORK, `clip-${String(i).padStart(4, '0')}.mp4`);
     const enc = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-r', String(FPS)];
     if (s.asset.kind === 'video') {
-        ff(['-stream_loop', '-1', '-i', s.asset.file, '-t', d.toFixed(3), '-an',
+        await ffA(['-stream_loop', '-1', '-i', s.asset.file, '-t', d.toFixed(3), '-an',
             '-vf', `scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=${FPS},setsar=1,${GRADE}`, ...enc, out]);
     } else {
         const [z, x, y] = MOVES[i % MOVES.length].map((e) => e.replace(/FR/g, String(frames)));
-        ff(['-i', s.asset.file, '-frames:v', String(frames),
+        await ffA(['-i', s.asset.file, '-frames:v', String(frames),
             '-vf', `scale=3840:2160:force_original_aspect_ratio=increase,crop=3840:2160,zoompan=z='${z}':x='${x}':y='${y}':d=${frames}:s=1920x1080:fps=${FPS},setsar=1,${GRADE}`,
             ...enc, out]);
     }
-    clips.push({ file: out, d: s.end - s.start, last: i === scenes.length - 1 });
-    process.stdout.write(`\rКадри: ${i + 1} от ${scenes.length}   `);
-}
+    clips[i] = { file: out, d: s.end - s.start, last: i === scenes.length - 1 };
+    process.stdout.write(`\rКадри: ${++clipDone} от ${scenes.length}   `);
+});
 process.stdout.write('\n');
 
 // Cross-fade a list of clips (each one T longer than its part, except the very last) into
