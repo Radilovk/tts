@@ -2,7 +2,8 @@
 // Long text → one audio file, from the command line (the same engine as the app's
 // "Текст → аудио файл": js/narrate.js).
 //
-//   node scripts/narrate.mjs статия.txt                       → статия.mp3 (Google Chirp 3 HD, Charon)
+//   node scripts/narrate.mjs статия.txt                       → статия.mp3 (Gemini разказвач, Charon)
+//   node scripts/narrate.mjs статия.txt --voice Kore --style warm   (стил: intriguing, warm, dramatic, clear)
 //   node scripts/narrate.mjs статия.txt --voice Kore --out статия.m4a
 //   node scripts/narrate.mjs статия.txt --engine azure --voice Kalina
 //   node scripts/narrate.mjs статия.txt --video корица.jpg     → статия.mp4 (за YouTube)
@@ -35,8 +36,8 @@ if (!globalThis.localStorage) {
     globalThis.localStorage = { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) };
 }
 
-const { prepareLongText, planBlocks, narrateBlocks, billedChars, CHIRP_VOICES, AZURE_VOICES, GOOGLE_MAX_BYTES, AZURE_MAX_BYTES, RATE } = await import('../js/narrate.js');
-const { pcmToWav, PRICES } = await import('../js/engines.js');
+const { prepareLongText, planBlocks, narrateBlocks, billedChars, CHIRP_VOICES, AZURE_VOICES, GOOGLE_MAX_BYTES, AZURE_MAX_BYTES, geminiMaxBytes, RATE } = await import('../js/narrate.js');
+const { pcmToWav, PRICES, GEMINI_DEFAULT_MODEL, geminiCost } = await import('../js/engines.js');
 const { detectLang } = await import('../js/text.js');
 
 function args(argv) {
@@ -60,9 +61,10 @@ if (opt.help || (!opt._[0] && !opt.topic)) {
 
 const slug = (t) => String(t).replace(/[\\/:*?"<>|\n\r]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) || 'разказ';
 let input = opt._[0] ? resolve(opt._[0]) : resolve(slug(opt.topic) + '.txt');
-const engine = opt.engine === 'azure' ? 'azure' : 'google';
+const engine = ['azure', 'google'].includes(opt.engine) ? opt.engine : 'gemini';   // google = Chirp 3 HD
 const pickVoice = () => {
     const v = String(opt.voice || (engine === 'azure' ? 'bg-BG-KalinaNeural' : 'Charon'));
+    if (engine === 'gemini') return v.replace(/^bg-BG-Chirp3-HD-/, '');
     const list = engine === 'azure' ? AZURE_VOICES : CHIRP_VOICES;
     const hit = list.find((x) => x.name.toLowerCase() === v.toLowerCase() || x.label.toLowerCase() === v.toLowerCase()
         || x.name.toLowerCase().includes(v.toLowerCase()));
@@ -78,7 +80,9 @@ const API = (process.env.LIBRARY_API || readFileSync(new URL('../js/config.js', 
 const googleKey = process.env.GOOGLE_TTS_KEY || process.env.GEMINI_API_KEY || '';
 const azureKey = process.env.AZURE_SPEECH_KEY || '';
 const region = process.env.AZURE_SPEECH_REGION || 'westeurope';
-const accountKey = engine === 'azure' ? azureKey : googleKey;
+const accountKey = engine === 'azure' ? azureKey : engine === 'gemini' ? (process.env.GEMINI_API_KEY || googleKey) : googleKey;
+const gemini = { model: opt.model || GEMINI_DEFAULT_MODEL, voice, style: opt.style || 'clear', customStyle: opt['custom-style'] || '', lang: 'bg' };
+if (opt['custom-style']) gemini.style = 'custom';
 
 // ---- the writer: Gemini writes the narration by the scenario ----
 let raw = opt.topic && !opt._[0] ? '' : readFileSync(input, 'utf8');
@@ -125,14 +129,14 @@ if (opt['text-only']) process.exit(0);
 const out = outFor(input);
 const paras = prepareLongText(raw);
 const lang = detectLang(paras.slice(0, 20).join(' ')) || 'bg';
-const maxBytes = Number(opt['max-bytes']) || (engine === 'azure' ? AZURE_MAX_BYTES : GOOGLE_MAX_BYTES);
-const blocks = planBlocks(paras, { maxBytes, lang, keepParagraphs: engine === 'azure' });
-const chars = billedChars(blocks, engine);
+const maxBytes = Number(opt['max-bytes']) || (engine === 'azure' ? AZURE_MAX_BYTES : engine === 'gemini' ? geminiMaxBytes(6000) : GOOGLE_MAX_BYTES);
+const blocks = planBlocks(paras, { maxBytes, lang, keepParagraphs: engine !== 'google' });
+const chars = billedChars(blocks, engine === 'azure' ? 'azure' : 'google');
 const minutes = chars / 14 / 60;
 const sizes = blocks.map((b) => Buffer.byteLength(b));
 
 console.log(`Текст: ${raw.length} знака, ${paras.length} абзаца → ${blocks.length} блока (${Math.min(...sizes)}–${Math.max(...sizes)} байта, лимит ${maxBytes})`);
-console.log(`Глас: ${voice} (${engine === 'azure' ? 'Microsoft' : 'Google Chirp 3 HD'}) · ~${minutes.toFixed(0)} мин аудио · ${chars} знака за таксуване`);
+console.log(`Глас: ${voice} (${engine === 'azure' ? 'Microsoft' : engine === 'gemini' ? `Gemini ${gemini.model}, стил ${gemini.style}` : 'Google Chirp 3 HD'}) · ~${minutes.toFixed(0)} мин аудио · ${chars} знака за таксуване`);
 
 // ---- the free limit (Google): the worker's month total for this key ----
 const tier = 'Chirp3-HD';
@@ -157,6 +161,8 @@ if (engine === 'google') {
     const paid = Math.max(0, used + chars - FREE);
     console.log(`Google този месец: ${u == null ? 'неизвестно (няма връзка със сървъра)' : `${used} от ${FREE} безплатни знака`}`);
     console.log(`Цена: ${paid ? `~${(paid / 1e6 * PRICES.cloud[tier].per1M).toFixed(2)} $ (над безплатните)` : '0 $ (в безплатния лимит)'}`);
+} else if (engine === 'gemini') {
+    console.log(`Цена: ~${geminiCost(gemini.model, chars / 3, chars / 14 * 25).toFixed(2)} $ (половин цена през Batch е в приложението: „Най-евтино“)`);
 } else {
     console.log(`Цена: 0 $ в безплатния ресурс F0 (500 000 знака/месец; над тях Azure само отказва)`);
 }
@@ -165,7 +171,7 @@ if (opt['dry-run']) {
     process.exit(0);
 }
 if (!accountKey) {
-    console.error(engine === 'azure' ? 'Липсва AZURE_SPEECH_KEY.' : 'Липсва GOOGLE_TTS_KEY (или GEMINI_API_KEY).');
+    console.error(engine === 'azure' ? 'Липсва AZURE_SPEECH_KEY.' : engine === 'gemini' ? 'Липсва GEMINI_API_KEY.' : 'Липсва GOOGLE_TTS_KEY (или GEMINI_API_KEY).');
     process.exit(2);
 }
 
@@ -199,8 +205,9 @@ const t0 = Date.now();
 let res;
 try {
     res = await narrateBlocks(blocks, {
-        engine, voice, apiKey: googleKey, azureKey, region, cache, beforeRequest, afterRequest,
-        concurrency: Number(opt.parallel) || 2,
+        engine, voice, apiKey: engine === 'gemini' ? accountKey : googleKey, gemini, voiceKey: engine === 'gemini' ? Object.values(gemini).join('|') : '',
+        azureKey, region, cache, beforeRequest, afterRequest,
+        concurrency: Number(opt.parallel) || (engine === 'gemini' ? 1 : 2),
         onProgress: (d, n) => process.stdout.write(`\rОзвучавам: ${d}/${n} блока`),
         onIssue: (m) => console.log(`\n  ⚠ ${m}`),
     });

@@ -19,14 +19,33 @@ export const GEMINI_VOICES = [
     ['Achird', 'мъж., приятелски'], ['Zubenelgenubi', 'мъж., непринуден'], ['Sadachbia', 'мъж., жив'], ['Sadaltager', 'мъж., вещ'],
 ];
 
-export const GEMINI_DEFAULT_MODEL = 'gemini-2.5-flash-preview-tts';
+// Gemini 3.8 Flash TTS: Google's narration model ("long-form stability", 130 languages
+// incl. Bulgarian, the same 30 voices). The 2.5 / 3.1 preview TTS models shut down on
+// 18 December 2026 (ai.google.dev/gemini-api/docs/deprecations).
+export const GEMINI_DEFAULT_MODEL = 'gemini-3.8-flash-tts';
+const GEMINI_SHUTDOWN = {
+    'gemini-2.5-flash-preview-tts': '2026-12-18', 'gemini-2.5-pro-preview-tts': '2026-12-18', 'gemini-3.1-flash-tts-preview': '2026-12-18',
+};
+
+export function isRetiredGeminiModel(model, date = new Date()) {
+    const d = GEMINI_SHUTDOWN[model || ''];
+    return !!d && date >= new Date(`${d}T00:00:00Z`);
+}
+
+// Gemini 3.8+ TTS reads the text strictly as a transcript: the delivery goes into
+// speech_metadata.style, not into the text (it would be spoken aloud).
+export function isTranscriptTts(model) {
+    return /gemini-(?:3\.[89]|[4-9])/.test(model || '');
+}
 
 // Gemini TTS list prices in USD per 1M tokens (text in / audio out), by model family.
 // Date-aware: Gemini 3.8 Flash TTS is discounted until the end of 2026.
 // Source: ai.google.dev/gemini-api/docs/pricing — check there when prices change.
 export function geminiPrice(model, date = new Date()) {
     const m = model || '';
-    if (/3\.8-flash/.test(m)) return date < new Date('2027-01-01T00:00:00Z') ? { in: 0.5, out: 9 } : { in: 0.5, out: 18 };
+    const y2027 = date >= new Date('2027-01-01T00:00:00Z');   // 3.8 list prices double on 1 Jan 2027
+    if (/3\.8-flash-lite/.test(m)) return y2027 ? { in: 1, out: 12 } : { in: 0.5, out: 6 };
+    if (/3\.8-flash/.test(m)) return y2027 ? { in: 1, out: 18 } : { in: 0.5, out: 9 };
     if (/2\.5-flash/.test(m)) return { in: 0.5, out: 10 };
     if (/3\.1-flash/.test(m)) return { in: 1, out: 20 };
     if (/2\.5-pro/.test(m)) return { in: 1, out: 20 };
@@ -39,37 +58,43 @@ export function geminiCost(model, inTokens, outTokens, batch = false) {
     return (inTokens * p.in + outTokens * p.out) / 1e6 * (batch ? 0.5 : 1);
 }
 
-// Models confirmed to treat the style line as direction (not read it aloud).
-// Others can still be chosen by hand in the settings.
-const VERIFIED_TTS = /^gemini-2\.5-flash(-preview)?-tts/;
+// Models whose style direction is never read aloud: 2.5 Flash (style line, confirmed in
+// use) and 3.8 (style in speech_metadata, by the API's design). Retired ones drop out.
+const VERIFIED_TTS = /^gemini-(?:2\.5-flash(-preview)?-tts|3\.8-flash(?:-lite)?-tts)$/;
 
 export function isVerifiedGeminiModel(model) {
-    return VERIFIED_TTS.test(model || '');
+    return VERIFIED_TTS.test(model || '') && !isRetiredGeminiModel(model);
 }
 
-// The cheapest verified TTS model the key can use
+// The narrator model when none is chosen: 3.8 Flash TTS (made for audiobooks) when the key
+// has it, otherwise the cheapest verified model the key can use.
 export function cheapestGeminiModel(models) {
     const usable = (models || []).filter((m) => isVerifiedGeminiModel(m));
+    if (usable.includes(GEMINI_DEFAULT_MODEL)) return GEMINI_DEFAULT_MODEL;
     return usable.sort((a, b) => geminiPrice(a).out - geminiPrice(b).out || b.localeCompare(a))[0] || GEMINI_DEFAULT_MODEL;
 }
 
 export const NARRATION_STYLES = {
     intriguing: {
+        short: { bg: 'завладяващ разказвач на аудиокнига, жива естествена интонация', en: 'captivating audiobook narrator, lively natural intonation' },
         label: 'Интригуващ',
         bg: 'Прочети като завладяващ разказвач на аудиокниги: жива, естествена интонация, лека интрига и напрежение там, където сюжетът го иска, кратки паузи преди важните моменти. Репликите на героите предавай с лека промяна в тона, без да преиграваш. Не добавяй и не пропускай думи',
         en: 'Read as a captivating audiobook narrator: lively, natural intonation, a touch of suspense where the story calls for it, brief pauses before key moments. Give the characters’ lines a slight change of tone without overacting. Do not add or skip words',
     },
     warm: {
+        short: { bg: 'топъл, спокоен, уютен разказ', en: 'warm, calm, cosy narration' },
         label: 'Топъл',
         bg: 'Прочети с топъл, спокоен и уютен глас, като разказвач, който чете любима книга на близък човек. Естествен ритъм, меки паузи. Не добавяй и не пропускай думи',
         en: 'Read in a warm, calm and cosy voice, like a narrator reading a beloved book to someone close. Natural rhythm, soft pauses. Do not add or skip words',
     },
     dramatic: {
+        short: { bg: 'изразително, като в радиотеатър', en: 'expressive, like a radio play' },
         label: 'Драматичен',
         bg: 'Прочети драматично и изразително, като актьор в радиотеатър: ясно изразени емоции, динамика в темпото, напрежение в кулминациите и различен тон за отделните герои. Не добавяй и не пропускай думи',
         en: 'Read dramatically and expressively, like an actor in a radio play: clear emotions, dynamic pacing, tension at climaxes and a distinct tone for each character. Do not add or skip words',
     },
     clear: {
+        short: { bg: 'ясно, спокойно, равномерно темпо', en: 'clear, calm, even pace' },
         label: 'Ясен',
         bg: 'Прочети ясно, спокойно и с равномерно темпо, с естествена интонация — подходящо за научнопопулярна книга. Не добавяй и не пропускай думи',
         en: 'Read clearly and calmly at an even pace with natural intonation, suited to non-fiction. Do not add or skip words',
@@ -607,10 +632,15 @@ function setSteadyState(v) {
 
 // steady: null = use it only if the API has already accepted it (batch requests,
 // which cannot be retried one by one)
-export function geminiRequestBody({ text, voice, style, customStyle, lang, steady = null }) {
+export function geminiRequestBody({ text, voice, style, customStyle, lang, steady = null, model = '' }) {
     const use = steady ?? steadyState() === 'ok';
+    // 3.8+: the text verbatim; one short style string (long directions and "keep the voice
+    // steady" lines make these models drift, per Google's guide)
+    const part = isTranscriptTts(model)
+        ? { text, speech_metadata: { style: (style === 'custom' && customStyle?.trim()) ? customStyle.trim().slice(0, 160) : (NARRATION_STYLES[style] || NARRATION_STYLES.intriguing).short[lang === 'bg' ? 'bg' : 'en'] } }
+        : { text: geminiPrompt(text, style, lang, customStyle) };
     return {
-        contents: [{ parts: [{ text: geminiPrompt(text, style, lang, customStyle) }] }],
+        contents: [{ parts: [part] }],
         generationConfig: {
             responseModalities: ['AUDIO'],
             speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } },
@@ -619,14 +649,26 @@ export function geminiRequestBody({ text, voice, style, customStyle, lang, stead
     };
 }
 
+// The audio of an answer as 16-bit PCM bytes. 3.8 answers a WAV file (RIFF header),
+// the older models raw PCM ("audio/L16;rate=24000").
+function inlineAudio(part) {
+    let rate = Number((part.inlineData.mimeType || '').match(/rate=(\d+)/)?.[1] || 24000);
+    let raw = base64ToBytes(part.inlineData.data);
+    if (raw.length > 12 && raw[0] === 0x52 && raw[1] === 0x49 && raw[2] === 0x46 && raw[3] === 0x46) {
+        const w = parseWavPcm(raw);
+        rate = w.rate;
+        raw = new Uint8Array(w.pcm.buffer, w.pcm.byteOffset, w.pcm.byteLength);
+    }
+    return { raw, rate };
+}
+
 // Turn a generateContent response (interactive or from a batch) into compact audio:
 // Ogg/Opus when the browser can encode it (~12× smaller), WAV otherwise.
 // PCM of an answer, trimmed and levelled, with why the model stopped
 function geminiPcm(data) {
     const part = data?.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data);
     if (!part) return null;
-    const rate = Number((part.inlineData.mimeType || '').match(/rate=(\d+)/)?.[1] || 24000);
-    const raw = base64ToBytes(part.inlineData.data);
+    const { raw, rate } = inlineAudio(part);
     const usage = data.usageMetadata || {};
     return {
         pcm: levelLoudness(trimSilence(raw, rate)), rate,
@@ -644,8 +686,7 @@ export async function geminiParseAudio(data) {
             ? 'Gemini отказа да прочете този откъс (филтър за съдържание).'
             : 'Gemini не върна аудио.', 0, reason !== 'SAFETY');
     }
-    const rate = Number((part.inlineData.mimeType || '').match(/rate=(\d+)/)?.[1] || 24000);
-    const pcm = base64ToBytes(part.inlineData.data);
+    const { raw: pcm, rate } = inlineAudio(part);
     const trimmed = levelLoudness(trimSilence(pcm, rate));
     const usage = data.usageMetadata || {};
     return {
@@ -676,7 +717,7 @@ function geminiTruncated(r, chars) {
 
 async function geminiOnce({ apiKey, model, text, voice, style, customStyle, lang, signal, retry429 }) {
     const send = async (steady) => {
-        const body = geminiRequestBody({ text, voice, style, customStyle, lang, steady });
+        const body = geminiRequestBody({ text, voice, style, customStyle, lang, steady, model });
         const call = () => fetchJson(`${GEMINI_BASE}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -724,17 +765,27 @@ async function geminiPieces(opts, depth = 0) {
     return out;
 }
 
-export async function geminiSynthesize({ apiKey, model, text, voice, style, customStyle, lang, signal, retry429 = true, onSplit }) {
+// One passage as raw PCM → { pcm, rate, inTokens, outTokens, requests } (the long-text
+// studio joins these into one file; geminiSynthesize packs them for the player)
+export async function geminiNarratePcm({ apiKey, model, text, voice, style, customStyle, lang, signal, retry429 = true, onSplit }) {
     const parts = await geminiPieces({ apiKey, model, text, voice, style, customStyle, lang, signal, retry429, onSplit });
     const rate = parts[0].rate;
-    const pcm = parts.length === 1 ? parts[0].pcm : joinPcm(parts.map((p) => p.pcm), rate);
     return {
-        blob: (await encodeOpus(pcm, rate)) || pcmToWav(pcm, rate),
-        dur: pcm.length / rate,
+        pcm: parts.length === 1 ? parts[0].pcm : joinPcm(parts.map((p) => p.pcm), rate), rate,
         inTokens: parts.reduce((a, p) => a + p.inTokens, 0),
         outTokens: parts.reduce((a, p) => a + p.outTokens, 0),
         requests: parts.length > 1 ? parts.length + 1 : 1,
     };
+}
+
+export async function geminiSynthesize(opts) {
+    const r = await geminiNarratePcm(opts);
+    return { blob: (await encodeOpus(r.pcm, r.rate)) || pcmToWav(r.pcm, r.rate), dur: r.pcm.length / r.rate, inTokens: r.inTokens, outTokens: r.outTokens, requests: r.requests };
+}
+
+// A batch answer as PCM (trimmed, levelled) → { pcm, rate, inTokens, outTokens } or null
+export function geminiAnswerPcm(data) {
+    return geminiPcm(data);
 }
 
 // ---------- Gemini Batch API (half price, finished within minutes to hours) ----------

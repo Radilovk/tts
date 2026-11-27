@@ -7,7 +7,7 @@ import { LANG_NAMES, LOCALES, charLen, noteText } from './text.js';
 import {
     GEMINI_VOICES, GEMINI_DEFAULT_MODEL, NARRATION_STYLES, PRICES,
     cloudVoices, cloudSynthesize, cloudBilledChars, cloudDiagnose, CLOUD_LINKS, geminiSynthesize, geminiModels, deviceVoices, onDeviceVoicesChanged, cloudTier,
-    cheapestGeminiModel, isVerifiedGeminiModel, geminiCost, azureVoices, azureSynthesize, azureBilledChars, AZURE_FREE_CHARS,
+    cheapestGeminiModel, isVerifiedGeminiModel, isRetiredGeminiModel, geminiCost, azureVoices, azureSynthesize, azureBilledChars, AZURE_FREE_CHARS,
 } from './engines.js';
 import { translateChapter, translationCost, deviceTranslationAvailable, TRANSLATE_DEFAULT_MODEL } from './translate.js';
 import { isNative, Native, nativeFileUrl, loadNativeVoices, nativeEngines } from './native.js';
@@ -27,7 +27,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.18';
+export const APP_VERSION = '2.19';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
@@ -52,6 +52,8 @@ function loadSettings() {
     if (!s.apiKey) s.apiKey = localStorage.getItem('gemini_tts_api_key') || '';
     // Earlier versions stored the default model explicitly: switch them to "cheapest"
     if (s.geminiModel === GEMINI_DEFAULT_MODEL && !s.geminiModelChosen) s.geminiModel = '';
+    // A model Google has shut down (2.5 / 3.1 preview TTS, 18.12.2026): back to the default
+    if (s.geminiModel && isRetiredGeminiModel(s.geminiModel)) s.geminiModel = '';
     s = { ...DEFAULTS, ...s };
     // The Gemini narrator is the main voice; the phone voice is the free fallback
     if (!s.engine) s.engine = (s.apiKey || preconfiguredKey()) ? 'gemini' : 'device';
@@ -2842,6 +2844,7 @@ async function init() {
     initTextToFile({
         openSheet, closeSheet, rerenderSheet, toast, esc, fmtNum, saveBlob, safeFileName, openSettings, diag, importFile,
         settings: () => effectiveSettings(),
+        usd: (v) => fmtUsd(v), geminiLabel: (st) => studioVoiceLabel(st),
     });
     checkCloudMonth();
     document.addEventListener('visibilitychange', () => { if (!document.hidden) checkCloudMonth(); });

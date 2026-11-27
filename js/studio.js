@@ -37,7 +37,7 @@ export async function buildJob(player, st, mode, onProgress, budgetUsd = 0) {
     for (let c = 0; c < n; c++) {
         await player.ensureChapter(c); // translated books are translated first
         for (const spec of await player.chapterSpecs(c, st)) {
-            const req = geminiRequestBody({ text: spec.text, voice: st.geminiVoice, style: st.style, customStyle: st.customStyle, lang });
+            const req = geminiRequestBody({ text: spec.text, voice: st.geminiVoice, style: st.style, customStyle: st.customStyle, lang, model: st.geminiModel });
             items.push({ key: spec.key, vk: spec.vk, lang: spec.lang, text: spec.text, chars: spec.chars, c, req });
         }
         onProgress?.((c + 1) / n);

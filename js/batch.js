@@ -54,7 +54,7 @@ export async function submitChapter(player, c, st) {
         const group = missing.slice(i, i + PER_JOB);
         const items = group.map((spec) => ({
             key: spec.key,
-            request: geminiRequestBody({ text: spec.text, voice: st.geminiVoice, style: st.style, customStyle: st.customStyle, lang }),
+            request: geminiRequestBody({ text: spec.text, voice: st.geminiVoice, style: st.style, customStyle: st.customStyle, lang, model: st.geminiModel }),
         }));
         const name = await geminiBatchSubmit({
             apiKey: st.apiKey, model: st.geminiModel, items,

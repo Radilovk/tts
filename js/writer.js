@@ -28,7 +28,7 @@ export const SPOKEN_RULES = `ПРАВИЛА ЗА ЗАПИС ЗА ГЛАС (те�
 - Препратки към литература, години в скоби, URL адреси и цитиране на източници не се пишат.
 - Пряката реч — без тирета в началото на реда; „казва той“ се вплита в изречението.
 - Кавички, тирета и точка и запетая — пестеливо; повтарящи се „и“, „но“ в началото на изреченията се избягват.`;
-export const WRITER_FALLBACK = 'gemini-2.5-flash';
+export const WRITER_FALLBACK = 'gemini-3.6-flash';   // 2.5 Flash is deprecated (routed elsewhere from 1.12.2026)
 const SKIP = /lite|tts|image|live|audio|embed|thinking|exp|learnlm|robotics|computer|nano|gemma/i;
 
 // The newest Flash (or Pro) text model this key can use, e.g. gemini-3-flash-preview
