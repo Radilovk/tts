@@ -87,7 +87,9 @@ if (opt.topic) {
     text = w.text;
     title ||= w.title;
 }
-if (!opt['no-review']) {
+// A generated text is already written by the voice rules (writer's prompt) — a second
+// editing pass costs time for nothing; a pasted text is edited (unless --no-review).
+if (!opt['no-review'] && !opt.topic) {
     log('Редакция за глас…');
     try { text = (await editForVoice({ apiKey: KEY, text })).text; } catch (e) { log(`  редакцията не успя (${e.message}) — продължавам с текста както е`); }
 }
@@ -119,41 +121,46 @@ const cache = {
     },
     put: async (k, pcm) => writeFileSync(join(cacheDir, `${k}.pcm`), Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength)),
 };
-// Each block is narrated independently (several at once); the sentence times inside a block
-// come from its own audio, then the blocks are stitched in order.
-const parts = new Array(blocks.length);
-let voiceDone = 0;
-await pool(blocks, 3, async (block, b) => {
-    const res = await narrateBlocks([block], {
-        engine: 'gemini', voice: gemini.voice, voiceKey: Object.values(gemini).join('|'), gemini, apiKey: KEY,
-        freeKey: process.env.GEMINI_FREE_KEY || '', cache, concurrency: 1, onIssue: (m) => log(`\n  ⚠ ${m}`),
+// The sentences are known from the text alone (the same split the narration uses), so the
+// scenes can be planned and their shots searched WHILE the voice is being made; the real
+// times arrive with the voice and only the cut points wait for it.
+const blockSents = blocks.map((block) => block.split('\n').flatMap((p) => splitSentences(p, 'bg', 450)).filter((x) => /\p{L}/u.test(x)));
+const sentences = blockSents.flat().map((t) => ({ text: t, est: t.length / 14.5 }));
+const t0 = Date.now();
+const since = () => `${((Date.now() - t0) / 1000).toFixed(0)} с`;
+let total = 0;
+const voiceReady = (async () => {
+    const parts = new Array(blocks.length);
+    let done = 0;
+    await pool(blocks, blocks.length, async (block, b) => {
+        const res = await narrateBlocks([block], {
+            engine: 'gemini', voice: gemini.voice, voiceKey: Object.values(gemini).join('|'), gemini, apiKey: KEY,
+            freeKey: process.env.GEMINI_FREE_KEY || '', cache, concurrency: 1, onIssue: (m) => log(`  ⚠ ${m}`),
+        });
+        const ss = blockSents[b];
+        const step = Math.round(RATE / 8000);
+        const f = new Float32Array(Math.floor(res.pcm.length / step));
+        for (let i = 0; i < f.length; i++) f[i] = res.pcm[i * step] / 32768;
+        parts[b] = { pcm: res.pcm, marks: alignSentences(ss.map((x) => x.length), findPauses(f)) };
+        log(`Глас: ${++done} от ${blocks.length} части (${since()})`);
     });
-    const ss = block.split('\n').flatMap((p) => splitSentences(p, 'bg', 450)).filter((s) => /\p{L}/u.test(s));
-    const step = Math.round(RATE / 8000);
-    const f = new Float32Array(Math.floor(res.pcm.length / step));
-    for (let i = 0; i < f.length; i++) f[i] = res.pcm[i * step] / 32768;
-    const marks = alignSentences(ss.map((s) => s.length), findPauses(f));
-    parts[b] = { pcm: res.pcm, marks: ss.map((s, i) => ({ text: s, local: marks[i] ?? 0 })) };
-    process.stdout.write(`\rГлас: ${++voiceDone} от ${blocks.length} части   `);
-});
-const sentences = [];
-const audio = [];
-let offset = 0;
-for (const part of parts) {
-    for (const m of part.marks) sentences.push({ text: m.text, start: offset + m.local });
-    audio.push(part.pcm);
-    offset += part.pcm.length / RATE;
-}
-const total = offset;
-const pcm = new Int16Array(audio.reduce((a, p) => a + p.length, 0));
-{ let o = 0; for (const p of audio) { pcm.set(p, o); o += p.length; } }
-writeFileSync(join(WORK, 'voice.wav'), Buffer.from(await pcmToWav(pcm, RATE).arrayBuffer()));
-sentences[0].start = 0;
-process.stdout.write('\n');
-log(`Глас: ${(total / 60).toFixed(1)} мин, ${sentences.length} изречения`);
+    let offset = 0, k = 0;
+    for (const [b, part] of parts.entries()) {
+        for (let i = 0; i < blockSents[b].length; i++) sentences[k++].start = offset + (part.marks[i] ?? 0);
+        offset += part.pcm.length / RATE;
+    }
+    total = offset;
+    sentences[0].start = 0;
+    const pcm = new Int16Array(parts.reduce((a, p) => a + p.pcm.length, 0));
+    { let o = 0; for (const p of parts) { pcm.set(p.pcm, o); o += p.pcm.length; } }
+    writeFileSync(join(WORK, 'voice.wav'), Buffer.from(await pcmToWav(pcm, RATE).arrayBuffer()));
+    log(`Глас: готов, ${(total / 60).toFixed(1)} мин (${since()})`);
+})();
+voiceReady.catch(() => {});
 
 // ---------- 3. scenes: what each one shows ----------
 const sentEnd = (i) => (i + 1 < sentences.length ? sentences[i + 1].start : total);
+const estDur = (i) => sentences[i].est;
 const SCENE_SYSTEM = `You are a documentary film editor and picture researcher. You cut a narrated Bulgarian popular-science documentary into shots and decide what each shot shows, so that the picture always matches what the narrator is saying at that moment.
 Rules:
 - Every sentence belongs to exactly one scene; scenes are consecutive and cover all sentences given.
@@ -173,7 +180,7 @@ function cleanQuery(q) {
 
 async function planScenes(first, last) {
     const lines = [];
-    for (let i = first; i <= last; i++) lines.push(`${i}. [${(sentEnd(i) - sentences[i].start).toFixed(1)} s] ${sentences[i].text}`);
+    for (let i = first; i <= last; i++) lines.push(`${i}. [${estDur(i).toFixed(1)} s] ${sentences[i].text}`);
     const prompt = `Title: ${title}\nThe story so far (for context): ${paras.slice(0, 3).join(' ').slice(0, 1500)}\n\nSentences ${first}–${last} (index, duration, text):\n${lines.join('\n')}\n\nCut sentences ${first}–${last} into scenes.`;
     const r = await generate({ apiKey: KEY, task: 'scenes', system: SCENE_SYSTEM, prompt, json: true, maxTokens: 32768, what: `сцени ${first}–${last}` });
     const sc = (parseJson(r.text).scenes || []).filter((s) => Number.isInteger(s.from) && Number.isInteger(s.to) && s.to >= s.from)
@@ -196,17 +203,12 @@ async function planScenes(first, last) {
     return out;
 }
 
-const scenes = [];
-for (let i = 0; i < sentences.length; i += 80) {
-    log(`Сцени за изречения ${i + 1}–${Math.min(sentences.length, i + 80)}…`);
-    scenes.push(...await planScenes(i, Math.min(sentences.length - 1, i + 79)));
-}
-for (const s of scenes) {
-    s.start = sentences[s.from].start;
-    s.end = sentEnd(s.to);
-    s.text = sentences.slice(s.from, s.to + 1).map((x) => x.text).join(' ');
-}
-log(`${scenes.length} сцени (средно ${(total / scenes.length).toFixed(1)} с)`);
+// Chunks of 40 sentences are planned at once (was: one after another)
+const chunks = [];
+for (let i = 0; i < sentences.length; i += 40) chunks.push([i, Math.min(sentences.length - 1, i + 39)]);
+const scenes = (await Promise.all(chunks.map(([a, b]) => planScenes(a, b)))).flat();
+for (const s of scenes) s.text = sentences.slice(s.from, s.to + 1).map((x) => x.text).join(' ');
+log(`${scenes.length} сцени (${since()})`);
 
 // ---------- 4. candidates, and the one that fits ----------
 const used = new Set();
@@ -269,19 +271,65 @@ async function aiPicture(scene, file) {
     return true;
 }
 
+// ---------- 5. shots, cross-fades, sound ----------
+const MOVES = [
+    ["1+0.10*on/FR", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"],          // slow push in
+    ["1.10-0.10*on/FR", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"],       // slow pull out
+    ["1.10", "(iw-iw/zoom)*on/FR", "ih/2-(ih/zoom/2)"],                // pan left → right
+    ["1.10", "(iw-iw/zoom)*(1-on/FR)", "ih/2-(ih/zoom/2)"],            // pan right → left
+];
+const GRADE = 'eq=contrast=1.03:saturation=0.96';
+const GROUP = 12;
+const clips = new Array(scenes.length);
+let clipDone = 0, cpuFree = cpu;
+const cpuWait = [];
+const cpuTake = () => (cpuFree > 0 ? (cpuFree--, Promise.resolve()) : new Promise((r) => cpuWait.push(r)));
+const cpuGive = () => (cpuWait.length ? cpuWait.shift()() : cpuFree++);
+async function renderClip(i) {
+    await voiceReady;
+    const s = scenes[i];
+    s.start = sentences[s.from].start;
+    s.end = sentEnd(s.to);
+    // Shots cross-fade inside groups of GROUP; groups are joined end to end without another
+    // encode (a plain cut every GROUP shots), so only the last shot of the video and the
+    // shots ending a group get no overlap
+    const endsGroup = (i + 1) % GROUP === 0 || i === scenes.length - 1;
+    const d = (s.end - s.start) + (i === scenes.length - 1 ? 0.3 : endsGroup ? 0 : T);
+    const frames = Math.max(2, Math.round(d * FPS));
+    const out = join(WORK, `clip-${String(i).padStart(4, '0')}.mp4`);
+    // intermediate files: fastest encode, near-lossless (the group pass makes the final one)
+    const enc = ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '16', '-pix_fmt', 'yuv420p', '-r', String(FPS)];
+    await cpuTake();
+    try {
+        if (s.asset.kind === 'video') {
+            await ffA(['-stream_loop', '-1', '-i', s.asset.file, '-t', d.toFixed(3), '-an',
+                '-vf', `scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=${FPS},setsar=1,${GRADE}`, ...enc, out]);
+        } else {
+            const [z, x, y] = MOVES[i % MOVES.length].map((e) => e.replace(/FR/g, String(frames)));
+            // 2560 px is enough headroom for a slow 10% move to stay smooth
+            await ffA(['-i', s.asset.file, '-frames:v', String(frames),
+                '-vf', `scale=2560:1440:force_original_aspect_ratio=increase,crop=2560:1440,zoompan=z='${z}':x='${x}':y='${y}':d=${frames}:s=1920x1080:fps=${FPS},setsar=1,${GRADE}`,
+                ...enc, out]);
+        }
+    } finally { cpuGive(); }
+    clips[i] = { file: out, d: s.end - s.start, last: i === scenes.length - 1 };
+    clipDone++;
+}
+
 const aiLimit = opt['no-ai-images'] ? 0 : Math.ceil(scenes.length * 0.2);
 let aiUsed = 0, sceneDone = 0;
 // Scenes are independent (search → look → download), so several run at once; the shared
 // `used` set is marked at pick time so two scenes rarely grab the same asset.
 async function fillScene(idx, scene) {
     scene.idx = idx;
-    const dur = scene.end - scene.start;
+    let dur = 0;
+    for (let i = scene.from; i <= scene.to; i++) dur += estDur(i);
     // Every query and source at once (was: query by query, a look after each), then ONE
     // look at the best candidates of all of them
-    const queries = scene.queries.length ? scene.queries : [scene.visual];
-    const lists = await Promise.all(queries.flatMap((q) => [
-        ...(scene.kind === 'video' ? [searchAll(q, 'video', keys)] : []), searchAll(q, 'photo', keys),
-    ]));
+    // Two queries; footage only where motion matters (each search hits Pixabay, ~100/min)
+    const [q1, q2 = q1] = scene.queries.length ? scene.queries : [scene.visual];
+    const jobs = scene.kind === 'video' ? [[q1, 'video'], [q1, 'photo'], [q2, 'video']] : [[q1, 'photo'], [q2, 'photo']];
+    const lists = await Promise.all(jobs.map(([q, k]) => searchAll(q, k, keys)));
     const seen = new Set();
     const ok = (c) => c.thumb && !used.has(c.id) && !seen.has(c.id) && (c.kind !== 'video' || !c.duration || c.duration >= Math.min(dur, 6));
     // Interleave: the specific query's top results first, footage first when motion matters
@@ -308,11 +356,13 @@ async function fillScene(idx, scene) {
         const r = await fetch(pick.url, { headers: { 'User-Agent': 'Razkazvach-video/1.0' } }).catch(() => null);
         if (r?.ok) { writeFileSync(file + ext, Buffer.from(await r.arrayBuffer())); scene.asset = { ...pick, file: file + ext }; }
     }
-    log(`Сцена ${++sceneDone}/${scenes.length} (${dur.toFixed(1)} с): ${scene.asset ? `${scene.asset.source} ${scene.asset.kind}${pick?.score != null && scene.asset.source !== 'AI (Gemini)' ? ` · ${pick.score}/10` : ''}` : '— без кадър'} — ${scene.visual.slice(0, 70)}`);
+    log(`Сцена ${++sceneDone}/${scenes.length} (${since()}): ${scene.asset ? `${scene.asset.source} ${scene.asset.kind}${pick?.score != null && scene.asset.source !== 'AI (Gemini)' ? ` · ${pick.score}/10` : ''}` : '— без кадър'} — ${scene.visual.slice(0, 60)}`);
+    // The shot is encoded as soon as the voice says when it starts and ends
+    if (scene.asset) await renderClip(idx);
 }
 {
     let next = 0;
-    await Promise.all(Array.from({ length: 6 }, async () => { while (next < scenes.length) { const i = next++; await fillScene(i, scenes[i]); } }));
+    await Promise.all(Array.from({ length: 10 }, async () => { while (next < scenes.length) { const i = next++; await fillScene(i, scenes[i]); } }));
 }
 // A scene with nothing at all keeps the previous shot on screen a little longer
 for (let i = 0; i < scenes.length; i++) {
@@ -320,43 +370,10 @@ for (let i = 0; i < scenes.length; i++) {
     const j = i > 0 ? i - 1 : scenes.findIndex((s) => s.asset);
     if (j < 0) throw new Error('Не намерих нито един кадър — проверете ключовете и мрежата.');
     scenes[i].asset = { ...scenes[j].asset, repeat: true };
+    await renderClip(i);
 }
+await voiceReady;
 writeFileSync(join(OUT, 'scenes.json'), JSON.stringify(scenes.map(({ asset, ...s }) => ({ ...s, asset: asset && { source: asset.source, kind: asset.kind, page: asset.page, author: asset.author, license: asset.license, score: asset.score, why: asset.why } })), null, 2));
-
-// ---------- 5. shots, cross-fades, sound ----------
-const MOVES = [
-    ["1+0.10*on/FR", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"],          // slow push in
-    ["1.10-0.10*on/FR", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"],       // slow pull out
-    ["1.10", "(iw-iw/zoom)*on/FR", "ih/2-(ih/zoom/2)"],                // pan left → right
-    ["1.10", "(iw-iw/zoom)*(1-on/FR)", "ih/2-(ih/zoom/2)"],            // pan right → left
-];
-const GRADE = 'eq=contrast=1.03:saturation=0.96';
-const GROUP = 12;
-const clips = new Array(scenes.length);
-let clipDone = 0;
-await pool([...scenes.entries()], cpu, async ([i, s]) => {
-    // Shots cross-fade inside groups of GROUP; groups are joined end to end without another
-    // encode (a plain cut every GROUP shots), so only the last shot of the video and the
-    // shots ending a group get no overlap
-    const endsGroup = (i + 1) % GROUP === 0 || i === scenes.length - 1;
-    const d = (s.end - s.start) + (i === scenes.length - 1 ? 0.3 : endsGroup ? 0 : T);
-    const frames = Math.max(2, Math.round(d * FPS));
-    const out = join(WORK, `clip-${String(i).padStart(4, '0')}.mp4`);
-    // intermediate files: fastest encode, near-lossless (the group pass makes the final one)
-    const enc = ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '16', '-pix_fmt', 'yuv420p', '-r', String(FPS)];
-    if (s.asset.kind === 'video') {
-        await ffA(['-stream_loop', '-1', '-i', s.asset.file, '-t', d.toFixed(3), '-an',
-            '-vf', `scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=${FPS},setsar=1,${GRADE}`, ...enc, out]);
-    } else {
-        const [z, x, y] = MOVES[i % MOVES.length].map((e) => e.replace(/FR/g, String(frames)));
-        await ffA(['-i', s.asset.file, '-frames:v', String(frames),
-            '-vf', `scale=3840:2160:force_original_aspect_ratio=increase,crop=3840:2160,zoompan=z='${z}':x='${x}':y='${y}':d=${frames}:s=1920x1080:fps=${FPS},setsar=1,${GRADE}`,
-            ...enc, out]);
-    }
-    clips[i] = { file: out, d: s.end - s.start, last: i === scenes.length - 1 };
-    process.stdout.write(`\rКадри: ${++clipDone} от ${scenes.length}   `);
-});
-process.stdout.write('\n');
 
 // Cross-fade the shots of each group (the groups encode at once, one per core), then join
 // the groups without re-encoding.

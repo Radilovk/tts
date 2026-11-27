@@ -114,8 +114,16 @@ export async function openverse(query) {
     }));
 }
 
-// Every source that can answer, for one query; a failing source is skipped (logged)
-export async function searchAll(query, kind, keys, log = () => {}) {
+// Every source that can answer, for one query; a failing source is skipped (logged).
+// The same query (e.g. "brain") recurs across scenes: asked once per run.
+const memo = new Map();
+export function searchAll(query, kind, keys, log = () => {}) {
+    const k = `${kind}|${String(query).toLowerCase()}`;
+    if (!memo.has(k)) memo.set(k, searchAllOnce(query, kind, keys, log));
+    return memo.get(k);
+}
+
+async function searchAllOnce(query, kind, keys, log) {
     const jobs = kind === 'video'
         ? [['Pixabay', () => pixabay(query, 'video', keys.pixabay)], ['Pexels', () => pexels(query, 'video', keys.pexels)]]
         : [['Pixabay', () => pixabay(query, 'photo', keys.pixabay)], ['Pexels', () => pexels(query, 'photo', keys.pexels)],

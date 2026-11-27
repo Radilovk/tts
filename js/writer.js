@@ -288,6 +288,26 @@ export async function writeNarration({ apiKey, model = '', mode, input, scenario
     scenario = `${scenario}\n\n${SPOKEN_RULES}`;
     const source = mode === 'topic' ? `ТЕМА / РАЗСЪЖДЕНИЕ:\n${material}` : `НАУЧЕН МАТЕРИАЛ (преразкажи го по сценария; не добавяй твърдения, които не следват от него или от установената наука):\n${material}`;
 
+    // A short text (up to ~6000 characters) is written in ONE request: a separate plan and
+    // acts only pay off for a long one (fast tools write a short script in a single call).
+    if (goal <= 6000) {
+        onProgress?.(0.05, 'Пиша…');
+        const r = await call({
+            system: scenario, task: 'write', what: 'целият текст', maxTokens: Math.round(goal * 0.8) + 24576,
+            prompt: `${source}
+
+Напиши целия аудиоразказ по сценария (неговата драматургия от началото до финала) — около ${goal} знака, не по-малко от ${Math.round(goal * 0.85)}.
+На първия ред напиши „ЗАГЛАВИЕ: …“, после празен ред и самия текст за четене на глас: абзаци, разделени с празен ред, без заглавия на части, без номера, без Markdown.`,
+            onDelta: (n, thinking, m) => onProgress?.(0.1 + 0.8 * Math.min(1, n / goal), `Пиша · ${m} · ${thinking && !n ? 'обмисля…' : `${n} знака`}`),
+        });
+        const m = r.text.match(/^\s*ЗАГЛАВИЕ:\s*(.+)\n/);
+        const text = cleanNarration(m ? r.text.slice(m[0].length) : r.text);
+        const title = (m ? m[1] : '').replace(/[*„“"]/g, '').trim();
+        onPart?.(0, text, 1);
+        onProgress?.(1, '');
+        return { title, text, model: r.model, ...usage, plan: null };
+    }
+
     // 1. The plan: the scenario's acts with their share of the length (+ facts for a topic)
     onProgress?.(0.02, 'Планирам разказа…');
     const planPrompt = `${source}
