@@ -8,7 +8,7 @@ import { encodeOpus } from './opus.js';
 import { detectLang } from './text.js';
 import { parseBook } from './parsers.js';
 import { libraryApi } from './shared.js';
-import { writeNarration, pickWriterModel, editForVoice } from './writer.js';
+import { writeNarration, pickWriterModel, editForVoice, setWriterLog } from './writer.js';
 import { SCENARIO } from './scenario.js';
 import { recordUsage, azureFreeLeft } from './usage.js';
 
@@ -46,6 +46,7 @@ function saveDraft() {
 
 export function initTextToFile(helpers) {
     ui = helpers;
+    setWriterLog((m) => ui.diag?.(m));
     // A file being prepared at half price: look once when the app starts
     if (draft.pending) setTimeout(() => checkPending(true), 4000);
 }
@@ -263,7 +264,7 @@ async function review(st, arc, label) {
     if (!st.apiKey || !draft.text.trim() || draft.text === draft.reviewed) return true;
     try {
         const r = await editForVoice({
-            apiKey: st.apiKey, model: await pickWriterModel(st.apiKey, 'flash'), text: draft.text,
+            apiKey: st.apiKey, text: draft.text,
             onProgress: (f, l) => { arc.style.strokeDashoffset = 125.7 * (1 - f); if (l) label.textContent = l; },
         });
         draft.text = r.text;
@@ -306,19 +307,10 @@ async function run() {
     ui.closeSheet();
     const { overlay, arc, label } = overlayOn('Подготвям текста…');
     try {
-        const g = geminiSetup(st);
-        const res = await narrateBlocks(p.blocks, {
-            engine, voice: engine === 'azure' ? draft.azure : g.voice, voiceKey: engine === 'azure' ? '' : voiceKeyOf(g),
-            apiKey: st.apiKey, freeKey: st.geminiFreeKey, gemini: g, azureKey: st.azureKey, region: st.azureRegion, locale: 'bg-BG', cache,
-            concurrency: engine === 'azure' ? 2 : 1,
-            afterGemini: (r, paid) => recordUsage({ engine: 'gemini', inTokens: r.inTokens, outTokens: r.outTokens, usd: paid ? geminiCost(g.model, r.inTokens, r.outTokens) : 0, mode: paid ? 'paid' : 'free' }),
-            afterBlock: (eng, chars) => { if (eng === 'azure') recordUsage({ engine: 'azure', chars }); },
-            onProgress: (d, n) => {
-                arc.style.strokeDashoffset = 125.7 * (1 - d / n);
-                label.textContent = `Озвучавам: ${d} от ${n} части`;
-            },
-            onIssue: (m) => ui.diag?.(m),
-        });
+        const res = await narrateBlocks(p.blocks, voiceOpts(st, engine, (d, n) => {
+            arc.style.strokeDashoffset = 125.7 * (1 - d / n);
+            label.textContent = `Озвучавам: ${d} от ${n} части`;
+        }));
         await finishFile(res, draft.title || p.paras[0].slice(0, 60), engine);
         overlay.classList.add('hidden');
         openTextToFile();
@@ -326,6 +318,78 @@ async function run() {
         overlay.classList.add('hidden');
         console.error(e);
         if (e.name !== 'AbortError') ui.toast(e.message || 'Аудио файлът не можа да се създаде.', { error: true, duration: 8000 });
+    }
+}
+
+// How narrateBlocks voices with the chosen engine (Gemini: free key first, usage recorded)
+function voiceOpts(st, engine, onProgress) {
+    const g = geminiSetup(st);
+    return {
+        engine, voice: engine === 'azure' ? draft.azure : g.voice, voiceKey: engine === 'azure' ? '' : voiceKeyOf(g),
+        apiKey: st.apiKey, freeKey: st.geminiFreeKey, gemini: g, azureKey: st.azureKey, region: st.azureRegion, locale: 'bg-BG', cache,
+        concurrency: engine === 'azure' ? 2 : 1,
+        afterGemini: (r, paid) => recordUsage({ engine: 'gemini', inTokens: r.inTokens, outTokens: r.outTokens, usd: paid ? geminiCost(g.model, r.inTokens, r.outTokens) : 0, mode: paid ? 'paid' : 'free' }),
+        afterBlock: (eng, chars) => { if (eng === 'azure') recordUsage({ engine: 'azure', chars }); },
+        onProgress,
+        onIssue: (m) => ui.diag?.(m),
+    };
+}
+
+function partBlocks(text, st) {
+    const azure = draft.engine === 'azure';
+    return planBlocks(prepareLongText(text), { maxBytes: azure ? AZURE_MAX_BYTES : geminiMaxBytes(st.geminiPassage), keepParagraphs: true });
+}
+
+// Plays the parts as they are voiced, one after another, while the rest is still being
+// written ("Слушай, докато се пише"). position() — where the listener is in the whole.
+class LivePlayer {
+    constructor(host) {
+        this.parts = [];
+        this.i = -1;
+        this.waiting = false;
+        this.audio = new Audio();
+        this.audio.onended = () => this.next();
+        this.btn = document.createElement('button');
+        this.btn.className = 'btn btn-accent lt-live hidden';
+        this.btn.textContent = '▶ Слушай, докато се пише';
+        this.btn.onclick = () => this.toggle();
+        host.appendChild(this.btn);
+    }
+
+    add(blob, dur) {
+        this.parts.push({ url: URL.createObjectURL(blob), dur });
+        this.btn.classList.remove('hidden');
+        if (this.waiting) this.next();
+    }
+
+    toggle() {
+        if (this.i < 0) return this.next();
+        if (this.audio.paused) { this.audio.play().catch(() => {}); this.btn.textContent = '❚❚ Пауза'; }
+        else { this.audio.pause(); this.btn.textContent = '▶ Продължи'; }
+    }
+
+    next() {
+        if (this.i + 1 >= this.parts.length) { this.waiting = true; this.btn.textContent = '… следващата част се озвучава'; return; }
+        this.waiting = false;
+        this.i++;
+        this.audio.src = this.parts[this.i].url;
+        this.audio.play().catch(() => {});
+        this.btn.textContent = '❚❚ Пауза';
+    }
+
+    get playing() {
+        return this.i >= 0 && (!this.audio.paused || this.waiting);
+    }
+
+    position() {
+        if (this.i < 0) return 0;
+        return this.parts.slice(0, this.i).reduce((a, p) => a + p.dur, 0) + (this.waiting ? this.parts[this.i].dur : this.audio.currentTime);
+    }
+
+    destroy() {
+        this.audio.pause();
+        this.btn.remove();
+        for (const p of this.parts) URL.revokeObjectURL(p.url);
     }
 }
 
@@ -453,30 +517,72 @@ async function write(andVoice) {
     if (!st.apiKey) return ui.toast('Нужен е Google (Gemini) API ключ.', { error: true });
     const mode = draft.source;
     const input = mode === 'topic' ? draft.topic : draft.text;
+    // "Сега" (or Microsoft): every act is edited and voiced while the next one is being
+    // written, and can be listened to at once; the file is ready right after the last act.
+    const voiceNow = andVoice && (draft.engine === 'azure' || draft.when === 'now');
     ui.closeSheet();
-    const overlay = $('#importOverlay');
-    const arc = $('#importArc');
-    const label = $('#importText');
-    arc.style.strokeDashoffset = 125.7;
-    label.textContent = 'Избирам модел…';
-    overlay.classList.remove('hidden');
+    const { overlay, arc, label } = overlayOn('Избирам модел…');
+    const live = voiceNow ? new LivePlayer(label.parentElement) : null;
+    const st8 = { writing: '', total: 0, edited: 0, voiced: 0 };
+    const show = () => {
+        label.textContent = [st8.writing, st8.total ? `редактирани ${st8.edited}/${st8.total}` : '', voiceNow && st8.total ? `озвучени ${st8.voiced}/${st8.total}` : '']
+            .filter(Boolean).join(' · ');
+    };
+    const edited = [], audio = [];
+    let chain = Promise.resolve(), failed = null;
     try {
-        const model = await pickWriterModel(st.apiKey, 'flash');
+        st8.writing = `Планирам с ${await pickWriterModel(st.apiKey, 'plan')}…`; show();
+        const onPart = (i, text, total) => {
+            st8.total = total;
+            chain = chain.then(async () => {
+                if (failed) return;
+                try {
+                    let t = text;
+                    try { t = (await editForVoice({ apiKey: st.apiKey, text })).text; } catch (e) { if (e.name === 'AbortError') throw e; }
+                    edited[i] = t;
+                    st8.edited++; show();
+                    if (!voiceNow) return;
+                    const res = await narrateBlocks(partBlocks(t, st), voiceOpts(st, draft.engine));
+                    audio[i] = res.pcm;
+                    st8.voiced++; show();
+                    live.add((await encodeOpus(res.pcm, RATE)) || pcmToWav(res.pcm, RATE), res.dur);
+                } catch (e) { failed = e; }
+            });
+        };
         const r = await writeNarration({
-            apiKey: st.apiKey, model, mode, input, scenario: SCENARIO,
-            onProgress: (f, l) => { arc.style.strokeDashoffset = 125.7 * (1 - f); if (l) label.textContent = l; },
+            apiKey: st.apiKey, mode, input, scenario: SCENARIO, onPart, expand: false,
+            onProgress: (f, l) => { arc.style.strokeDashoffset = 125.7 * (1 - f); if (l) { st8.writing = l; show(); } },
         });
-        draft.text = r.text;
-        draft.reviewed = '';
+        st8.writing = 'Текстът е написан';
+        show();
+        await chain;
+        if (failed) throw failed;
+        draft.text = edited.filter(Boolean).join('\n\n');
+        draft.reviewed = draft.text;     // already edited, act by act
         if (r.title) draft.title = r.title;
         draft.source = 'text';
         saveDraft();
-        await review(st, arc, label);
+        if (voiceNow) {
+            // One file of all the acts; the listener carries on in it from the same second
+            const parts = audio.filter(Boolean);
+            const pcm = new Int16Array(parts.reduce((a, p) => a + p.length, 0));
+            let o = 0;
+            for (const p of parts) { pcm.set(p, o); o += p.length; }
+            const at = live.playing ? live.position() : -1;
+            live.destroy();
+            await finishFile({ pcm, dur: pcm.length / RATE }, draft.title || draft.text.slice(0, 60), draft.engine);
+            overlay.classList.add('hidden');
+            openTextToFile();
+            const el = document.querySelector('.lt-audio');
+            if (el && at >= 0) { el.currentTime = at; el.play().catch(() => {}); }
+            return;
+        }
         overlay.classList.add('hidden');
-        ui.toast(`Текстът е готов: ${ui.fmtNum(r.text.length)} знака (${r.model}, ${ui.fmtNum(r.inTokens + r.outTokens)} токена).`, { duration: 6000 });
+        ui.toast(`Текстът е готов: ${ui.fmtNum(draft.text.length)} знака.`, { duration: 6000 });
         if (andVoice) return run();
         openTextToFile();
     } catch (e) {
+        live?.destroy();
         overlay.classList.add('hidden');
         console.error(e);
         if (e.name !== 'AbortError') ui.toast(e.message || 'Текстът не можа да се напише.', { error: true, duration: 8000 });

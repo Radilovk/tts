@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="bg">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Разказвач — изтегли за Android</title>
+    <meta name="description" content="Аудиокниги и научни разкази от вашите текстове — с естествен български глас. Изтеглете най-новата версия за Android.">
+    <meta name="theme-color" content="#F4EFE7" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#141210" media="(prefers-color-scheme: dark)">
+    <meta property="og:title" content="Разказвач — аудиокниги с естествен български глас">
+    <meta property="og:description" content="Книги, статии и теми, превърнати в живо разказване. Изтеглете приложението за Android.">
+    <meta property="og:image" content="https://radilovk.github.io/tts/icons/icon-512.png">
+    <link rel="icon" href="../icons/icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="../icons/icon-192.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Literata:opsz,wght@7..72,500;7..72,600&family=Inter:wght@400;500;600&display=swap&subset=cyrillic" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #F4EFE7; --surface: #FFFCF7; --ink: #1E1A16; --ink-2: #4A433C; --muted: #857A6E;
+            --line: rgba(30, 26, 22, .09); --accent: #B4532A; --accent-ink: #FFF8F1; --accent-soft: rgba(180, 83, 42, .11);
+            --shadow: 0 1px 2px rgba(40, 28, 16, .06), 0 8px 28px rgba(40, 28, 16, .08);
+            --serif: 'Literata', Georgia, serif; --sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #141210; --surface: #201C19; --ink: #EFE7DC; --ink-2: #CFC5B8; --muted: #998D80;
+                --line: rgba(239, 231, 220, .09); --accent: #E3895B; --accent-ink: #1A110B; --accent-soft: rgba(227, 137, 91, .14);
+                --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 28px rgba(0, 0, 0, .35);
+            }
+        }
+        * { box-sizing: border-box; margin: 0; }
+        body { background: var(--bg); color: var(--ink); font: 16px/1.55 var(--sans); -webkit-font-smoothing: antialiased; }
+        .wrap { max-width: 760px; margin: 0 auto; padding: max(28px, env(safe-area-inset-top)) 20px 40px; }
+        .hero { display: grid; justify-items: center; text-align: center; gap: 14px; padding: 28px 0 8px; }
+        .logo { width: 96px; height: 96px; border-radius: 24px; box-shadow: var(--shadow); animation: rise .5s ease both; }
+        h1 { font: 600 40px/1.1 var(--serif); letter-spacing: -.01em; animation: rise .5s .05s ease both; }
+        .lead { max-width: 30em; color: var(--ink-2); font-size: 17px; animation: rise .5s .1s ease both; }
+        .cta { display: grid; justify-items: center; gap: 10px; margin-top: 10px; animation: rise .5s .15s ease both; }
+        .btn { display: inline-flex; align-items: center; justify-content: center; gap: 10px; min-height: 56px; padding: 0 28px;
+            border-radius: 16px; font: 600 17px var(--sans); text-decoration: none; transition: transform .12s, box-shadow .2s; }
+        .btn:active { transform: scale(.97); }
+        .btn-primary { background: var(--accent); color: var(--accent-ink); box-shadow: 0 8px 24px var(--accent-soft); }
+        .btn-primary svg { width: 22px; height: 22px; }
+        .btn-ghost { min-height: 44px; padding: 0 18px; font-size: 15px; color: var(--ink-2); background: transparent; }
+        .btn-ghost:hover { color: var(--accent); }
+        .ver { font-size: 13px; color: var(--muted); min-height: 1.4em; }
+        h2 { font: 600 22px/1.25 var(--serif); margin: 44px 0 16px; }
+        .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+        .card { background: var(--surface); border-radius: 18px; padding: 18px; box-shadow: var(--shadow); }
+        .card b { display: block; font: 600 16px var(--sans); margin-bottom: 4px; }
+        .card p { color: var(--ink-2); font-size: 14.5px; }
+        .card .ic { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); margin-bottom: 12px; }
+        .card .ic svg { width: 20px; height: 20px; }
+        ol.steps { list-style: none; padding: 0; display: grid; gap: 10px; counter-reset: s; }
+        ol.steps li { counter-increment: s; display: grid; grid-template-columns: 34px 1fr; gap: 12px; align-items: start; background: var(--surface); border-radius: 16px; padding: 14px 16px; box-shadow: var(--shadow); color: var(--ink-2); font-size: 15px; }
+        ol.steps li::before { content: counter(s); width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+        ol.steps b { color: var(--ink); }
+        .note { margin-top: 14px; color: var(--muted); font-size: 14px; }
+        footer { margin-top: 48px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; display: flex; flex-wrap: wrap; gap: 6px 18px; justify-content: space-between; }
+        footer a { color: inherit; }
+        @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+        @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+        @media (max-width: 420px) { h1 { font-size: 34px; } .btn-primary { width: 100%; } .cta { width: 100%; } }
+    </style>
+</head>
+<body>
+<main class="wrap">
+    <section class="hero">
+        <img class="logo" src="../icons/icon-maskable-512.png" alt="" width="96" height="96">
+        <h1>Разказвач</h1>
+        <p class="lead">Книги, статии и цели теми, превърнати в живо разказване — с естествен български глас.</p>
+        <div class="cta">
+            <a class="btn btn-primary" id="dl" href="https://github.com/Radilovk/tts/releases/download/apk-latest/Razkazvach.apk">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
+                Изтегли за Android
+            </a>
+            <span class="ver" id="ver">Винаги най-новата версия</span>
+            <a class="btn btn-ghost" href="../">или отвори в браузъра →</a>
+        </div>
+    </section>
+
+    <h2>Какво прави</h2>
+    <div class="cards">
+        <div class="card">
+            <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2"/></svg></div>
+            <b>Жив разказвач</b>
+            <p>Gemini чете с интонация като професионален разказвач — избирате глас и стил.</p>
+        </div>
+        <div class="card">
+            <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><path d="M14 3v5h5M9 14v2M12 12v6M15 13.5v3"/></svg></div>
+            <b>Текст → аудио файл</b>
+            <p>Дайте тема или текст — получавате документален аудиоразказ като файл, готов за споделяне.</p>
+        </div>
+        <div class="card">
+            <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 6.5C10 5 7.2 4.5 3.5 4.8v13.4c3.7-.3 6.5.2 8.5 1.8 2-1.6 4.8-2.1 8.5-1.8V4.8C16.8 4.5 14 5 12 6.5Z"/><path d="M12 6.5V20"/></svg></div>
+            <b>Вашите книги</b>
+            <p>EPUB, PDF, FB2, DOCX, TXT — бележки и препратки не се четат, мястото се помни.</p>
+        </div>
+        <div class="card">
+            <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z"/></svg></div>
+            <b>Икономично</b>
+            <p>Безплатните лимити първо; цяла книга може да се озвучи нощем на половин цена.</p>
+        </div>
+    </div>
+
+    <h2>Инсталиране</h2>
+    <ol class="steps">
+        <li><span><b>Изтеглете</b> файла с бутона горе.</span></li>
+        <li><span><b>Отворете</b> го от известието или от „Изтегляния“. Ако телефонът попита — разрешете инсталиране от браузъра.</span></li>
+        <li><span><b>Готово.</b> При нова версия просто инсталирайте отгоре — книгите и настройките остават.</span></li>
+    </ol>
+    <p class="note">Линкът винаги води до последната версия — сглобява се автоматично при всяка промяна.</p>
+
+    <footer>
+        <span>Разказвач</span>
+        <a href="https://github.com/Radilovk/tts/releases/tag/apk-latest">Всички файлове на версията</a>
+    </footer>
+</main>
+<script>
+    // The current build: name, date and size from the public release (no key needed)
+    (async () => {
+        const el = document.getElementById('ver');
+        try {
+            const r = await fetch('https://api.github.com/repos/Radilovk/tts/releases/tags/apk-latest', { headers: { Accept: 'application/vnd.github+json' } });
+            if (!r.ok) return;
+            const rel = await r.json();
+            const apk = (rel.assets || []).find((a) => /\.apk$/i.test(a.name));
+            const ver = (rel.name || '').match(/[\d.]+$/)?.[0];
+            const when = apk?.updated_at || rel.published_at;
+            const parts = [];
+            if (ver) parts.push(`Версия ${ver}`);
+            if (when) parts.push(`обновена ${new Date(when).toLocaleDateString('bg-BG', { day: 'numeric', month: 'long', year: 'numeric' })}`);
+            if (apk?.size) parts.push(`${(apk.size / 1048576).toFixed(1)} MB`);
+            if (parts.length) el.textContent = parts.join(' · ');
+        } catch {}
+    })();
+</script>
+</body>
+</html>

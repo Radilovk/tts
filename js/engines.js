@@ -8,16 +8,16 @@ import { LOCALES } from './text.js';
 import { encodeOpus } from './opus.js';
 import { isNative, nativeVoices, nativeVoiceLabel, onNativeVoices } from './native.js';
 
+// Male voices: only the owner's picks (★ = the best ones, first); the others were removed.
 export const GEMINI_VOICES = [
+    ['Enceladus', '★ мъж., приглушен'], ['Iapetus', '★ мъж., ясен'], ['Sadaltager', '★ мъж., вещ'],
+    ['Algenib', 'мъж., дрезгав'], ['Algieba', 'мъж., мек'], ['Alnilam', 'мъж., твърд'], ['Rasalgethi', 'мъж., вещ'],
     ['Kore', 'жен., уверен'], ['Aoede', 'жен., лек'], ['Leda', 'жен., младежки'], ['Zephyr', 'жен., ярък'],
     ['Callirrhoe', 'жен., спокоен'], ['Autonoe', 'жен., ясен'], ['Despina', 'жен., топъл'], ['Erinome', 'жен., ясен'],
     ['Laomedeia', 'жен., жизнен'], ['Achernar', 'жен., мек'], ['Gacrux', 'жен., зрял'], ['Pulcherrima', 'жен., открит'],
     ['Vindemiatrix', 'жен., нежен'], ['Sulafat', 'жен., топъл'],
-    ['Charon', 'мъж., разказвач'], ['Puck', 'мъж., жив'], ['Fenrir', 'мъж., вълнуващ'], ['Orus', 'мъж., твърд'],
-    ['Enceladus', 'мъж., приглушен'], ['Iapetus', 'мъж., ясен'], ['Umbriel', 'мъж., спокоен'], ['Algieba', 'мъж., мек'],
-    ['Algenib', 'мъж., дрезгав'], ['Rasalgethi', 'мъж., вещ'], ['Alnilam', 'мъж., твърд'], ['Schedar', 'мъж., равен'],
-    ['Achird', 'мъж., приятелски'], ['Zubenelgenubi', 'мъж., непринуден'], ['Sadachbia', 'мъж., жив'], ['Sadaltager', 'мъж., вещ'],
 ];
+export const GEMINI_DEFAULT_VOICE = 'Enceladus';
 
 // Gemini 3.8 Flash TTS: Google's narration model ("long-form stability", 130 languages
 // incl. Bulgarian, the same 30 voices). The 2.5 / 3.1 preview TTS models shut down on
