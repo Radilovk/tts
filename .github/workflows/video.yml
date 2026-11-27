@@ -1,0 +1,125 @@
+name: Make video
+
+# Text → narrated video with fitting pictures and footage (scripts/video/make-video.mjs).
+# Two ways to start it:
+#   • Actions → "Make video" → Run workflow (topic or text);
+#   • a request file video/requests/<name>.json committed to any branch:
+#       { "topic": "…" } or { "text": "…" }, optional "title", "voice", "style",
+#       "max_chars" (prototype: e.g. 4000), "ai_images" (true), "burn_subtitles" (false)
+# The video, captions and description are kept as the run's artifact (30 days).
+# Secrets: GEMINI_API_KEY (required); PIXABAY_API_KEY, PEXELS_API_KEY, GEMINI_FREE_KEY (optional).
+
+on:
+  workflow_dispatch:
+    inputs:
+      topic: { description: 'Тема (Gemini пише текста по сценария)', required: false, default: '' }
+      text: { description: 'Или готов текст', required: false, default: '' }
+      title: { description: 'Заглавие (по желание)', required: false, default: '' }
+      voice: { description: 'Глас на Gemini разказвача', required: false, default: 'Enceladus' }
+      style: { description: 'Стил: intriguing, warm, dramatic, clear', required: false, default: 'clear' }
+      max_chars: { description: 'Само първите N знака (0 = целия текст)', required: false, default: '4000' }
+      ai_images: { description: 'AI картина, когато няма подходящ кадър', type: boolean, default: true }
+      burn_subtitles: { description: 'Субтитри в картината', type: boolean, default: false }
+  push:
+    paths: ['video/requests/**.json']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: video-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  video:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg > /dev/null && ffmpeg -version | head -1
+
+      - name: The request
+        id: req
+        env:
+          IN_TOPIC: ${{ inputs.topic }}
+          IN_TEXT: ${{ inputs.text }}
+          IN_TITLE: ${{ inputs.title }}
+          IN_VOICE: ${{ inputs.voice }}
+          IN_STYLE: ${{ inputs.style }}
+          IN_MAX: ${{ inputs.max_chars }}
+          IN_AI: ${{ inputs.ai_images }}
+          IN_SUBS: ${{ inputs.burn_subtitles }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          mkdir -p req
+          if [ "$EVENT" = "push" ]; then
+            # The request files added or changed by this push
+            git diff --name-only --diff-filter=AM HEAD~1 HEAD -- 'video/requests/*.json' > req/list.txt || true
+          else
+            node -e '
+              const e = process.env;
+              require("fs").writeFileSync("req/manual.json", JSON.stringify({ topic: e.IN_TOPIC, text: e.IN_TEXT, title: e.IN_TITLE,
+                voice: e.IN_VOICE, style: e.IN_STYLE, max_chars: Number(e.IN_MAX) || 0, ai_images: e.IN_AI !== "false", burn_subtitles: e.IN_SUBS === "true" }));'
+            echo req/manual.json > req/list.txt
+          fi
+          cat req/list.txt
+
+      - name: Make the videos
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_FREE_KEY: ${{ secrets.GEMINI_FREE_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+        run: |
+          [ -n "$PIXABAY_API_KEY" ] || echo "::notice::Няма PIXABAY_API_KEY — търся само в Wikimedia Commons, NASA и Openverse"
+          while read -r f; do
+            [ -f "$f" ] || continue
+            name=$(basename "$f" .json)
+            node -e '
+              const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+              const a = [];
+              if (r.text) { require("fs").writeFileSync("req/text.txt", r.text); a.push("req/text.txt"); }
+              else if (r.topic) a.push("--topic", r.topic);
+              else { console.error("Няма topic или text"); process.exit(1); }
+              if (r.title) a.push("--title", r.title);
+              a.push("--voice", r.voice || "Enceladus", "--style", r.style || "clear");
+              if (r.max_chars) a.push("--max-chars", String(r.max_chars));
+              if (r.ai_images === false) a.push("--no-ai-images");
+              if (r.burn_subtitles) a.push("--burn-subtitles");
+              require("fs").writeFileSync("req/args.json", JSON.stringify(a));' "$f"
+            node -e '
+              const { spawnSync } = require("child_process");
+              const a = JSON.parse(require("fs").readFileSync("req/args.json", "utf8"));
+              const r = spawnSync("node", ["scripts/video/make-video.mjs", ...a, "--out", "out/" + process.argv[1]], { stdio: "inherit" });
+              process.exit(r.status);' "$name"
+          done < req/list.txt
+
+      - name: Summary
+        if: always()
+        run: |
+          for d in out/*/; do
+            [ -f "$d/video.mp4" ] || continue
+            echo "### $(basename "$d")" >> "$GITHUB_STEP_SUMMARY"
+            echo "$(du -h "$d/video.mp4" | cut -f1) · $(ffprobe -v error -show_entries format=duration -of csv=p=0 "$d/video.mp4" | cut -d. -f1) сек." >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; head -40 "$d/description.txt" >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: video
+          path: |
+            out/*/video.mp4
+            out/*/captions.srt
+            out/*/description.txt
+            out/*/scenes.json
+          retention-days: 30
+          if-no-files-found: warn

@@ -40,6 +40,10 @@ export const TASKS = {
     plan: { models: ['gemini-4-neon', 'gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'high', label: 'план' },
     write: { models: ['gemini-4-neon', 'gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'high', label: 'писане' },
     edit: { models: ['gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'medium', label: 'редакция' },
+    // Video (scripts/video): what each scene shows needs judgement about the whole story;
+    // choosing among candidate pictures is looking, not deep reasoning
+    scenes: { models: ['gemini-4-neon', 'gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'high', label: 'сцени' },
+    look: { models: ['gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'medium', label: 'подбор на кадър' },
 };
 export const WRITER_FALLBACK = 'gemini-4-hydrogen';
 const unusable = new Set();     // models this key cannot use (this session)
@@ -174,11 +178,12 @@ async function streamOnce(url, body, signal, onDelta) {
     }
 }
 
-async function generate({ apiKey, task = 'write', model: override = '', system, prompt, search = false, json = false, maxTokens = 16384, signal, onDelta, what = '' }) {
+// parts: the user's message as parts (text and inline images) instead of a prompt string
+export async function generate({ apiKey, task = 'write', model: override = '', system, prompt, parts = null, search = false, json = false, maxTokens = 16384, signal, onDelta, what = '' }) {
     const level = TASKS[task]?.thinking || 'high';
     const body = (thinking) => ({
         systemInstruction: { parts: [{ text: system }] },
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        contents: [{ role: 'user', parts: parts || [{ text: prompt }] }],
         generationConfig: {
             temperature: json ? 0.6 : 0.85, maxOutputTokens: maxTokens,
             ...(json && !search ? { responseMimeType: 'application/json' } : {}),
@@ -222,7 +227,7 @@ async function generate({ apiKey, task = 'write', model: override = '', system, 
     throw lastErr || new Error('Няма достъпен модел за писане.');
 }
 
-function parseJson(t) {
+export function parseJson(t) {
     const s = t.indexOf('{'), e = t.lastIndexOf('}');
     if (s < 0 || e <= s) throw new Error('Планът на текста не се получи.');
     return JSON.parse(t.slice(s, e + 1));
