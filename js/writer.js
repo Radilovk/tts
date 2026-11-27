@@ -42,8 +42,9 @@ export const SPOKEN_RULES = `ПРАВИЛА ЗА ЗАПИС ЗА ГЛАС (те�
 // quality matters and the output is small (so the price gap is pennies), the better model
 // (Neon) is used; where the work is mechanical or high-volume, the cheaper one (Hydrogen).
 //   plan   — small JSON, but sets the depth of the whole story: Neon, high
-//   write  — the narration itself, the thing that must be deep and true: Neon, high
-//            (≈ $0.15–0.30 more than Hydrogen for a whole video — negligible, so the better one)
+//   write  — the narration itself, the thing that must be deep and true: Neon, medium
+//            (Neon for the quality — ≈ $0.15–0.30 over Hydrogen per video, negligible; medium,
+//            not high, so it is not needlessly slow — high stays for the plan and the scenes)
 //   edit   — reshape the same text for the voice, no new content, runs on the WHOLE text:
 //            Hydrogen (mechanical, high-volume → the cheaper model), medium
 //   scenes — what each shot shows + visual metaphors, needs the whole narrative: Neon, high
@@ -51,7 +52,7 @@ export const SPOKEN_RULES = `ПРАВИЛА ЗА ЗАПИС ЗА ГЛАС (те�
 //            Hydrogen, low thinking (speed and cost; the extra depth buys nothing here)
 export const TASKS = {
     plan: { models: ['gemini-4-neon', 'gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'high', label: 'план' },
-    write: { models: ['gemini-4-neon', 'gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'high', label: 'писане' },
+    write: { models: ['gemini-4-neon', 'gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'medium', label: 'писане' },
     edit: { models: ['gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'medium', label: 'редакция' },
     scenes: { models: ['gemini-4-neon', 'gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'high', label: 'сцени' },
     look: { models: ['gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'low', label: 'подбор на кадър' },
@@ -278,6 +279,9 @@ export async function writeNarration({ apiKey, model = '', mode, input, scenario
         return r;
     };
     const goal = Math.round(minChars * (expand ? 1.1 : 1.2));
+    // One act per ~4500 characters (3–8): fewer, larger acts = fewer slow round-trips for a
+    // short text, the full dramaturgy only for a long one.
+    const wantActs = Math.max(3, Math.min(8, Math.round(goal / 4500)));
     scenario = `${scenario}\n\n${SPOKEN_RULES}`;
     const source = mode === 'topic' ? `ТЕМА / РАЗСЪЖДЕНИЕ:\n${material}` : `НАУЧЕН МАТЕРИАЛ (преразкажи го по сценария; не добавяй твърдения, които не следват от него или от установената наука):\n${material}`;
 
@@ -288,7 +292,7 @@ export async function writeNarration({ apiKey, model = '', mode, input, scenario
 Направи план за аудиоразказа по сценария. Върни САМО JSON:
 {"title": "заглавие", "facts": ["проверени факти, имена, години, експерименти, които разказът ще използва${mode === 'topic' ? ' — само реални, проверими' : ' — от материала'}"],
  "sections": [{"name": "Пролог", "beats": "какво точно се случва в тази част, кои идеи и примери", "chars": 3500}, ...]}
-Частите следват драматургията на сценария (пролог, разгръщане, откритие, разширяване, неочакван извод, финал); може разгръщането и разширяването да са по две части. Сборът на "chars" е около ${goal} знака.`;
+Частите следват драматургията на сценария (пролог, разгръщане, откритие, разширяване, неочакван извод, финал). Направи точно ${wantActs} части (при по-малко — обедини съседни етапи; при повече — раздели разгръщането и разширяването), всяка около ${Math.round(goal / wantActs)} знака. Сборът на "chars" е около ${goal} знака.`;
     let plan;
     try {
         plan = parseJson((await call({ system: scenario, prompt: planPrompt, search: search && mode === 'topic', json: true, maxTokens: 32768, what: 'план', task: 'plan' })).text);

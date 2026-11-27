@@ -243,8 +243,10 @@ async function aiPicture(scene, file) {
 }
 
 const aiLimit = opt['no-ai-images'] ? 0 : Math.ceil(scenes.length * 0.2);
-let aiUsed = 0;
-for (const [idx, scene] of scenes.entries()) {
+let aiUsed = 0, sceneDone = 0;
+// Scenes are independent (search → look → download), so several run at once; the shared
+// `used` set is marked at pick time so two scenes rarely grab the same asset.
+async function fillScene(idx, scene) {
     scene.idx = idx;
     const dur = scene.end - scene.start;
     let pick = null;
@@ -255,7 +257,6 @@ for (const [idx, scene] of scenes.entries()) {
         found.push(...await searchAll(q, 'photo', keys));
         const cands = found.filter((c) => !used.has(c.id) && !seen.has(c.id) && (c.kind !== 'video' || !c.duration || c.duration >= Math.min(dur, 6)));
         cands.forEach((c) => seen.add(c.id));
-        // footage first when motion matters, then the sources' own order
         cands.sort((a, b) => (scene.kind === 'video' ? (b.kind === 'video') - (a.kind === 'video') : 0));
         if (!cands.length) continue;
         const r = await choose(scene, cands.slice(0, 8)).catch((e) => { log(`  подбор: ${e.message}`); return null; });
@@ -263,19 +264,23 @@ for (const [idx, scene] of scenes.entries()) {
         if (pick && pick.score >= 7) break;
     }
     const file = join(WORK, `asset-${String(idx).padStart(4, '0')}`);
-    if ((!pick || pick.score < 5) && aiUsed < aiLimit && await aiPicture(scene, `${file}.png`).catch(() => false)) {
+    if (pick?.id) used.add(pick.id);   // claim it now, before the slow download
+    if ((!pick || pick.score < 5) && aiUsed < aiLimit) {
         aiUsed++;
-        scene.asset = { kind: 'photo', file: `${file}.png`, source: 'AI (Gemini)', author: '', page: '', license: 'генерирано изображение' };
-    } else if (pick?.id) {
-        used.add(pick.id);
-        const ext = pick.kind === 'video' ? '.mp4' : '.jpg';
-        const r = await fetch(pick.url, { headers: { 'User-Agent': 'Razkazvach-video/1.0' } });
-        if (r.ok) {
-            writeFileSync(file + ext, Buffer.from(await r.arrayBuffer()));
-            scene.asset = { ...pick, file: file + ext };
-        }
+        if (await aiPicture(scene, `${file}.png`).catch(() => false)) {
+            scene.asset = { kind: 'photo', file: `${file}.png`, source: 'AI (Gemini)', author: '', page: '', license: 'генерирано изображение' };
+        } else { aiUsed--; }
     }
-    log(`Сцена ${idx + 1}/${scenes.length} (${dur.toFixed(1)} с): ${scene.asset ? `${scene.asset.source} ${scene.asset.kind}${pick?.score != null && scene.asset.source !== 'AI (Gemini)' ? ` · ${pick.score}/10` : ''}` : '— без кадър'} — ${scene.visual.slice(0, 70)}`);
+    if (!scene.asset && pick?.id) {
+        const ext = pick.kind === 'video' ? '.mp4' : '.jpg';
+        const r = await fetch(pick.url, { headers: { 'User-Agent': 'Razkazvach-video/1.0' } }).catch(() => null);
+        if (r?.ok) { writeFileSync(file + ext, Buffer.from(await r.arrayBuffer())); scene.asset = { ...pick, file: file + ext }; }
+    }
+    log(`Сцена ${++sceneDone}/${scenes.length} (${dur.toFixed(1)} с): ${scene.asset ? `${scene.asset.source} ${scene.asset.kind}${pick?.score != null && scene.asset.source !== 'AI (Gemini)' ? ` · ${pick.score}/10` : ''}` : '— без кадър'} — ${scene.visual.slice(0, 70)}`);
+}
+{
+    let next = 0;
+    await Promise.all(Array.from({ length: 4 }, async () => { while (next < scenes.length) { const i = next++; await fillScene(i, scenes[i]); } }));
 }
 // A scene with nothing at all keeps the previous shot on screen a little longer
 for (let i = 0; i < scenes.length; i++) {
