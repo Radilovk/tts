@@ -28,24 +28,58 @@ export const SPOKEN_RULES = `ПРАВИЛА ЗА ЗАПИС ЗА ГЛАС (те�
 - Препратки към литература, години в скоби, URL адреси и цитиране на източници не се пишат.
 - Пряката реч — без тирета в началото на реда; „казва той“ се вплита в изречението.
 - Кавички, тирета и точка и запетая — пестеливо; повтарящи се „и“, „но“ в началото на изреченията се избягват.`;
-export const WRITER_FALLBACK = 'gemini-3.6-flash';   // 2.5 Flash is deprecated (routed elsewhere from 1.12.2026)
-const SKIP = /lite|tts|image|live|audio|embed|thinking|exp|learnlm|robotics|computer|nano|gemma/i;
+// Each task gets the model that fits it (Google's guidance, docs/choosing-a-model):
+//   plan  — the story's structure and its facts (with Google Search): the deepest
+//           reasoning for science and knowledge work — Gemini 4 Neon, thinking high;
+//   write — the acts: long, precise, vivid prose by the plan — Neon as well;
+//   edit  — the same text in a form for the voice (rules only, no new content) —
+//           Gemini 4 Hydrogen (frontier class, fewer invented claims), thinking medium.
+// The list is tried in order: a model the key cannot use (Neon needs the paid tier, a
+// model missing for the key) gives way to the next one and is not asked again this session.
+export const TASKS = {
+    plan: { models: ['gemini-4-neon', 'gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'high', label: 'план' },
+    write: { models: ['gemini-4-neon', 'gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'high', label: 'писане' },
+    edit: { models: ['gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'medium', label: 'редакция' },
+};
+export const WRITER_FALLBACK = 'gemini-4-hydrogen';
+const unusable = new Set();     // models this key cannot use (this session)
+let listed = null;              // the models the key lists (null = unknown)
 
-// The newest Flash (or Pro) text model this key can use, e.g. gemini-3-flash-preview
-export async function pickWriterModel(apiKey, kind = 'flash') {
+async function listModels(apiKey) {
+    if (listed) return listed;
     try {
-        const data = await fetchJson(`${BASE}/models?pageSize=200&key=${encodeURIComponent(apiKey)}`, {}, 20000);
-        const re = new RegExp(`^models/gemini-(\\d+(?:\\.\\d+)?)-${kind}(-preview(?:-[\\d-]+)?|-\\d{3})?$`);
-        const list = (data.models || [])
-            .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
-            .map((m) => ({ id: m.name.replace('models/', ''), m: m.name.match(re) }))
-            .filter((x) => x.m && !SKIP.test(x.id))
-            .map((x) => ({ id: x.id, v: parseFloat(x.m[1]), preview: !!x.m[2] && x.m[2].startsWith('-preview'), dated: /\d/.test(x.m[2] || '') }))
-            .sort((a, b) => b.v - a.v || a.preview - b.preview || a.dated - b.dated);
-        return list[0]?.id || WRITER_FALLBACK;
+        const data = await fetchJson(`${BASE}/models?pageSize=500&key=${encodeURIComponent(apiKey)}`, {}, 20000);
+        listed = new Set((data.models || []).filter((m) => (m.supportedGenerationMethods || []).includes('generateContent')).map((m) => m.name.replace('models/', '')));
     } catch {
-        return WRITER_FALLBACK;
+        listed = new Set();
     }
+    return listed;
+}
+
+// The models to try for a task, best first (an explicit model — e.g. --model — goes first)
+async function modelsFor(apiKey, task, override = '') {
+    const all = await listModels(apiKey);
+    let list = TASKS[task]?.models || TASKS.write.models;
+    if (all.size) {
+        const known = list.filter((m) => all.has(m));
+        if (known.length) list = known;
+    }
+    list = list.filter((m) => !unusable.has(m));
+    if (override) list = [override, ...list.filter((m) => m !== override)];
+    return list.length ? list : [WRITER_FALLBACK];
+}
+
+// The model a task would use now (shown to the user; kind 'flash'/'pro' kept for old calls)
+export async function pickWriterModel(apiKey, task = 'write') {
+    return (await modelsFor(apiKey, TASKS[task] ? task : 'write'))[0];
+}
+
+// A refusal that means "this key cannot use this model", not "try again later"
+function modelRefused(e) {
+    const t = `${e.message} ${e.raw || ''}`;
+    if (e.status === 403 || e.status === 404) return true;
+    if (e.status === 429 && /limit:\s*0|free[_ ]?tier|FreeTier|billing|paid tier/i.test(t)) return true;
+    return e.status === 400 && /model|not (found|supported)|unsupported/i.test(t) && !/think/i.test(t);
 }
 
 function textOf(data) {
@@ -53,10 +87,10 @@ function textOf(data) {
     return parts.filter((p) => !p.thought && typeof p.text === 'string').map((p) => p.text).join('').trim();
 }
 
-// The newest Flash models "think" at length before every answer by default (minutes for
-// a long part). Writing a story by a detailed plan, and editing, need little of that:
-// thinking_level "low" — the fastest level every current Flash model accepts.
-let thinkingOk = true;
+// Thinking is left on, at the level the task needs (see TASKS); thought summaries are
+// streamed too (includeThoughts), so a long think is visible and never mistaken for a
+// stalled request. A model that does not take a thinking level is asked without it.
+const noThinkingLevel = new Set();
 
 // Every request is timed in the app's diagnostics (Настройки → Диагностика), so a slow
 // answer shows its real cause: the model, a retry, a 429, a stall.
@@ -64,14 +98,18 @@ let logFn = null;
 export function setWriterLog(fn) { logFn = fn; }
 const log = (m) => { try { logFn?.(m); } catch {} };
 
-const IDLE_MS = 45000;      // nothing for this long while streaming: the request is stuck
-const TOTAL_MS = 300000;
+const FIRST_MS = 150000;    // until the first chunk (a deep think may take a while)
+const IDLE_MS = 60000;      // between chunks: nothing for this long means the request is stuck
+const TOTAL_MS = 600000;
 
 function httpError(status, data) {
     const msg = data?.error?.message || `HTTP ${status}`;
-    return Object.assign(new Error(status === 429 ? 'Достигнат лимит на заявките към Gemini. Опитвам отново…' : msg), {
-        status, retryable: status === 429 || status >= 500, raw: msg + ' ' + JSON.stringify(data?.error?.details || []),
+    const raw = msg + ' ' + JSON.stringify(data?.error?.details || []);
+    const e = Object.assign(new Error(status === 429 ? 'Достигнат лимит на заявките към Gemini. Опитвам отново…' : msg), {
+        status, retryable: status === 429 || status >= 500, raw,
     });
+    if (modelRefused(e)) e.retryable = false;     // "limit: 0" is no limit to wait out: next model at once
+    return e;
 }
 
 // One streamed answer (server-sent events): the text arrives as it is written, so the
@@ -85,7 +123,8 @@ async function streamOnce(url, body, signal, onDelta) {
     // Cut: abort the request and also release a read that is waiting (some streams do not
     // end on abort)
     const cut = (w) => { why = w; ctrl.abort(); reader?.cancel().catch(() => {}); };
-    const arm = () => { clearTimeout(idle); idle = setTimeout(() => cut('idle'), IDLE_MS); };
+    let got = false;
+    const arm = () => { clearTimeout(idle); idle = setTimeout(() => cut('idle'), got ? IDLE_MS : FIRST_MS); };
     const total = setTimeout(() => cut('total'), TOTAL_MS);
     try {
         arm();
@@ -102,6 +141,7 @@ async function streamOnce(url, body, signal, onDelta) {
             const { value, done } = await reader.read();
             if (why) throw new DOMException('Cut', 'AbortError');
             if (done) break;
+            got = true;
             arm();
             buf += dec.decode(value, { stream: true });
             let nl;
@@ -113,7 +153,8 @@ async function streamOnce(url, body, signal, onDelta) {
                 try { d = JSON.parse(line.slice(5)); } catch { continue; }
                 if (d.error) throw httpError(d.error.code || 500, d);
                 const piece = textOf(d);
-                if (piece) { text += piece; onDelta?.(text.length); }
+                if (piece) { text += piece; onDelta?.(text.length, false); }
+                else if (d?.candidates?.[0]?.content?.parts?.some((p) => p.thought)) onDelta?.(text.length, true);
                 if (d.usageMetadata) usage = d.usageMetadata;
                 finish = d?.candidates?.[0]?.finishReason || finish;
             }
@@ -122,7 +163,7 @@ async function streamOnce(url, body, signal, onDelta) {
     } catch (e) {
         if (signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
         if (e.name === 'AbortError') {
-            throw Object.assign(new Error(why === 'idle' ? `Gemini не изпрати нищо ${IDLE_MS / 1000} сек. — питам наново` : 'Gemini не отговори навреме — питам наново'), { status: 0, retryable: true });
+            throw Object.assign(new Error(why === 'idle' ? `Gemini не изпрати нищо ${(got ? IDLE_MS : FIRST_MS) / 1000} сек. — питам наново` : 'Gemini не отговори навреме — питам наново'), { status: 0, retryable: true });
         }
         if (e.status) throw e;
         throw Object.assign(new Error((typeof navigator === 'undefined' || navigator.onLine) ? 'Мрежова грешка.' : 'Няма интернет връзка.'), { status: 0, retryable: true });
@@ -133,39 +174,52 @@ async function streamOnce(url, body, signal, onDelta) {
     }
 }
 
-async function generate({ apiKey, model, system, prompt, search = false, json = false, maxTokens = 16384, signal, onDelta, what = '' }) {
+async function generate({ apiKey, task = 'write', model: override = '', system, prompt, search = false, json = false, maxTokens = 16384, signal, onDelta, what = '' }) {
+    const level = TASKS[task]?.thinking || 'high';
     const body = (thinking) => ({
         systemInstruction: { parts: [{ text: system }] },
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         generationConfig: {
             temperature: json ? 0.6 : 0.85, maxOutputTokens: maxTokens,
             ...(json && !search ? { responseMimeType: 'application/json' } : {}),
-            ...(thinking ? { thinkingConfig: { thinkingLevel: 'low' } } : {}),
+            thinkingConfig: { includeThoughts: true, ...(thinking ? { thinkingLevel: level } : {}) },
         },
         ...(search ? { tools: [{ google_search: {} }] } : {}),
     });
-    const url = `${BASE}/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
-    let tries = 0;
-    const send = (thinking) => withRetry(async () => {
-        tries++;
-        const t0 = Date.now();
+    let lastErr = null;
+    for (const model of await modelsFor(apiKey, task, override)) {
+        const url = `${BASE}/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
+        const name = `Gemini ${model} (${what || TASKS[task]?.label || task}${TASKS[task] ? `, мислене ${level}` : ''})`;
+        let tries = 0;
+        const send = (thinking) => withRetry(async () => {
+            tries++;
+            const t0 = Date.now();
+            try {
+                const r = await streamOnce(url, body(thinking), signal, (n, thinkingNow) => onDelta?.(n, thinkingNow, model));
+                log(`${name}: ${((Date.now() - t0) / 1000).toFixed(0)} сек., ${r.text.length} знака, ${r.outTokens} токена${tries > 1 ? `, опит ${tries}` : ''}`);
+                return { ...r, model };
+            } catch (e) {
+                log(`${name}: ${((Date.now() - t0) / 1000).toFixed(0)} сек. — ${e.message}`);
+                throw e;
+            }
+        }, signal, 4);
         try {
-            const r = await streamOnce(url, body(thinking), signal, onDelta);
-            log(`Gemini ${model}${what ? ` (${what})` : ''}: ${((Date.now() - t0) / 1000).toFixed(0)} сек., ${r.text.length} знака, ${r.outTokens} токена${tries > 1 ? `, опит ${tries}` : ''}`);
-            return r;
+            try {
+                return await send(!noThinkingLevel.has(model));
+            } catch (e) {
+                // This model does not take a thinking level: ask once more without it
+                if (noThinkingLevel.has(model) || e.status !== 400 || !/think/i.test(e.message + (e.raw || ''))) throw e;
+                noThinkingLevel.add(model);
+                return await send(false);
+            }
         } catch (e) {
-            log(`Gemini ${model}${what ? ` (${what})` : ''}: ${((Date.now() - t0) / 1000).toFixed(0)} сек. — ${e.message}`);
-            throw e;
+            if (e.name === 'AbortError' || !modelRefused(e)) throw e;
+            unusable.add(model);
+            log(`${model} не е достъпен с този ключ — минавам на следващия модел`);
+            lastErr = e;
         }
-    }, signal, 4);
-    try {
-        return await send(thinkingOk);
-    } catch (e) {
-        // A model without thinking levels: ask once more without, and never again
-        if (!thinkingOk || e.status !== 400 || !/think/i.test(e.message + (e.raw || ''))) throw e;
-        thinkingOk = false;
-        return send(false);
     }
+    throw lastErr || new Error('Няма достъпен модел за писане.');
 }
 
 function parseJson(t) {
@@ -195,15 +249,16 @@ const len = (parts) => parts.reduce((a, p) => a + p.length, 0) + Math.max(0, par
 // onPart(i, text, total): each act as soon as it is written — the caller edits and voices it
 // while the next one is being written. expand=false (with onPart): no rewriting at the end
 // (a voiced act is never replaced), so each act is asked a little longer from the start.
-export async function writeNarration({ apiKey, model, mode, input, scenario = SCENARIO, minChars = 25000, search = true, signal, onProgress, onPart, expand = true }) {
+export async function writeNarration({ apiKey, model = '', mode, input, scenario = SCENARIO, minChars = 25000, search = true, signal, onProgress, onPart, expand = true }) {
     if (!apiKey) throw new Error('Нужен е Google (Gemini) API ключ.');
     const material = String(input || '').trim();
     if (!material) throw new Error(mode === 'topic' ? 'Въведете тема.' : 'Няма текст за преработка.');
-    model ||= await pickWriterModel(apiKey);
     const usage = { inTokens: 0, outTokens: 0 };
+    const used = new Set();
     const call = async (o) => {
         const r = await generate({ apiKey, model, signal, ...o });
         usage.inTokens += r.inTokens; usage.outTokens += r.outTokens;
+        used.add(r.model);
         return r;
     };
     const goal = Math.round(minChars * (expand ? 1.1 : 1.2));
@@ -220,11 +275,11 @@ export async function writeNarration({ apiKey, model, mode, input, scenario = SC
 Частите следват драматургията на сценария (пролог, разгръщане, откритие, разширяване, неочакван извод, финал); може разгръщането и разширяването да са по две части. Сборът на "chars" е около ${goal} знака.`;
     let plan;
     try {
-        plan = parseJson((await call({ system: scenario, prompt: planPrompt, search: search && mode === 'topic', json: true, maxTokens: 8192, what: 'план' })).text);
+        plan = parseJson((await call({ system: scenario, prompt: planPrompt, search: search && mode === 'topic', json: true, maxTokens: 32768, what: 'план', task: 'plan' })).text);
     } catch (e) {
         if (e.name === 'AbortError') throw e;
         // Without search (not every key/model allows it), then once more as plain JSON
-        plan = parseJson((await call({ system: scenario, prompt: planPrompt, json: true, maxTokens: 8192, what: 'план без търсене' })).text);
+        plan = parseJson((await call({ system: scenario, prompt: planPrompt, json: true, maxTokens: 32768, what: 'план без търсене', task: 'plan' })).text);
     }
     const sections = (plan.sections || []).filter((s) => s && s.name).slice(0, 10);
     if (!sections.length) throw new Error('Планът на текста не се получи.');
@@ -248,8 +303,8 @@ ${before ? `ТЕКСТЪТ ДОТУК (последната част):\n…${bef
 Върни само самия текст за четене на глас: абзаци, разделени с празен ред, без заглавия, без номера, без Markdown, без бележки за музика или паузи.`;
         const label = `Пиша: ${s.name} (${i + 1}/${sections.length})`;
         const r = await call({
-            system: scenario, prompt, what: s.name, maxTokens: Math.round(s.chars * 0.8) + 4096,
-            onDelta: (n) => onProgress?.(0.08 + 0.8 * i / sections.length, `${label} · ${n} знака`),
+            system: scenario, prompt, what: s.name, task: 'write', maxTokens: Math.round(s.chars * 0.8) + 24576,
+            onDelta: (n, thinking, m) => onProgress?.(0.08 + 0.8 * i / sections.length, `${label} · ${m} · ${thinking && !n ? 'обмисля…' : `${n} знака`}`),
         });
         return cleanNarration(r.text);
     };
@@ -271,7 +326,7 @@ ${before ? `ТЕКСТЪТ ДОТУК (последната част):\n…${bef
     }
     onProgress?.(1, '');
     const text = parts.filter(Boolean).join('\n\n');
-    return { title: String(plan.title || '').trim(), text, model, ...usage, plan: { ...plan, sections } };
+    return { title: String(plan.title || '').trim(), text, model: [...used].join(', '), ...usage, plan: { ...plan, sections } };
 }
 
 // ---------- review and edit for the voice ----------
@@ -303,16 +358,15 @@ function pieces(text, max = 6000) {
 }
 
 // → { text, model, inTokens, outTokens, kept } (kept: pieces left as they were)
-export async function editForVoice({ apiKey, model, text, signal, onProgress }) {
+export async function editForVoice({ apiKey, model = '', text, signal, onProgress }) {
     if (!apiKey) throw new Error('Нужен е Google (Gemini) API ключ.');
-    model ||= await pickWriterModel(apiKey);
     const list = pieces(text);
     const out = new Array(list.length);
     let inTokens = 0, outTokens = 0, kept = 0, done = 0, next = 0;
     // Pieces are independent (each gets the end of the one before as context): 3 at a time
     const one = async (i) => {
         const before = i ? `(Предходният откъс завършва така: „…${list[i - 1].slice(-300)}“)\n\n` : '';
-        const r = await generate({ apiKey, model, system: EDITOR, prompt: `${before}ОТКЪС ЗА РЕДАКЦИЯ:\n\n${list[i]}`, maxTokens: Math.round(list[i].length * 0.8) + 4096, signal, what: `редакция ${i + 1}/${list.length}` });
+        const r = await generate({ apiKey, model, system: EDITOR, prompt: `${before}ОТКЪС ЗА РЕДАКЦИЯ:\n\n${list[i]}`, maxTokens: Math.round(list[i].length * 0.8) + 16384, signal, task: 'edit', what: `редакция ${i + 1}/${list.length}` });
         inTokens += r.inTokens; outTokens += r.outTokens;
         const t = cleanNarration(r.text);
         const ratio = t.length / list[i].length;
@@ -323,5 +377,5 @@ export async function editForVoice({ apiKey, model, text, signal, onProgress }) 
     onProgress?.(0, `Редактирам за слушане: 0 от ${list.length}`);
     await Promise.all(Array.from({ length: Math.min(3, list.length) }, async () => { while (next < list.length) await one(next++); }));
     onProgress?.(1, '');
-    return { text: out.join('\n\n'), model, inTokens, outTokens, kept };
+    return { text: out.join('\n\n'), model: model || (await pickWriterModel(apiKey, 'edit')), inTokens, outTokens, kept };
 }

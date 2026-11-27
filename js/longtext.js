@@ -264,7 +264,7 @@ async function review(st, arc, label) {
     if (!st.apiKey || !draft.text.trim() || draft.text === draft.reviewed) return true;
     try {
         const r = await editForVoice({
-            apiKey: st.apiKey, model: await pickWriterModel(st.apiKey, 'flash'), text: draft.text,
+            apiKey: st.apiKey, text: draft.text,
             onProgress: (f, l) => { arc.style.strokeDashoffset = 125.7 * (1 - f); if (l) label.textContent = l; },
         });
         draft.text = r.text;
@@ -531,15 +531,14 @@ async function write(andVoice) {
     const edited = [], audio = [];
     let chain = Promise.resolve(), failed = null;
     try {
-        const model = await pickWriterModel(st.apiKey, 'flash');
-        st8.writing = `Пиша с ${model}…`; show();
+        st8.writing = `Планирам с ${await pickWriterModel(st.apiKey, 'plan')}…`; show();
         const onPart = (i, text, total) => {
             st8.total = total;
             chain = chain.then(async () => {
                 if (failed) return;
                 try {
                     let t = text;
-                    try { t = (await editForVoice({ apiKey: st.apiKey, model, text })).text; } catch (e) { if (e.name === 'AbortError') throw e; }
+                    try { t = (await editForVoice({ apiKey: st.apiKey, text })).text; } catch (e) { if (e.name === 'AbortError') throw e; }
                     edited[i] = t;
                     st8.edited++; show();
                     if (!voiceNow) return;
@@ -551,7 +550,7 @@ async function write(andVoice) {
             });
         };
         const r = await writeNarration({
-            apiKey: st.apiKey, model, mode, input, scenario: SCENARIO, onPart, expand: false,
+            apiKey: st.apiKey, mode, input, scenario: SCENARIO, onPart, expand: false,
             onProgress: (f, l) => { arc.style.strokeDashoffset = 125.7 * (1 - f); if (l) { st8.writing = l; show(); } },
         });
         st8.writing = 'Текстът е написан';

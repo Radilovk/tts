@@ -11,7 +11,7 @@
 //   node scripts/narrate.mjs статия.txt --dry-run              → само план: блокове, знаци, цена
 //   node scripts/narrate.mjs --topic "Защо мозъкът предсказва" → Gemini пише по сценария, после аудио
 //   node scripts/narrate.mjs материал.txt --rewrite            → преразказ по сценария, после аудио
-//     + --text-only (само текстът), --writer pro, --scenario мой-сценарий.txt
+//     + --text-only (само текстът), --scenario мой-сценарий.txt, --model (един модел за всичко; иначе по задача)
 //   Всеки текст минава преглед и редакция за глас (Gemini; съкращения, скоби, символи,
 //   дълги изречения), ако има GEMINI_API_KEY; --no-review го спира. Редактираният текст
 //   се записва до аудиото (… (за глас).txt).
@@ -91,8 +91,8 @@ if (opt.topic || opt.rewrite) {
     const { SCENARIO } = await import('../js/scenario.js');
     const key = process.env.GEMINI_API_KEY || process.env.GOOGLE_TTS_KEY || '';
     if (!key) { console.error('Липсва GEMINI_API_KEY за писането.'); process.exit(2); }
-    const model = opt.model || await pickWriterModel(key, opt.writer === 'pro' ? 'pro' : 'flash');
-    console.log(`Пиша с ${model} по сценария…`);
+    const model = opt.model || '';   // empty: each task picks its own model (plan/write: Gemini 4 Neon, edit: Hydrogen)
+    console.log(`Пиша по сценария (${model || await pickWriterModel(key, 'plan')})…`);
     const w = await writeNarration({
         apiKey: key, model, mode: opt.topic ? 'topic' : 'rewrite', input: opt.topic ? String(opt.topic) : raw,
         scenario: opt.scenario ? readFileSync(resolve(String(opt.scenario)), 'utf8') : SCENARIO, search: !opt['no-search'],
@@ -110,8 +110,8 @@ if (opt.topic || opt.rewrite) {
 const gemKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_TTS_KEY || '';
 if (!opt['no-review'] && !opt['dry-run'] && gemKey) {
     const { editForVoice, pickWriterModel } = await import('../js/writer.js');
-    const model = opt.model || await pickWriterModel(gemKey, opt.writer === 'pro' ? 'pro' : 'flash');
-    console.log(`Преглед и редакция за глас (${model})…`);
+    const model = opt.model || '';
+    console.log(`Преглед и редакция за глас (${model || await pickWriterModel(gemKey, 'edit')})…`);
     try {
         const r = await editForVoice({ apiKey: gemKey, model, text: raw, onProgress: (f, l) => l && console.log(`  ${l}`) });
         raw = r.text;
