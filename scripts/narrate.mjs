@@ -234,9 +234,18 @@ else {
         const pic = video && existsSync(video) ? ['-loop', '1', '-framerate', '1', '-i', video] : ['-f', 'lavfi', '-i', 'color=c=0x15181d:s=1920x1080:r=1'];
         ff = ['-y', ...pic, '-i', wav, '-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-tune', 'stillimage', '-preset', 'veryfast',
             '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p', '-r', '1',
-            '-c:a', 'aac', '-b:a', '160k', '-ar', '48000', '-shortest', '-movflags', '+faststart', ...meta, out];
+            // YouTube re-encodes the sound; its recommended upload is AAC-LC at 48 kHz, 128 kb/s mono
+            '-c:a', 'aac', '-b:a', '128k', '-ac', '1', '-ar', '48000', '-shortest', '-movflags', '+faststart', ...meta, out];
     } else {
-        const codec = { '.mp3': ['-c:a', 'libmp3lame', '-b:a', '64k'], '.m4a': ['-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart'], '.ogg': ['-c:a', 'libopus', '-b:a', '40k'] }[ext];
+        // Speech, not music: mono and audiobook bit rates. The voice is 24 kHz mono, so nothing
+        // above these adds sound. MP3 64 kb/s mono — the LibriVox / podcast standard, plays
+        // everywhere (cars too); M4A (AAC-LC) 64 kb/s — Apple / Audible "high quality";
+        // Ogg/Opus 32 kb/s voip — the smallest, same as the app's own file.
+        const codec = {
+            '.mp3': ['-c:a', 'libmp3lame', '-b:a', '64k', '-ac', '1'],
+            '.m4a': ['-c:a', 'aac', '-b:a', '64k', '-ac', '1', '-movflags', '+faststart'],
+            '.ogg': ['-c:a', 'libopus', '-b:a', '32k', '-application', 'voip', '-ac', '1'],
+        }[ext];
         if (!codec) { console.error(`Неподдържан формат ${ext} (mp3, m4a, ogg, wav, mp4).`); process.exit(4); }
         ff = ['-y', '-i', wav, ...codec, ...meta, out];
     }
