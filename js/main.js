@@ -12,7 +12,8 @@ import {
 import { translateChapter, translationCost, deviceTranslationAvailable, TRANSLATE_DEFAULT_MODEL } from './translate.js';
 import { isNative, Native, nativeFileUrl, loadNativeVoices, nativeEngines } from './native.js';
 import { submitChapter, pollBatches, hasJobs, pendingChapters, batchEstimate } from './batch.js';
-import { usableFreeKey, diagLog, diagClear, bookPlanner } from './player.js';
+import { usableFreeKey, diagLog, diagClear, bookPlanner, diag } from './player.js';
+import { initTextToFile, openTextToFile } from './longtext.js';
 import { exportPlan, exportChapters, packageFiles, safeFileName } from './export.js';
 import { buildJob, submitJob, jobStatus, cancelJob, downloadBook, studioVoice } from './studio.js';
 import { searchBooks, localizeTitles, SOURCES } from './search.js';
@@ -26,7 +27,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.17';
+export const APP_VERSION = '2.18';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
@@ -2278,6 +2279,7 @@ function bindEvents() {
     });
 
     $('#btnSettings').onclick = openSettings;
+    $('#btnTextToFile').onclick = openTextToFile;
     $('#btnBack').onclick = hidePlayer;
     $('#btnBookMenu').onclick = openBookMenu;
     $('#btnChapter').onclick = openChapters;
@@ -2503,7 +2505,8 @@ async function saveBlob(name, blob) {
             });
             await Native.fileAppend({ id, data: b64 });
         }
-        const { path } = await Native.fileEnd({ id, name, mime: name.endsWith('.zip') ? 'application/zip' : name.endsWith('.txt') ? 'text/plain' : 'audio/ogg' });
+        const mime = name.endsWith('.zip') ? 'application/zip' : name.endsWith('.txt') ? 'text/plain' : name.endsWith('.wav') ? 'audio/wav' : name.endsWith('.mp3') ? 'audio/mpeg' : 'audio/ogg';
+        const { path } = await Native.fileEnd({ id, name, mime });
         toast(`Записано: ${path}`, { duration: 8000 });
         return;
     }
@@ -2836,6 +2839,10 @@ function checkCloudMonth() {
 }
 
 async function init() {
+    initTextToFile({
+        openSheet, closeSheet, rerenderSheet, toast, esc, fmtNum, saveBlob, safeFileName, openSettings, diag, importFile,
+        settings: () => effectiveSettings(),
+    });
     checkCloudMonth();
     document.addEventListener('visibilitychange', () => { if (!document.hidden) checkCloudMonth(); });
     applyTheme();

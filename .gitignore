@@ -20,3 +20,4 @@ capacitor-shell/
 
 # Wrangler local state
 server/.wrangler/
+.narrate-cache/
