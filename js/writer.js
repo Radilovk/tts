@@ -98,9 +98,12 @@ function modelRefused(e) {
     return e.status === 400 && /model|not (found|supported)|unsupported/i.test(t) && !/think/i.test(t);
 }
 
-function textOf(data) {
+// raw: a streamed chunk as it is — trimming each chunk lost the space at chunk borders
+// ("обект се" → "обектсе"), and the voice read the words run together
+function textOf(data, raw = false) {
     const parts = data?.candidates?.[0]?.content?.parts || [];
-    return parts.filter((p) => !p.thought && typeof p.text === 'string').map((p) => p.text).join('').trim();
+    const t = parts.filter((p) => !p.thought && typeof p.text === 'string').map((p) => p.text).join('');
+    return raw ? t : t.trim();
 }
 
 // Thinking is left on, at the level the task needs (see TASKS); thought summaries are
@@ -168,7 +171,7 @@ async function streamOnce(url, body, signal, onDelta) {
                 let d;
                 try { d = JSON.parse(line.slice(5)); } catch { continue; }
                 if (d.error) throw httpError(d.error.code || 500, d);
-                const piece = textOf(d);
+                const piece = textOf(d, true);
                 if (piece) { text += piece; onDelta?.(text.length, false); }
                 else if (d?.candidates?.[0]?.content?.parts?.some((p) => p.thought)) onDelta?.(text.length, true);
                 if (d.usageMetadata) usage = d.usageMetadata;
