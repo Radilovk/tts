@@ -36,14 +36,25 @@ export const SPOKEN_RULES = `ПРАВИЛА ЗА ЗАПИС ЗА ГЛАС (те�
 //           Gemini 4 Hydrogen (frontier class, fewer invented claims), thinking medium.
 // The list is tried in order: a model the key cannot use (Neon needs the paid tier, a
 // model missing for the key) gives way to the next one and is not asked again this session.
+// Each task goes to the model that does it best for the least money (Gemini 4, per 1M
+// tokens, output incl. thinking: Neon $3/$15 — deep reasoning, science, knowledge work;
+// Hydrogen $1.50/$7.50 — fast, cheap, 5× fewer invented claims than 3.8 Flash). Where the
+// quality matters and the output is small (so the price gap is pennies), the better model
+// (Neon) is used; where the work is mechanical or high-volume, the cheaper one (Hydrogen).
+//   plan   — small JSON, but sets the depth of the whole story: Neon, high
+//   write  — the narration itself, the thing that must be deep and true: Neon, high
+//            (≈ $0.15–0.30 more than Hydrogen for a whole video — negligible, so the better one)
+//   edit   — reshape the same text for the voice, no new content, runs on the WHOLE text:
+//            Hydrogen (mechanical, high-volume → the cheaper model), medium
+//   scenes — what each shot shows + visual metaphors, needs the whole narrative: Neon, high
+//   look   — judge which thumbnail fits a sentence; perception, many calls, tiny output:
+//            Hydrogen, low thinking (speed and cost; the extra depth buys nothing here)
 export const TASKS = {
     plan: { models: ['gemini-4-neon', 'gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'high', label: 'план' },
     write: { models: ['gemini-4-neon', 'gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'high', label: 'писане' },
     edit: { models: ['gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'medium', label: 'редакция' },
-    // Video (scripts/video): what each scene shows needs judgement about the whole story;
-    // choosing among candidate pictures is looking, not deep reasoning
     scenes: { models: ['gemini-4-neon', 'gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'high', label: 'сцени' },
-    look: { models: ['gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'medium', label: 'подбор на кадър' },
+    look: { models: ['gemini-4-hydrogen', 'gemini-3.8-flash'], thinking: 'low', label: 'подбор на кадър' },
 };
 export const WRITER_FALLBACK = 'gemini-4-hydrogen';
 const unusable = new Set();     // models this key cannot use (this session)
