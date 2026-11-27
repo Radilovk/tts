@@ -2,8 +2,8 @@
 // Long text → one audio file, from the command line (the same engine as the app's
 // "Текст → аудио файл": js/narrate.js).
 //
-//   node scripts/narrate.mjs статия.txt                       → статия.mp3 (Gemini разказвач, Charon)
-//   node scripts/narrate.mjs статия.txt --voice Kore --style warm   (стил: intriguing, warm, dramatic, clear)
+//   node scripts/narrate.mjs статия.txt                       → статия.mp3 (Gemini разказвач, Enceladus)
+//   node scripts/narrate.mjs статия.txt --voice Iapetus --style warm   (стил: intriguing, warm, dramatic, clear)
 //   node scripts/narrate.mjs статия.txt --voice Kore --out статия.m4a
 //   node scripts/narrate.mjs статия.txt --engine azure --voice Kalina
 //   node scripts/narrate.mjs статия.txt --video корица.jpg     → статия.mp4 (за YouTube)
@@ -63,7 +63,7 @@ const slug = (t) => String(t).replace(/[\\/:*?"<>|\n\r]+/g, ' ').replace(/\s+/g,
 let input = opt._[0] ? resolve(opt._[0]) : resolve(slug(opt.topic) + '.txt');
 const engine = ['azure', 'google'].includes(opt.engine) ? opt.engine : 'gemini';   // google = Chirp 3 HD
 const pickVoice = () => {
-    const v = String(opt.voice || (engine === 'azure' ? 'bg-BG-KalinaNeural' : 'Charon'));
+    const v = String(opt.voice || (engine === 'azure' ? 'bg-BG-KalinaNeural' : engine === 'gemini' ? 'Enceladus' : 'Charon'));
     if (engine === 'gemini') return v.replace(/^bg-BG-Chirp3-HD-/, '');
     const list = engine === 'azure' ? AZURE_VOICES : CHIRP_VOICES;
     const hit = list.find((x) => x.name.toLowerCase() === v.toLowerCase() || x.label.toLowerCase() === v.toLowerCase()

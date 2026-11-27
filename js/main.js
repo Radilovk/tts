@@ -5,7 +5,7 @@ import { parseBook, ACCEPT } from './parsers.js';
 import { Player } from './player.js';
 import { LANG_NAMES, LOCALES, charLen, noteText } from './text.js';
 import {
-    GEMINI_VOICES, GEMINI_DEFAULT_MODEL, NARRATION_STYLES, PRICES,
+    GEMINI_VOICES, GEMINI_DEFAULT_VOICE, GEMINI_DEFAULT_MODEL, NARRATION_STYLES, PRICES,
     cloudVoices, cloudSynthesize, cloudBilledChars, cloudDiagnose, CLOUD_LINKS, geminiSynthesize, geminiModels, deviceVoices, onDeviceVoicesChanged, cloudTier,
     cheapestGeminiModel, isVerifiedGeminiModel, isRetiredGeminiModel, geminiCost, azureVoices, azureSynthesize, azureBilledChars, AZURE_FREE_CHARS,
 } from './engines.js';
@@ -31,7 +31,7 @@ export const APP_VERSION = '2.19';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
-    engine: null, apiKey: '', cloudVoice: '', geminiVoice: 'Charon', geminiModel: '', geminiEconomy: true, geminiFreeKey: '', geminiFreeOnly: true, geminiPassage: 6000, studioBudgetUsd: 1,
+    engine: null, apiKey: '', cloudVoice: '', geminiVoice: GEMINI_DEFAULT_VOICE, geminiModel: '', geminiEconomy: true, geminiFreeKey: '', geminiFreeOnly: true, geminiPassage: 6000, studioBudgetUsd: 1,
     style: 'intriguing', customStyle: '', deviceVoice: '', lang: 'auto', rate: 1,
     cacheMB: 500, theme: 'system', readerSize: 19, view: 'cover', cloudReady: false, autoTranslate: 'bg',
     geminiCapUsd: 2, cloudPausedMonth: '',
@@ -54,6 +54,8 @@ function loadSettings() {
     if (s.geminiModel === GEMINI_DEFAULT_MODEL && !s.geminiModelChosen) s.geminiModel = '';
     // A model Google has shut down (2.5 / 3.1 preview TTS, 18.12.2026): back to the default
     if (s.geminiModel && isRetiredGeminiModel(s.geminiModel)) s.geminiModel = '';
+    // A male voice no longer offered: the first recommended one
+    if (s.geminiVoice && !GEMINI_VOICES.some(([n]) => n === s.geminiVoice)) s.geminiVoice = GEMINI_DEFAULT_VOICE;
     s = { ...DEFAULTS, ...s };
     // The Gemini narrator is the main voice; the phone voice is the free fallback
     if (!s.engine) s.engine = (s.apiKey || preconfiguredKey()) ? 'gemini' : 'device';

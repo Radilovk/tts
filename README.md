@@ -176,7 +176,7 @@ Chirp 3 HD — както са написани и след почистване
 
 **Команден ред (MP3, M4A, MP4 за YouTube):**
 ```bash
-GEMINI_API_KEY=… node scripts/narrate.mjs статия.txt --voice Charon --style clear   # → статия.mp3, Gemini разказвач
+GEMINI_API_KEY=… node scripts/narrate.mjs статия.txt --voice Enceladus --style clear   # → статия.mp3, Gemini разказвач
 GEMINI_API_KEY=… node scripts/narrate.mjs --topic "Защо мозъкът предсказва" --video корица.jpg --upload
 AZURE_SPEECH_KEY=… node scripts/narrate.mjs статия.txt --engine azure --voice Kalina --out статия.m4a
 node scripts/narrate.mjs статия.txt --dry-run                            # само план: блокове, знаци, цена
