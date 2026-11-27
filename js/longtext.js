@@ -8,7 +8,7 @@ import { encodeOpus } from './opus.js';
 import { detectLang } from './text.js';
 import { parseBook } from './parsers.js';
 import { libraryApi } from './shared.js';
-import { writeNarration, pickWriterModel, editForVoice } from './writer.js';
+import { writeNarration, pickWriterModel, editForVoice, setWriterLog } from './writer.js';
 import { SCENARIO } from './scenario.js';
 import { recordUsage, azureFreeLeft } from './usage.js';
 
@@ -46,6 +46,7 @@ function saveDraft() {
 
 export function initTextToFile(helpers) {
     ui = helpers;
+    setWriterLog((m) => ui.diag?.(m));
     // A file being prepared at half price: look once when the app starts
     if (draft.pending) setTimeout(() => checkPending(true), 4000);
 }
@@ -531,6 +532,7 @@ async function write(andVoice) {
     let chain = Promise.resolve(), failed = null;
     try {
         const model = await pickWriterModel(st.apiKey, 'flash');
+        st8.writing = `Пиша с ${model}…`; show();
         const onPart = (i, text, total) => {
             st8.total = total;
             chain = chain.then(async () => {

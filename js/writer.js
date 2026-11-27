@@ -58,7 +58,82 @@ function textOf(data) {
 // thinking_level "low" — the fastest level every current Flash model accepts.
 let thinkingOk = true;
 
-async function generate({ apiKey, model, system, prompt, search = false, json = false, maxTokens = 16384, signal }) {
+// Every request is timed in the app's diagnostics (Настройки → Диагностика), so a slow
+// answer shows its real cause: the model, a retry, a 429, a stall.
+let logFn = null;
+export function setWriterLog(fn) { logFn = fn; }
+const log = (m) => { try { logFn?.(m); } catch {} };
+
+const IDLE_MS = 45000;      // nothing for this long while streaming: the request is stuck
+const TOTAL_MS = 300000;
+
+function httpError(status, data) {
+    const msg = data?.error?.message || `HTTP ${status}`;
+    return Object.assign(new Error(status === 429 ? 'Достигнат лимит на заявките към Gemini. Опитвам отново…' : msg), {
+        status, retryable: status === 429 || status >= 500, raw: msg + ' ' + JSON.stringify(data?.error?.details || []),
+    });
+}
+
+// One streamed answer (server-sent events): the text arrives as it is written, so the
+// progress shows real characters, and a stalled request is cut after IDLE_MS instead of
+// waiting minutes for nothing. → { text, inTokens, outTokens, finish }
+async function streamOnce(url, body, signal, onDelta) {
+    const ctrl = new AbortController();
+    const abort = () => ctrl.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    let idle = 0, why = '', reader = null;
+    // Cut: abort the request and also release a read that is waiting (some streams do not
+    // end on abort)
+    const cut = (w) => { why = w; ctrl.abort(); reader?.cancel().catch(() => {}); };
+    const arm = () => { clearTimeout(idle); idle = setTimeout(() => cut('idle'), IDLE_MS); };
+    const total = setTimeout(() => cut('total'), TOTAL_MS);
+    try {
+        arm();
+        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: ctrl.signal });
+        if (!res.ok) {
+            let data = null;
+            try { data = await res.json(); } catch {}
+            throw httpError(res.status, Array.isArray(data) ? data[0] : data);
+        }
+        reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '', text = '', usage = {}, finish = '';
+        for (;;) {
+            const { value, done } = await reader.read();
+            if (why) throw new DOMException('Cut', 'AbortError');
+            if (done) break;
+            arm();
+            buf += dec.decode(value, { stream: true });
+            let nl;
+            while ((nl = buf.indexOf('\n')) >= 0) {
+                const line = buf.slice(0, nl).trim();
+                buf = buf.slice(nl + 1);
+                if (!line.startsWith('data:')) continue;
+                let d;
+                try { d = JSON.parse(line.slice(5)); } catch { continue; }
+                if (d.error) throw httpError(d.error.code || 500, d);
+                const piece = textOf(d);
+                if (piece) { text += piece; onDelta?.(text.length); }
+                if (d.usageMetadata) usage = d.usageMetadata;
+                finish = d?.candidates?.[0]?.finishReason || finish;
+            }
+        }
+        return { text: text.trim(), inTokens: usage.promptTokenCount || 0, outTokens: (usage.candidatesTokenCount || 0) + (usage.thoughtsTokenCount || 0), finish };
+    } catch (e) {
+        if (signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
+        if (e.name === 'AbortError') {
+            throw Object.assign(new Error(why === 'idle' ? `Gemini не изпрати нищо ${IDLE_MS / 1000} сек. — питам наново` : 'Gemini не отговори навреме — питам наново'), { status: 0, retryable: true });
+        }
+        if (e.status) throw e;
+        throw Object.assign(new Error((typeof navigator === 'undefined' || navigator.onLine) ? 'Мрежова грешка.' : 'Няма интернет връзка.'), { status: 0, retryable: true });
+    } finally {
+        clearTimeout(idle);
+        clearTimeout(total);
+        signal?.removeEventListener('abort', abort);
+    }
+}
+
+async function generate({ apiKey, model, system, prompt, search = false, json = false, maxTokens = 16384, signal, onDelta, what = '' }) {
     const body = (thinking) => ({
         systemInstruction: { parts: [{ text: system }] },
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -69,20 +144,28 @@ async function generate({ apiKey, model, system, prompt, search = false, json = 
         },
         ...(search ? { tools: [{ google_search: {} }] } : {}),
     });
-    const send = (thinking) => withRetry(() => fetchJson(`${BASE}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body(thinking)),
-    }, 240000, signal), signal, 4);
-    let data;
+    const url = `${BASE}/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
+    let tries = 0;
+    const send = (thinking) => withRetry(async () => {
+        tries++;
+        const t0 = Date.now();
+        try {
+            const r = await streamOnce(url, body(thinking), signal, onDelta);
+            log(`Gemini ${model}${what ? ` (${what})` : ''}: ${((Date.now() - t0) / 1000).toFixed(0)} сек., ${r.text.length} знака, ${r.outTokens} токена${tries > 1 ? `, опит ${tries}` : ''}`);
+            return r;
+        } catch (e) {
+            log(`Gemini ${model}${what ? ` (${what})` : ''}: ${((Date.now() - t0) / 1000).toFixed(0)} сек. — ${e.message}`);
+            throw e;
+        }
+    }, signal, 4);
     try {
-        data = await send(thinkingOk);
+        return await send(thinkingOk);
     } catch (e) {
         // A model without thinking levels: ask once more without, and never again
         if (!thinkingOk || e.status !== 400 || !/think/i.test(e.message + (e.raw || ''))) throw e;
         thinkingOk = false;
-        data = await send(false);
+        return send(false);
     }
-    const u = data.usageMetadata || {};
-    return { text: textOf(data), inTokens: u.promptTokenCount || 0, outTokens: (u.candidatesTokenCount || 0) + (u.thoughtsTokenCount || 0), finish: data?.candidates?.[0]?.finishReason || '' };
 }
 
 function parseJson(t) {
@@ -137,11 +220,11 @@ export async function writeNarration({ apiKey, model, mode, input, scenario = SC
 Частите следват драматургията на сценария (пролог, разгръщане, откритие, разширяване, неочакван извод, финал); може разгръщането и разширяването да са по две части. Сборът на "chars" е около ${goal} знака.`;
     let plan;
     try {
-        plan = parseJson((await call({ system: scenario, prompt: planPrompt, search: search && mode === 'topic', json: true, maxTokens: 8192 })).text);
+        plan = parseJson((await call({ system: scenario, prompt: planPrompt, search: search && mode === 'topic', json: true, maxTokens: 8192, what: 'план' })).text);
     } catch (e) {
         if (e.name === 'AbortError') throw e;
         // Without search (not every key/model allows it), then once more as plain JSON
-        plan = parseJson((await call({ system: scenario, prompt: planPrompt, json: true, maxTokens: 8192 })).text);
+        plan = parseJson((await call({ system: scenario, prompt: planPrompt, json: true, maxTokens: 8192, what: 'план без търсене' })).text);
     }
     const sections = (plan.sections || []).filter((s) => s && s.name).slice(0, 10);
     if (!sections.length) throw new Error('Планът на текста не се получи.');
@@ -163,7 +246,11 @@ ${before ? `ТЕКСТЪТ ДОТУК (последната част):\n…${bef
 Обем: около ${s.chars} знака (не по-малко от ${Math.round(s.chars * 0.85)}). ${extra}
 Продължи естествено от текста дотук, без да повтаряш вече казаното${i === sections.length - 1 ? '; това е финалът на целия разказ' : '; не завършвай разказа — следват още части'}.
 Върни само самия текст за четене на глас: абзаци, разделени с празен ред, без заглавия, без номера, без Markdown, без бележки за музика или паузи.`;
-        const r = await call({ system: scenario, prompt, maxTokens: 16384 });
+        const label = `Пиша: ${s.name} (${i + 1}/${sections.length})`;
+        const r = await call({
+            system: scenario, prompt, what: s.name, maxTokens: Math.round(s.chars * 0.8) + 4096,
+            onDelta: (n) => onProgress?.(0.08 + 0.8 * i / sections.length, `${label} · ${n} знака`),
+        });
         return cleanNarration(r.text);
     };
     for (let i = 0; i < sections.length; i++) {
@@ -225,7 +312,7 @@ export async function editForVoice({ apiKey, model, text, signal, onProgress }) 
     // Pieces are independent (each gets the end of the one before as context): 3 at a time
     const one = async (i) => {
         const before = i ? `(Предходният откъс завършва така: „…${list[i - 1].slice(-300)}“)\n\n` : '';
-        const r = await generate({ apiKey, model, system: EDITOR, prompt: `${before}ОТКЪС ЗА РЕДАКЦИЯ:\n\n${list[i]}`, maxTokens: 16384, signal });
+        const r = await generate({ apiKey, model, system: EDITOR, prompt: `${before}ОТКЪС ЗА РЕДАКЦИЯ:\n\n${list[i]}`, maxTokens: Math.round(list[i].length * 0.8) + 4096, signal, what: `редакция ${i + 1}/${list.length}` });
         inTokens += r.inTokens; outTokens += r.outTokens;
         const t = cleanNarration(r.text);
         const ratio = t.length / list[i].length;

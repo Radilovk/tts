@@ -27,7 +27,7 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 // ==================== Settings ====================
 
 // Shown in the settings footer; bump with every release
-export const APP_VERSION = '2.20';
+export const APP_VERSION = '2.21';
 
 const SETTINGS_KEY = 'rz_settings';
 const DEFAULTS = {
