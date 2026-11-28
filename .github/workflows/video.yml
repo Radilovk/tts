@@ -5,7 +5,7 @@ name: Make video
 #   • Actions → "Make video" → Run workflow (topic or text);
 #   • a request file video/requests/<name>.json committed to any branch:
 #       { "topic": "…" } or { "text": "…" }, optional "title", "voice", "style",
-#       "max_chars" (prototype: e.g. 4000), "ai_images" (true), "burn_subtitles" (false)
+#       "max_chars" (prototype: e.g. 4000), "burn_subtitles" (false)
 # The video, captions and description are kept as the run's artifact (30 days).
 # Secrets: GEMINI_API_KEY (required); PIXABAY_API_KEY, PEXELS_API_KEY, GEMINI_FREE_KEY (optional).
 
@@ -18,7 +18,6 @@ on:
       voice: { description: 'Глас на Gemini разказвача', required: false, default: 'Enceladus' }
       style: { description: 'Стил: intriguing, warm, dramatic, clear', required: false, default: 'clear' }
       max_chars: { description: 'Само първите N знака (0 = целия текст)', required: false, default: '4000' }
-      ai_images: { description: 'AI картина, когато няма подходящ кадър', type: boolean, default: true }
       burn_subtitles: { description: 'Субтитри в картината', type: boolean, default: false }
   push:
     paths: ['video/requests/**.json']
@@ -55,7 +54,6 @@ jobs:
           IN_VOICE: ${{ inputs.voice }}
           IN_STYLE: ${{ inputs.style }}
           IN_MAX: ${{ inputs.max_chars }}
-          IN_AI: ${{ inputs.ai_images }}
           IN_SUBS: ${{ inputs.burn_subtitles }}
           EVENT: ${{ github.event_name }}
         run: |
@@ -67,7 +65,7 @@ jobs:
             node -e '
               const e = process.env;
               require("fs").writeFileSync("req/manual.json", JSON.stringify({ topic: e.IN_TOPIC, text: e.IN_TEXT, title: e.IN_TITLE,
-                voice: e.IN_VOICE, style: e.IN_STYLE, max_chars: Number(e.IN_MAX) || 0, ai_images: e.IN_AI !== "false", burn_subtitles: e.IN_SUBS === "true" }));'
+                voice: e.IN_VOICE, style: e.IN_STYLE, max_chars: Number(e.IN_MAX) || 0, burn_subtitles: e.IN_SUBS === "true" }));'
             echo req/manual.json > req/list.txt
           fi
           cat req/list.txt
@@ -92,7 +90,6 @@ jobs:
               if (r.title) a.push("--title", r.title);
               a.push("--voice", r.voice || "Enceladus", "--style", r.style || "clear");
               if (r.max_chars) a.push("--max-chars", String(r.max_chars));
-              if (r.ai_images === false) a.push("--no-ai-images");
               if (r.burn_subtitles) a.push("--burn-subtitles");
               require("fs").writeFileSync("req/args.json", JSON.stringify(a));' "$f"
             node -e '

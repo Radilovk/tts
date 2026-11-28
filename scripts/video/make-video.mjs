@@ -4,23 +4,26 @@
 //   node scripts/video/make-video.mjs текст.txt                 → out/<заглавие>/video.mp4 (+ captions.srt, description.txt)
 //   node scripts/video/make-video.mjs --topic "Защо мозъкът предсказва"   (Gemini пише по сценария)
 //   --max-chars 4000   прототип: само началото (~3–5 мин)        --voice Enceladus --style clear
-//   --no-ai-images     без AI картини за сцени без подходящ кадър   --burn-subtitles   субтитри в картината
+//   --burn-subtitles   субтитри в картината
 //   --upload           качва MP4 и дава линк (worker /files)
 //
 // Keys (environment / GitHub secrets): GEMINI_API_KEY (voice, scenes, choosing the shots);
-// PIXABAY_API_KEY and PEXELS_API_KEY are optional — without them Wikimedia Commons, NASA and
-// Openverse (no key) are searched. ffmpeg must be installed.
+// PIXABAY_API_KEY and PEXELS_API_KEY are optional — without them Wikimedia Commons and NASA
+// (footage and photos) and Openverse (photos) are searched, no key. ffmpeg/ffprobe must be installed.
+// No generated (AI) pictures, ever: every shot is real footage or a real photograph.
 //
 // How a scene gets its picture (the difference from keyword compilations):
 //   1. the narration is made first; every sentence's start is found in the audio (js/align.js);
 //   2. Gemini (scenes) reads the whole text and cuts it into scenes of ~5–10 s; for each it
-//      says what should be SEEN — abstract ideas turned into concrete visual metaphors — and
-//      gives English search terms (stock libraries are tagged in English);
-//   3. candidates are searched in every source; Gemini (look) LOOKS at the thumbnails next to
-//      the sentence and picks the one that fits, or none; nothing is used twice;
-//   4. when no candidate fits, an AI picture is made for that scene only (or the best is kept);
-//   5. photos move slowly (Ken Burns, a different move each time), footage is cut to length,
-//      shots cross-fade; the cut falls exactly where the narrator starts the sentence.
+//      says what should be SEEN — in MOTION, abstract ideas turned into concrete filmable
+//      actions — and gives English search terms (stock libraries are tagged in English);
+//   3. footage is searched first in every source; Gemini (look) LOOKS at the frames next to the
+//      sentence and picks the one that fits, or none; nothing is used twice. A photo is searched
+//      only when no clip fits (or the subject has no motion: a historical portrait, a painting);
+//   4. when nothing fits at all, the previous shot stays a little longer;
+//   5. footage: the best part — from the middle, never the first frames, never looped (a clip a
+//      bit short is slowed down instead); photos move slowly (Ken Burns); shots cross-fade and the
+//      cut falls exactly where the narrator starts the sentence.
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -154,15 +157,24 @@ log(`Глас: ${(total / 60).toFixed(1)} мин, ${sentences.length} изреч
 
 // ---------- 3. scenes: what each one shows ----------
 const sentEnd = (i) => (i + 1 < sentences.length ? sentences[i + 1].start : total);
-const SCENE_SYSTEM = `You are a documentary film editor and picture researcher. You cut a narrated Bulgarian popular-science documentary into shots and decide what each shot shows, so that the picture always matches what the narrator is saying at that moment.
+const SCENE_SYSTEM = `You are a documentary film editor and footage researcher. You cut a narrated Bulgarian documentary (social sciences, history, biology, medicine, philosophy, psychology, mathematics, physics) into shots and decide what each shot shows, so that the picture always matches the MEANING of what the narrator is saying at that moment. The film is made of real VIDEO CLIPS from stock and archive libraries; still photos are the exception.
 Rules:
 - Every sentence belongs to exactly one scene; scenes are consecutive and cover all sentences given.
 - A scene lasts about 5–10 seconds (use the durations); one long sentence may be one scene; never more than ~12 s.
-- "visual": what is SEEN, concrete and filmable (subject, setting, light). Turn abstract ideas into concrete visual metaphors a stock library has (e.g. "the brain predicts" → "glowing neurons firing"; "uncertainty" → "fog over a forest road at dawn"). Real named things (a scientist, a place, an instrument, a spacecraft) are shown as themselves.
-- "queries": 2–3 English stock-search terms, each the PLAIN SUBJECT only — concrete nouns a photographer would tag, 1–3 words. NO camera or style words (no "slow-motion", "shot", "tracking", "close-up", "macro", "cinematic", "aerial", "editorial", "footage", "4k"), NO sentences. Good: "neurons firing", "tennis player serve", "foggy forest road", "brain scan". Bad: "slow-motion side tracking shot of a tennis player". Order: most specific first, then one broad fallback (e.g. "brain", "science lab").
-- "kind": "video" when motion matters (processes, nature, people doing something), else "photo".
-- Keep a visual thread: a recurring subject looks consistent; avoid people's faces in close-up unless the text is about a person.
-Return only JSON: {"scenes":[{"from":0,"to":2,"visual":"…","queries":["neurons firing","brain"],"kind":"video"}]}`;
+- "visual": what is SEEN MOVING, concrete and filmable (subject, action, setting). Turn abstract ideas into concrete actions a footage library has ("the brain predicts" → "neurons firing"; "memory fades" → "footprints washed away by a wave"; "society changes" → "crowd crossing a city street"). Real named things (a scientist, an event, a place, an instrument, an organ) are shown as themselves.
+- "queries": 3 English search terms for FOOTAGE: subject + action, 1–3 words, as a video library tags them ("neurons firing", "cells dividing", "heart beating", "pendulum swinging", "soldiers marching", "chalk writing equations", "crowd walking"). NO camera or style words ("slow-motion", "shot", "tracking", "close-up", "macro", "cinematic", "aerial", "footage", "4k"), NO sentences, NO single abstract nouns ("brain", "science"). Order: most specific; an alternative; a broad but still moving fallback in the same field ("microscope cells", "laboratory scientist", "city crowd").
+- What the fields look like in footage libraries:
+  history — archival film and newsreels (Wikimedia Commons has many: "ww1 soldiers trench", "1930s newsreel crowd", "steam locomotive"), ruins and castles, old towns, museum artifacts, maps; name the era and place.
+  biology — microscopy ("cells dividing", "bacteria moving", "blood cells flowing"), animals behaving, plants growing, DNA, ecosystems.
+  medicine — "surgery operating room", "doctor examining patient", "heart ultrasound", "mri scan", "pills production", "hospital corridor", "vaccine injection".
+  psychology — people's behaviour and emotion: "friends talking", "child playing", "person alone window", "crowd walking", "brain scan".
+  social sciences — "city street crowd", "market trading", "factory workers", "protest march", "farmers field", "parliament session".
+  philosophy — "ancient greek statue", "temple columns", "library books", "candle flame", "starry sky night", "person walking alone road", "chess game".
+  mathematics — "chalk writing equations", "geometric pattern", "spiral shell", "fractal", "honeycomb bees", "abacus counting", "clock gears".
+  physics — "pendulum swinging", "laser beam", "lightning storm", "iron filings magnet", "water waves", "galaxy rotating", "particle accelerator", "rocket launch" (NASA has space, Earth and physics footage).
+- "kind": "video" by default. "photo" ONLY for a subject that has no motion and exists only as a still: a historical portrait of a named person, a painting, a manuscript, an old map or engraving.
+- Keep a visual thread: a recurring subject looks consistent; avoid faces in close-up unless the text is about a person.
+Return only JSON: {"scenes":[{"from":0,"to":2,"visual":"…","queries":["neurons firing","brain cells signals","microscope cells"],"kind":"video"}]}`;
 
 // Strip camera / style words a model sometimes still slips into a query, and keep the noun
 const CAMERA = /\b(ultra|extreme|slow[- ]?motion|slow|motion|time[- ]?lapse|timelapse|high[- ]?speed|tracking|handheld|steadicam|dolly|pan(ning)?|zoom|aerial|drone|overhead|top[- ]?down|close[- ]?up|macro|wide|medium|establishing|cinematic|editorial|archival|footage|b[- ]?roll|4k|8k|hd|shot|clip|view|animation|visualization|visualisation|render|3d|still|photograph|photo|portrait|side|front|rear|dark|bright|minimalist|sudden|intense)\b/gi;
@@ -185,13 +197,13 @@ async function planScenes(first, last) {
         if (s.to < next) continue;
         const from = next, to = Math.min(last, s.to);
         const queries = [...new Set((s.queries || []).map(cleanQuery).filter((q) => q.length > 1))].slice(0, 3);
-        out.push({ ...s, from, to, queries, kind: s.kind === 'video' ? 'video' : 'photo' });
+        out.push({ ...s, from, to, queries, kind: s.kind === 'photo' ? 'photo' : 'video' });
         next = to + 1;
         if (next > last) break;
     }
     if (next <= last) {
         const prev = out[out.length - 1];
-        if (prev) prev.to = last; else out.push({ from: first, to: last, visual: title, queries: [title], kind: 'photo' });
+        if (prev) prev.to = last; else out.push({ from: first, to: last, visual: title, queries: [title], kind: 'video' });
     }
     return out;
 }
@@ -224,7 +236,7 @@ async function thumb64(url) {
     } catch { return null; }
 }
 
-const LOOK_SYSTEM = `You choose the shot for one moment of a documentary. You see what the narrator says, what the editor wants to show, and numbered candidate pictures (for footage: a frame from it). Pick the candidate whose picture best matches the meaning of the sentence and the intended visual — as a viewer would feel it fits. Reject pictures with visible text, logos, watermarks, collages, illustrations that look cheap, or anything unrelated. Return only JSON: {"best": <candidate number or 0 if none fits>, "score": <0-10 how well it fits>, "why": "<short>"}`;
+const LOOK_SYSTEM = `You choose the shot for one moment of a documentary. You see what the narrator says, what the editor wants to show, and numbered candidates (for a video clip: one frame from it). Pick the candidate that best matches the MEANING of the sentence and the intended visual — as a viewer would feel it fits; archival black-and-white film is welcome for history. Reject candidates with visible text, subtitles, logos, watermarks, collages, cartoons or cheap-looking illustrations, title cards, or anything unrelated. Score honestly: 7+ clearly fits, 5–6 fits the idea, below 5 is a stretch. Return only JSON: {"best": <candidate number or 0 if none fits>, "score": <0-10 how well it fits>, "why": "<short>"}`;
 
 async function choose(scene, cands) {
     const parts = [{ text: `Narration (Bulgarian): "${scene.text}"\nIntended visual: ${scene.visual}\nPreferred: ${scene.kind}.` }];
@@ -243,78 +255,87 @@ async function choose(scene, cands) {
     return c ? { ...c, score: Number(j.score) || 0, why: j.why || '' } : { score: 0 };
 }
 
-// An AI picture for a scene no library has (Gemini image model, only as the last resort)
-let imageModel = null;
-async function aiPicture(scene, file) {
-    if (imageModel === null) {
-        try {
-            const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?pageSize=500&key=${KEY}`);
-            const names = ((await r.json()).models || []).map((m) => m.name.replace('models/', '')).filter((n) => /image/.test(n) && !/lite|imagen|edit/.test(n));
-            imageModel = names.find((n) => /flash-image$/.test(n)) || names.find((n) => /flash-image/.test(n)) || names[0] || '';
-        } catch { imageModel = ''; }
+// Download a chosen asset to disk (streamed; footage can be tens of MB)
+const MAX_BYTES = 400e6;
+async function download(c, file, need) {
+    const url = c.url || (c.resolve ? await c.resolve().catch(() => '') : '');
+    if (!url) return false;
+    // A long film (archival reels run up to an hour): only the piece from its middle is fetched
+    // (ffmpeg seeks over HTTP), with a margin for the trim and the slow-down later
+    if (c.kind === 'video' && c.duration > 120) {
+        const len = need + 4;
+        await ffA(['-user_agent', 'Razkazvach-video/1.0 (https://github.com/Radilovk/tts)', '-ss', (c.duration * 0.45).toFixed(1), '-i', url,
+            '-t', len.toFixed(1), '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-f', 'mp4', file]);
+        return statSync(file).size > 10000;
     }
-    if (!imageModel) return false;
-    const body = {
-        contents: [{ parts: [{ text: `A photorealistic documentary still, 16:9 landscape, natural light, cinematic, no text, no logos, no watermark: ${scene.visual}` }] }],
-        generationConfig: { responseModalities: ['IMAGE'], imageConfig: { aspectRatio: '16:9' } },
-    };
-    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${imageModel}:generateContent?key=${KEY}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
-    if (!r.ok) { log(`  AI картина: HTTP ${r.status}`); return false; }
-    const d = await r.json();
-    const part = d?.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data);
-    if (!part) return false;
-    writeFileSync(file, Buffer.from(part.inlineData.data, 'base64'));
-    return true;
+    const r = await fetch(url, { headers: { 'User-Agent': 'Razkazvach-video/1.0 (https://github.com/Radilovk/tts)' } }).catch(() => null);
+    if (!r?.ok || Number(r.headers.get('content-length') || 0) > MAX_BYTES) { r?.body?.cancel?.(); return false; }
+    const { createWriteStream } = await import('node:fs');
+    const { Readable } = await import('node:stream');
+    const { pipeline } = await import('node:stream/promises');
+    await pipeline(Readable.fromWeb(r.body), createWriteStream(file));
+    return statSync(file).size > 10000;
 }
 
-const aiLimit = opt['no-ai-images'] ? 0 : Math.ceil(scenes.length * 0.2);
-let aiUsed = 0, sceneDone = 0;
-// Scenes are independent (search → look → download), so several run at once; the shared
-// `used` set is marked at pick time so two scenes rarely grab the same asset.
-async function fillScene(idx, scene) {
-    scene.idx = idx;
+// Footage is accepted at this score; a photo is looked for only below it
+const VIDEO_OK = 5;
+let sceneDone = 0, photoScenes = 0;
+// Look through the queries for one kind; stop early on a clear fit
+async function best(scene, kind, seen) {
     const dur = scene.end - scene.start;
     let pick = null;
-    const seen = new Set();
     for (const q of scene.queries.length ? scene.queries : [scene.visual]) {
-        const found = [];
-        if (scene.kind === 'video') found.push(...await searchAll(q, 'video', keys));
-        found.push(...await searchAll(q, 'photo', keys));
-        const cands = found.filter((c) => !used.has(c.id) && !seen.has(c.id) && (c.kind !== 'video' || !c.duration || c.duration >= Math.min(dur, 6)));
+        const found = await searchAll(q, kind, keys, log);
+        // a clip may be slowed down at most 1.6× and its first second is skipped
+        const cands = found.filter((c) => !used.has(c.id) && !seen.has(c.id) && (kind !== 'video' || !c.duration || c.duration >= dur / 1.6 + 1));
         cands.forEach((c) => seen.add(c.id));
-        cands.sort((a, b) => (scene.kind === 'video' ? (b.kind === 'video') - (a.kind === 'video') : 0));
         if (!cands.length) continue;
         const r = await choose(scene, cands.slice(0, 8)).catch((e) => { log(`  подбор: ${e.message}`); return null; });
         if (r?.id && (!pick || r.score > pick.score)) pick = r;
         if (pick && pick.score >= 7) break;
     }
+    return pick;
+}
+// Scenes are independent (search → look → download), so several run at once; the shared
+// `used` set is marked at pick time so two scenes rarely grab the same asset.
+async function fillScene(idx, scene) {
+    scene.idx = idx;
+    const dur = scene.end - scene.start;
+    const seen = new Set();
+    const order = scene.kind === 'photo' ? ['photo', 'video'] : ['video', 'photo'];
+    const picks = [];
+    for (const kind of order) {
+        const p = await best(scene, kind, seen);
+        if (p) picks.push(p);
+        if (p && p.score >= VIDEO_OK) break;
+    }
+    // the first kind that fits; otherwise the better of the two, if it is not a stretch
+    const ranked = picks.filter((p) => p.score >= VIDEO_OK).concat(picks.filter((p) => p.score < VIDEO_OK && p.score >= 3).sort((a, b) => b.score - a.score));
     const file = join(WORK, `asset-${String(idx).padStart(4, '0')}`);
-    if (pick?.id) used.add(pick.id);   // claim it now, before the slow download
-    if ((!pick || pick.score < 5) && aiUsed < aiLimit) {
-        aiUsed++;
-        if (await aiPicture(scene, `${file}.png`).catch(() => false)) {
-            scene.asset = { kind: 'photo', file: `${file}.png`, source: 'AI (Gemini)', author: '', page: '', license: 'генерирано изображение' };
-        } else { aiUsed--; }
+    for (const pick of ranked) {
+        if (used.has(pick.id)) continue;
+        used.add(pick.id);   // claim it now, before the slow download
+        const f = file + (pick.kind === 'video' ? '.vid' : '.img');
+        if (await download(pick, f, dur).catch(() => false)) { scene.asset = { ...pick, file: f }; break; }
     }
-    if (!scene.asset && pick?.id) {
-        const ext = pick.kind === 'video' ? '.mp4' : '.jpg';
-        const r = await fetch(pick.url, { headers: { 'User-Agent': 'Razkazvach-video/1.0' } }).catch(() => null);
-        if (r?.ok) { writeFileSync(file + ext, Buffer.from(await r.arrayBuffer())); scene.asset = { ...pick, file: file + ext }; }
-    }
-    log(`Сцена ${++sceneDone}/${scenes.length} (${dur.toFixed(1)} с): ${scene.asset ? `${scene.asset.source} ${scene.asset.kind}${pick?.score != null && scene.asset.source !== 'AI (Gemini)' ? ` · ${pick.score}/10` : ''}` : '— без кадър'} — ${scene.visual.slice(0, 70)}`);
+    if (scene.asset?.kind === 'photo') photoScenes++;
+    const a = scene.asset;
+    log(`Сцена ${++sceneDone}/${scenes.length} (${dur.toFixed(1)} с): ${a ? `${a.source} ${a.kind === 'video' ? 'клип' : 'снимка'} · ${a.score}/10` : '— без кадър (остава предишният)'} — ${scene.visual.slice(0, 70)}`);
 }
 {
     let next = 0;
     await Promise.all(Array.from({ length: 4 }, async () => { while (next < scenes.length) { const i = next++; await fillScene(i, scenes[i]); } }));
 }
 // A scene with nothing at all keeps the previous shot on screen a little longer
+// (the scene is merged into its neighbour, so the same clip is never shown twice)
+if (!scenes.some((s) => s.asset)) throw new Error('Не намерих нито един кадър — проверете ключовете и мрежата.');
 for (let i = 0; i < scenes.length; i++) {
     if (scenes[i].asset) continue;
-    const j = i > 0 ? i - 1 : scenes.findIndex((s) => s.asset);
-    if (j < 0) throw new Error('Не намерих нито един кадър — проверете ключовете и мрежата.');
-    scenes[i].asset = { ...scenes[j].asset, repeat: true };
+    const j = i > 0 ? i - 1 : i + 1;
+    const [lo, hi] = j < i ? [scenes[j], scenes[i]] : [scenes[i], scenes[j]];
+    scenes[j] = { ...scenes[j], from: lo.from, to: hi.to, start: lo.start, end: hi.end, text: `${lo.text} ${hi.text}` };
+    scenes.splice(i, 1);
+    i = Math.max(-1, Math.min(i, j) - 1);
 }
 writeFileSync(join(OUT, 'scenes.json'), JSON.stringify(scenes.map(({ asset, ...s }) => ({ ...s, asset: asset && { source: asset.source, kind: asset.kind, page: asset.page, author: asset.author, license: asset.license, score: asset.score, why: asset.why } })), null, 2));
 
@@ -326,6 +347,22 @@ const MOVES = [
     ["1.10", "(iw-iw/zoom)*(1-on/FR)", "ih/2-(ih/zoom/2)"],            // pan right → left
 ];
 const GRADE = 'eq=contrast=1.03:saturation=0.96';
+// Black bars baked into the picture (4:3 archival film in a 16:9 file, letterboxed scans):
+// found on a couple of seconds of the part that is used, then cropped away before filling the frame
+function detectCrop(file, start) {
+    const r = spawnSync('ffmpeg', ['-hide_banner', '-ss', start.toFixed(2), '-i', file, '-t', '2', '-vf', 'cropdetect=limit=24:round=2:reset=0', '-an', '-f', 'null', '-'], { encoding: 'utf8' });
+    const m = [...String(r.stderr).matchAll(/crop=(\d+):(\d+):(\d+):(\d+)/g)].pop();
+    const v = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', file], { encoding: 'utf8' }).stdout.trim().split(',').map(Number);
+    if (!m || !v[0]) return '';
+    const [w, h] = [Number(m[1]), Number(m[2])];
+    // only real bars: something removed, but most of the picture kept
+    if (w * h > v[0] * v[1] * 0.96 || w < v[0] * 0.5 || h < v[1] * 0.5) return '';
+    return `crop=${m[1]}:${m[2]}:${m[3]}:${m[4]},`;
+}
+function probeDuration(file) {
+    const r = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file], { encoding: 'utf8' });
+    return Number.parseFloat(r.stdout) || 0;
+}
 const clips = new Array(scenes.length);
 let clipDone = 0;
 await pool([...scenes.entries()], cpu, async ([i, s]) => {
@@ -334,8 +371,17 @@ await pool([...scenes.entries()], cpu, async ([i, s]) => {
     const out = join(WORK, `clip-${String(i).padStart(4, '0')}.mp4`);
     const enc = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-r', String(FPS)];
     if (s.asset.kind === 'video') {
-        await ffA(['-stream_loop', '-1', '-i', s.asset.file, '-t', d.toFixed(3), '-an',
-            '-vf', `scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=${FPS},setsar=1,${GRADE}`, ...enc, out]);
+        // The best part: the middle of the clip, past the first second (openings are often a
+        // fade-in, a title or a shaky start). Never looped: a clip that is too short is slowed down.
+        const D = probeDuration(s.asset.file) || s.asset.duration || d;
+        const skip = Math.min(1.5, D * 0.1);
+        const avail = Math.max(0.5, D - 2 * skip);
+        const slow = avail >= d ? 1 : Math.min(1.6, d / avail);
+        const start = avail * slow >= d ? skip + (avail - d / slow) / 2 : skip;
+        const bars = detectCrop(s.asset.file, start);
+        await ffA(['-ss', start.toFixed(3), '-i', s.asset.file, '-t', d.toFixed(3), '-an',
+            '-vf', `${bars}${slow > 1 ? `setpts=${slow.toFixed(3)}*PTS,` : ''}scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=${FPS},setsar=1,${GRADE},tpad=stop_mode=clone:stop_duration=${d.toFixed(3)}`,
+            '-frames:v', String(frames), ...enc, out]);
     } else {
         const [z, x, y] = MOVES[i % MOVES.length].map((e) => e.replace(/FR/g, String(frames)));
         await ffA(['-i', s.asset.file, '-frames:v', String(frames),
@@ -399,10 +445,10 @@ for (const s of scenes) {
     if (!credits.has(k)) credits.set(k, `${a.source}${a.author ? ` — ${a.author}` : ''}${a.license ? ` (${a.license})` : ''}${a.page ? `: ${a.page}` : ''}`);
 }
 const intro = paras.find((p) => p.length > 120) || paras[0];
-const desc = `${title}\n\n${intro.slice(0, 400)}${intro.length > 400 ? '…' : ''}\n\nОзвучено с изкуствен интелект (Gemini), илюстрирано със свободни кадри${aiUsed ? ' и няколко AI изображения' : ''}.\n\nКадри:\n${[...credits.values()].map((c) => `• ${c}`).join('\n')}\n`;
+const desc = `${title}\n\n${intro.slice(0, 400)}${intro.length > 400 ? '…' : ''}\n\nОзвучено с изкуствен интелект (Gemini), илюстрирано със свободни видеокадри и архивни материали.\n\nКадри:\n${[...credits.values()].map((c) => `• ${c}`).join('\n')}\n`;
 writeFileSync(join(OUT, 'description.txt'), desc);
 if (!opt.keep) rmSync(WORK, { recursive: true, force: true });
-log(`Готово: ${video} (${(statSync(video).size / 1048576).toFixed(1)} MB, ${(total / 60).toFixed(1)} мин, ${scenes.length} сцени, ${aiUsed} AI картини)`);
+log(`Готово: ${video} (${(statSync(video).size / 1048576).toFixed(1)} MB, ${(total / 60).toFixed(1)} мин, ${scenes.length} сцени, ${scenes.filter((x) => x.asset.kind === 'video').length} клипа, ${photoScenes} снимки)`);
 
 if (opt.upload) {
     const API = (process.env.LIBRARY_API || readFileSync(new URL('../../js/config.js', import.meta.url), 'utf8').match(/LIBRARY_API\s*=\s*'([^']+)'/)?.[1] || '').replace(/\/$/, '');

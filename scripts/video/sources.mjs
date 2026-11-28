@@ -1,8 +1,11 @@
 // Free picture and footage sources for the video pipeline (scripts/video/make-video.mjs).
 //
 // Each search returns candidates in one shape:
-//   { id, source, kind: 'photo'|'video', url, thumb, width, height, duration?, author, page, license }
-// Keyless: Wikimedia Commons, NASA Image Library, Openverse. With a free key (GitHub
+//   { id, source, kind: 'photo'|'video', url, thumb, width, height, duration?, author, page, license, resolve? }
+// (`resolve()` — when the file URL needs one more request, made only for the chosen shot.)
+// Footage first: Pixabay and Pexels (key), and without a key Wikimedia Commons video (archival
+// films, newsreels, microscopy, lectures — history and science) and NASA video (space, Earth,
+// physics). Photos (only when no footage fits): Wikimedia Commons, NASA, Openverse. With a free key (GitHub
 // secret): Pixabay (PIXABAY_API_KEY — photos and videos, no attribution required, results
 // kept 24 h), Pexels (PEXELS_API_KEY — attribution link to Pexels). Search parameters
 // follow MoneyPrinterTurbo (harry0703/MoneyPrinterTurbo, MIT): landscape, at least the
@@ -11,10 +14,19 @@
 const UA = 'Razkazvach-video/1.0 (https://github.com/Radilovk/tts)';
 const W = 1920, H = 1080;
 
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+// Wikimedia answers 429 quickly to parallel clients: its requests go one at a time, ~1 per second
+let commonsQueue = Promise.resolve();
+function commonsJson(url) {
+    const run = commonsQueue.then(() => getJson(url));
+    commonsQueue = run.catch(() => {}).then(() => sleep(1100));
+    return run;
+}
+
 async function getJson(url, headers = {}) {
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 4; i++) {
         const r = await fetch(url, { headers: { 'User-Agent': UA, ...headers } });
-        if (r.status === 429) { await new Promise((res) => setTimeout(res, 4000 * (i + 1))); continue; }
+        if (r.status === 429) { await sleep(5000 * (i + 1)); continue; }
         if (!r.ok) throw new Error(`${new URL(url).host}: HTTP ${r.status}`);
         return r.json();
     }
@@ -76,7 +88,7 @@ export async function wikimedia(query) {
         action: 'query', format: 'json', origin: '*', generator: 'search', gsrsearch: `${query} filetype:bitmap`,
         gsrnamespace: '6', gsrlimit: '15', prop: 'imageinfo', iiprop: 'url|size|extmetadata', iiurlwidth: '640',
     });
-    const d = await getJson(`https://commons.wikimedia.org/w/api.php?${params}`);
+    const d = await commonsJson(`https://commons.wikimedia.org/w/api.php?${params}`);
     return Object.values(d.query?.pages || {}).flatMap((p) => {
         const ii = p.imageinfo?.[0];
         const m = ii?.extmetadata || {};
@@ -85,6 +97,53 @@ export async function wikimedia(query) {
         return [{
             id: `commons-${p.pageid}`, source: 'Wikimedia Commons', kind: 'photo', url: ii.url, thumb: ii.thumburl,
             width: ii.width, height: ii.height, author: strip(m.Artist?.value).slice(0, 80), page: ii.descriptionurl, license: lic,
+        }];
+    });
+}
+
+// ---- Wikimedia Commons video (no key): public-domain films, newsreels, science footage ----
+// The original can be a huge WebM; a transcoded rendition (≤1080p) is used when there is one.
+export async function wikimediaVideo(query) {
+    const params = new URLSearchParams({
+        action: 'query', format: 'json', origin: '*', generator: 'search', gsrsearch: `${query} filetype:video`,
+        gsrnamespace: '6', gsrlimit: '15', prop: 'videoinfo', viprop: 'url|size|derivatives|extmetadata', viurlwidth: '640',
+    });
+    const d = await commonsJson(`https://commons.wikimedia.org/w/api.php?${params}`);
+    return Object.values(d.query?.pages || {}).flatMap((p) => {
+        const v = p.videoinfo?.[0];
+        const m = v?.extmetadata || {};
+        const lic = strip(m.LicenseShortName?.value);
+        // archival film is often 480p — still better than a still; tiny lab clips are not
+        if (!v || v.height < 360 || v.width < v.height * 1.2 || !(v.duration >= 3) || !FREE.test(lic) || !v.thumburl) return [];
+        const der = (v.derivatives || []).filter((x) => x.src && /webm|mp4/.test(x.type || '') && (x.height || 0) <= 1080)
+            .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+        const url = der?.src || (v.size < 300e6 ? v.url : '');
+        if (!url) return [];
+        return [{
+            id: `commons-v-${p.pageid}`, source: 'Wikimedia Commons', kind: 'video', url, thumb: v.thumburl,
+            width: der?.width || v.width, height: der?.height || v.height, duration: Math.round(v.duration),
+            author: strip(m.Artist?.value).slice(0, 80), page: v.descriptionurl, license: lic,
+        }];
+    });
+}
+
+// ---- NASA video (no key): space, Earth, physics, biology on the ISS ----
+// The file list is one more request (collection.json), made only for the shot that is chosen.
+export async function nasaVideo(query) {
+    const d = await getJson(`https://images-api.nasa.gov/search?${new URLSearchParams({ q: query, media_type: 'video', page_size: '15' })}`);
+    return (d.collection?.items || []).flatMap((it) => {
+        const meta = it.data?.[0] || {};
+        const thumb = (it.links || []).find((l) => l.rel === 'preview')?.href;
+        if (!thumb || !meta.nasa_id || !it.href) return [];
+        return [{
+            id: `nasa-v-${meta.nasa_id}`, source: 'NASA', kind: 'video', url: '', thumb: thumb.replace(/^http:/, 'https:'),
+            width: 0, height: 0, author: meta.center || 'NASA',
+            page: `https://images.nasa.gov/details/${encodeURIComponent(meta.nasa_id)}`, license: 'NASA (public domain unless noted)',
+            resolve: async () => {
+                const files = (await getJson(it.href.replace(/^http:/, 'https:'))).map((f) => String(f).replace(/^http:/, 'https:'));
+                // medium is ~720–1080p and a sensible size; orig can be several GB
+                return ['~medium.mp4', '~large.mp4', '~orig.mp4', '~mobile.mp4'].map((k) => files.find((f) => f.endsWith(k))).find(Boolean) || '';
+            },
         }];
     });
 }
@@ -117,7 +176,8 @@ export async function openverse(query) {
 // Every source that can answer, for one query; a failing source is skipped (logged)
 export async function searchAll(query, kind, keys, log = () => {}) {
     const jobs = kind === 'video'
-        ? [['Pixabay', () => pixabay(query, 'video', keys.pixabay)], ['Pexels', () => pexels(query, 'video', keys.pexels)]]
+        ? [['Pixabay', () => pixabay(query, 'video', keys.pixabay)], ['Pexels', () => pexels(query, 'video', keys.pexels)],
+            ['Wikimedia video', () => wikimediaVideo(query)], ['NASA video', () => nasaVideo(query)]]
         : [['Pixabay', () => pixabay(query, 'photo', keys.pixabay)], ['Pexels', () => pexels(query, 'photo', keys.pexels)],
             ['Wikimedia', () => wikimedia(query)], ['NASA', () => nasa(query)], ['Openverse', () => openverse(query)]];
     const out = await Promise.all(jobs.map(async ([name, fn]) => {
